@@ -33,21 +33,58 @@ pub const ROUTE_FILES: &str = "/v1/files/{org}/{name}/{version}/{*path}";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_IN_FLIGHT_REQUESTS: usize = 512;
+/// Body cap for the non-publish endpoints, which only accept small JSON
+/// (`claim_org`, `yank`) or no body at all. Publish overrides this with the
+/// artifact-sized limit.
+const JSON_BODY_LIMIT: usize = 64 * 1024;
+/// Default memory budget (bytes) for concurrently buffered artifact reads.
+/// `get_file` (and the local-storage `get_artifact` path) materialize a whole
+/// archive — up to `max_artifact_bytes` — in RAM. Bounding the number of such
+/// reads in flight keeps peak memory near this budget instead of
+/// `MAX_IN_FLIGHT_REQUESTS × max_artifact_bytes` (which trivially OOMs a
+/// memory-limited pod). Override with `ZED_ARTIFACT_SERVE_MEMORY_BUDGET_BYTES`.
+const DEFAULT_ARTIFACT_SERVE_BUDGET: usize = 256 * 1024 * 1024;
+
+/// How many artifact-buffering requests may run at once, given the per-read
+/// worst case (`max_artifact_bytes`) and the memory budget. At least 1, and
+/// never more than the global in-flight cap.
+fn artifact_serve_concurrency(max_artifact_bytes: usize) -> usize {
+    let budget = std::env::var("ZED_ARTIFACT_SERVE_MEMORY_BUDGET_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_ARTIFACT_SERVE_BUDGET);
+    (budget / max_artifact_bytes.max(1))
+        .clamp(1, MAX_IN_FLIGHT_REQUESTS)
+}
 
 pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
+    // The two endpoints that buffer a whole artifact in memory get their own,
+    // tighter concurrency limit so they can't exhaust pod memory even while
+    // the global limit still admits cheap JSON requests.
+    let artifact_routes = Router::new()
+        .route(ROUTE_ARTIFACT, get(artifacts::get_artifact))
+        .route(ROUTE_FILES, get(artifacts::get_file))
+        .layer(tower::limit::ConcurrencyLimitLayer::new(
+            artifact_serve_concurrency(max_artifact_bytes),
+        ));
+
+    // Only publish carries an artifact body; every other endpoint takes a
+    // small JSON document (or none). The 100 MB publish limit applied
+    // globally would let a client stream ~100 MB at the cheap JSON endpoints,
+    // so scope the large limit to publish and default the rest to 64 KiB.
+    let publish_route = Router::new()
+        .route(ROUTE_VERSION, get(packages::get_version).put(publish::publish))
+        .layer(DefaultBodyLimit::max(max_artifact_bytes));
+
     Router::new()
         .route("/healthz", get(healthz))
         .route(ROUTE_PACKAGE, get(packages::get_package))
-        .route(
-            ROUTE_VERSION,
-            get(packages::get_version).put(publish::publish),
-        )
         .route(ROUTE_YANK, post(yank::yank))
-        .route(ROUTE_ARTIFACT, get(artifacts::get_artifact))
         .route(ROUTE_SEARCH, get(search::search))
         .route(ROUTE_ORGS, post(orgs::claim_org))
-        .route(ROUTE_FILES, get(artifacts::get_file))
-        .layer(DefaultBodyLimit::max(max_artifact_bytes))
+        .merge(artifact_routes)
+        .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
+        .merge(publish_route)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         // Later layers wrap earlier ones: the timeout covers time spent
         // queued on the concurrency limit, and the header is set on every
