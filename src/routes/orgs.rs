@@ -211,6 +211,7 @@ mod tests {
             public_base_url: "http://localhost:8080".to_string(),
             max_orgs_per_token: 5,
             fiducia: None,
+            rate_limiter: None,
         })
     }
 

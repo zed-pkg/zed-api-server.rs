@@ -99,6 +99,15 @@ impl From<crate::files::ExtractError> for ApiErr {
                     crate::files::MAX_SERVED_FILE_BYTES
                 ),
             },
+            crate::files::ExtractError::InflationBudgetExceeded => Self {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                code: "archive_too_large",
+                message: format!(
+                    "this artifact inflates past the {} byte decompression budget; \
+                     download the artifact instead of requesting files from it",
+                    crate::files::max_inflated_bytes()
+                ),
+            },
             crate::files::ExtractError::Archive(err) => err.into(),
         }
     }

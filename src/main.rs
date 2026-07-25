@@ -3,6 +3,7 @@ mod config;
 mod entities;
 mod error;
 mod files;
+mod ratelimit;
 mod rbac;
 mod routes;
 mod state;
@@ -108,6 +109,14 @@ async fn main() -> Result<()> {
             None => fiducia_client::FiduciaClient::new(&f.url),
         })
     });
+    let rate_limiter = if std::env::var("ZED_RATE_LIMIT_DISABLED").as_deref() == Ok("1") {
+        tracing::warn!("per-token rate limiting is DISABLED (ZED_RATE_LIMIT_DISABLED=1)");
+        None
+    } else {
+        let limiter = Arc::new(ratelimit::RateLimiter::from_env());
+        ratelimit::spawn_sweeper(limiter.clone());
+        Some(limiter)
+    };
     let state = Arc::new(AppState {
         db,
         store,
@@ -115,6 +124,7 @@ async fn main() -> Result<()> {
         public_base_url: cfg.public_base_url.trim_end_matches('/').to_string(),
         max_orgs_per_token: cfg.max_orgs_per_token,
         fiducia,
+        rate_limiter,
     });
 
     let app = routes::router(state, cfg.max_artifact_bytes);

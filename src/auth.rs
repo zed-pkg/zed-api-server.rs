@@ -37,10 +37,10 @@ pub async fn require_token(
     if row.revoked_at.is_some() {
         return Err(ApiErr::unauthorized());
     }
-    if let Some(expires_at) = row.expires_at {
-        if expires_at <= chrono::Utc::now() {
-            return Err(ApiErr::unauthorized());
-        }
+    if let Some(expires_at) = row.expires_at
+        && expires_at <= chrono::Utc::now()
+    {
+        return Err(ApiErr::unauthorized());
     }
     Ok(row)
 }

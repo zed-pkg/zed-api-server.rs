@@ -87,6 +87,13 @@ pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
         .merge(artifact_routes)
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
         .merge(publish_route)
+        // Charge authenticated requests against their token's bucket before
+        // any handler work. Sits inside the timeout/concurrency layers so a
+        // rejected request never occupies an in-flight slot.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::ratelimit::layer,
+        ))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         // Later layers wrap earlier ones: the timeout covers time spent
         // queued on the concurrency limit, and the header is set on every
@@ -221,6 +228,7 @@ mod tests {
             public_base_url: "http://localhost:8080".to_string(),
             max_orgs_per_token: 5,
             fiducia: None,
+            rate_limiter: None,
         });
         let app = router(state, 1024 * 1024);
         let response = app
@@ -233,5 +241,95 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    async fn rate_limited_state(limiter: crate::ratelimit::RateLimiter) -> Arc<AppState> {
+        let dir = std::env::temp_dir().join("zed-api-rl-test-store");
+        Arc::new(AppState {
+            db: sea_orm::DatabaseConnection::Disconnected,
+            store: ArtifactStore::from_config(&crate::config::StorageConfig::Local {
+                dir: dir.to_string_lossy().to_string(),
+            })
+            .await
+            .unwrap(),
+            verifier: TagVerifier::new(TagPolicy::Off),
+            public_base_url: "http://localhost:8080".to_string(),
+            max_orgs_per_token: 5,
+            fiducia: None,
+            rate_limiter: Some(Arc::new(limiter)),
+        })
+    }
+
+    fn get_with_token(uri: &str, token: Option<&str>) -> axum::http::Request<axum::body::Body> {
+        let mut builder = axum::http::Request::builder().uri(uri);
+        if let Some(token) = token {
+            builder = builder.header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        builder.body(axum::body::Body::empty()).unwrap()
+    }
+
+    /// An over-quota token gets a 429 carrying Retry-After, and the limit is
+    /// per token: a second credential is unaffected.
+    #[tokio::test]
+    async fn exhausted_token_gets_429_with_retry_after() {
+        // One request, then effectively no refill for the test's duration.
+        let state = rate_limited_state(crate::ratelimit::RateLimiter::new(1, 0.001)).await;
+        let app = router(state, 1024 * 1024);
+
+        let first = app
+            .clone()
+            .oneshot(get_with_token("/healthz", Some("zpkg_alice")))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app
+            .clone()
+            .oneshot(get_with_token("/healthz", Some("zpkg_alice")))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after = second
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .expect("429 must carry Retry-After")
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .expect("Retry-After must be whole seconds");
+        assert!(retry_after >= 1);
+
+        // A different token has its own bucket.
+        let other = app
+            .clone()
+            .oneshot(get_with_token("/healthz", Some("zpkg_bob")))
+            .await
+            .unwrap();
+        assert_eq!(other.status(), StatusCode::OK);
+    }
+
+    /// Unauthenticated reads are not token-limited (the ingress owns per-IP
+    /// limiting); an exhausted token must not spill over onto them.
+    #[tokio::test]
+    async fn anonymous_requests_are_not_token_limited() {
+        let state = rate_limited_state(crate::ratelimit::RateLimiter::new(1, 0.001)).await;
+        let app = router(state, 1024 * 1024);
+
+        // Exhaust a token, then confirm anonymous traffic still flows.
+        for _ in 0..3 {
+            let _ = app
+                .clone()
+                .oneshot(get_with_token("/healthz", Some("zpkg_hog")))
+                .await
+                .unwrap();
+        }
+        for _ in 0..5 {
+            let response = app
+                .clone()
+                .oneshot(get_with_token("/healthz", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
     }
 }

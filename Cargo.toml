@@ -19,6 +19,8 @@ fiducia-client = { git = "https://github.com/fiducia-cloud/fiducia-clients.git" 
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
 axum = { version = "0.8", features = ["multipart"] }
+# Bytes flows from the multipart reader into storage without a re-copy.
+bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 flate2 = "1"
@@ -32,6 +34,8 @@ serde_json = "1"
 sha2 = "0.10"
 tar = "0.4"
 tokio = { version = "1", features = ["full"] }
+# ReaderStream, so artifact downloads stream from disk instead of buffering.
+tokio-util = { version = "0.7", features = ["io"] }
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.6", features = ["set-header", "timeout", "trace"] }
 tracing = "0.1"

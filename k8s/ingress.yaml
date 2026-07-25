@@ -15,6 +15,18 @@ metadata:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     # Publishes stream tarballs up to MAX_ARTIFACT_BYTES (100 MiB).
     nginx.ingress.kubernetes.io/proxy-body-size: "110m"
+    # Per-IP rate limiting lives HERE, not in the app: behind the controller
+    # every request carries the ingress pod's address, so the app can only
+    # limit per token (it does — see src/ratelimit.rs). nginx still sees the
+    # real client, so anonymous read abuse is capped here.
+    # Generous enough for a CI job installing a large dependency tree.
+    nginx.ingress.kubernetes.io/limit-rps: "50"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "5"
+    nginx.ingress.kubernetes.io/limit-connections: "50"
+    # Bound how long a slow client can hold an upstream worker; sits above the
+    # app's own 30s request timeout so the app's response wins normally.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
 spec:
   ingressClassName: nginx
   tls:

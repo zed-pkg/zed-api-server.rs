@@ -98,6 +98,7 @@ mod tests {
             public_base_url: "http://localhost:8080".to_string(),
             max_orgs_per_token: 5,
             fiducia: None,
+            rate_limiter: None,
         })
     }
 
@@ -183,8 +184,8 @@ mod tests {
         )
     }
 
-    fn is_yanked(state: &AppState) -> impl std::future::Future<Output = bool> + '_ {
-        async move {
+    async fn is_yanked(state: &AppState) -> bool {
+        {
             version::Entity::find()
                 .one(&state.db)
                 .await

@@ -33,6 +33,29 @@ pub async fn publish(
 ) -> ApiResult<Json<PublishResponse>> {
     let token = require_token(&state.db, &headers).await?;
 
+    // Authorize BEFORE buffering the body. The org comes from the URL, so the
+    // role check needs nothing from the multipart payload — and reading first
+    // meant a token without publish rights could still make the server buffer a
+    // full artifact (peak memory spent before authorization was even decided).
+    // The manifest is still checked against the URL below, so authorizing on the
+    // URL's org is equivalent.
+    let org_row = org::Entity::find()
+        .filter(org::Column::Slug.eq(&org_slug))
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| ApiErr {
+            status: StatusCode::NOT_FOUND,
+            code: "org_not_found",
+            message: format!(
+                "org `{org_slug}` does not exist; claim it first with `zed org claim {org_slug}`"
+            ),
+        })?;
+    crate::rbac::authorize_publish(
+        token.org_id,
+        crate::rbac::Role::parse(&token.role),
+        org_row.id,
+    )?;
+
     let (meta, artifact) = read_multipart(&mut multipart).await?;
 
     meta.manifest
@@ -59,23 +82,6 @@ pub async fn publish(
             ),
         ));
     }
-
-    let org_row = org::Entity::find()
-        .filter(org::Column::Slug.eq(&org_slug))
-        .one(&state.db)
-        .await?
-        .ok_or_else(|| ApiErr {
-            status: StatusCode::NOT_FOUND,
-            code: "org_not_found",
-            message: format!(
-                "org `{org_slug}` does not exist; claim it first with `zed org claim {org_slug}`"
-            ),
-        })?;
-    crate::rbac::authorize_publish(
-        token.org_id,
-        crate::rbac::Role::parse(&token.role),
-        org_row.id,
-    )?;
 
     match state
         .verifier
@@ -112,11 +118,14 @@ pub async fn publish(
         }
     }
 
-    // Store the blob before recording the row that references it.
+    // Store the blob before recording the row that references it. `Bytes` is
+    // moved (not re-copied) into the store; the length is captured first since
+    // the version row records it after the put.
     let key = artifact_key(&actual_sha, meta.format.extension());
+    let artifact_len = artifact.len() as i64;
     state
         .store
-        .put(&key, artifact.to_vec(), meta.format.content_type())
+        .put(&key, artifact, meta.format.content_type())
         .await?;
 
     // Upsert the package metadata and insert the version atomically: a failed
@@ -136,7 +145,7 @@ pub async fn publish(
         package_id: ActiveValue::Set(pkg.id),
         version: ActiveValue::Set(ver.clone()),
         sha256: ActiveValue::Set(actual_sha.clone()),
-        size: ActiveValue::Set(artifact.len() as i64),
+        size: ActiveValue::Set(artifact_len),
         format: ActiveValue::Set(meta.format.extension().to_string()),
         vcs_tag: ActiveValue::Set(meta.vcs_tag.clone()),
         vcs_commit: ActiveValue::Set(meta.vcs_commit.clone()),
@@ -370,6 +379,7 @@ mod tests {
             public_base_url: "http://localhost:8080".to_string(),
             max_orgs_per_token: 5,
             fiducia: None,
+            rate_limiter: None,
         })
     }
 

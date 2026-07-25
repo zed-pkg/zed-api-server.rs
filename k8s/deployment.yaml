@@ -35,8 +35,15 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: zed-api-server
+          # `main` is a MUTABLE tag. With IfNotPresent a node that already
+          # cached some older `main` never re-pulls, so replicas can silently
+          # serve different builds and a rollout is not reproducible. `Always`
+          # makes every pod start converge on the current `main`.
+          # The real fix is pinning by digest in the GitOps overlay
+          # (zed-infra/k8s/manifests/zed-api-server/overlays/prod) so the
+          # deployed revision is declared, reviewable, and rollback-able.
           image: ghcr.io/zed-pkg/zed-api-server:main
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 8080

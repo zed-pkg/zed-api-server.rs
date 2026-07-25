@@ -15,4 +15,7 @@ pub struct AppState {
     /// Distributed lock service; None → Postgres-only serialization (correct,
     /// just without cross-replica FIFO queueing/observability).
     pub fiducia: Option<Arc<FiduciaClient>>,
+    /// Per-token rate limiter; None disables limiting (tests, and
+    /// `ZED_RATE_LIMIT_DISABLED=1` for single-tenant self-hosting).
+    pub rate_limiter: Option<Arc<crate::ratelimit::RateLimiter>>,
 }
