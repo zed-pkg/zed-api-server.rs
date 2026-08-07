@@ -1,7 +1,13 @@
-# Public host for the registry API. Layer-2 per the contract (Ingress is
-# app-owned); the ingress-nginx controller + cert-manager ClusterIssuer are
-# Layer-1. DNS for zpkg.tech lives in zed-infra/terraform/cloudflare — keep the
-# record DNS-only until the certificate is issued (ACME HTTP-01 ordering).
+# STAGED, NOT APPLIED: deliberately absent from every kustomization (see
+# k8s/base/kustomization.yaml — bootstrap runs with auth/rate-limit/tag
+# verification disabled, so a public Ingress is gated on the DEN-534/DEN-535
+# promotion). Kept here so the public shape is reviewed ahead of time.
+#
+# api.zpkg.net and registry.zpkg.net both serve the API root today. When the
+# registry moves to a sub-path of the API server, the registry.zpkg.net rule
+# gains the path prefix (or an edge rewrite) — DNS stays the same. DNS lives
+# in zed-infra/terraform/cloudflare; records stay DNS-only until cert-manager
+# issues this certificate (ACME HTTP-01 ordering).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -13,27 +19,25 @@ metadata:
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    # Publishes stream tarballs up to MAX_ARTIFACT_BYTES (100 MiB).
-    nginx.ingress.kubernetes.io/proxy-body-size: "110m"
-    # Per-IP rate limiting lives HERE, not in the app: behind the controller
-    # every request carries the ingress pod's address, so the app can only
-    # limit per token (it does — see src/ratelimit.rs). nginx still sees the
-    # real client, so anonymous read abuse is capped here.
-    # Generous enough for a CI job installing a large dependency tree.
     nginx.ingress.kubernetes.io/limit-rps: "50"
-    nginx.ingress.kubernetes.io/limit-burst-multiplier: "5"
-    nginx.ingress.kubernetes.io/limit-connections: "50"
-    # Bound how long a slow client can hold an upstream worker; sits above the
-    # app's own 30s request timeout so the app's response wins normally.
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-body-size: 110m
 spec:
   ingressClassName: nginx
   tls:
-    - hosts: [registry.zpkg.tech]
+    - hosts: [api.zpkg.net, registry.zpkg.net]
       secretName: zed-api-server-tls
   rules:
-    - host: registry.zpkg.tech
+    - host: api.zpkg.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dd-zed-api-server
+                port:
+                  number: 8080
+    - host: registry.zpkg.net
       http:
         paths:
           - path: /
