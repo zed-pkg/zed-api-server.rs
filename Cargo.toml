@@ -10,7 +10,9 @@ repository = "https://github.com/zed-pkg/zed-api-server.rs"
 members = [".", "migration"]
 
 [dependencies]
-zed-interfaces = { path = "../zed-interfaces" }
+# Keep the service standalone-cloneable. This immutable revision is the same
+# compatibility boundary already exercised by the repository CI.
+zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "f141e4cfae31a74c679b46d1d4bb0146b20555f6" }
 migration = { path = "migration" }
 anyhow = "1"
 # Distributed locks/leases (fiducia.cloud). Blocking (ureq) client — call it

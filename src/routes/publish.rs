@@ -10,8 +10,8 @@ use axum::http::{HeaderMap, StatusCode};
 use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait,
-    QueryFilter, SqlErr, TransactionTrait,
+    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, SqlErr,
+    TransactionTrait,
 };
 use uuid::Uuid;
 use zed_interfaces::registry::{
@@ -129,14 +129,21 @@ pub async fn publish(
         .await?;
 
     // Upsert the package metadata and insert the version atomically: a failed
-    // version insert must never leave the package metadata rewritten (M1). Any
-    // failure past the blob `put` must also drop the just-stored blob (L3).
+    // version insert must never leave the package metadata rewritten (M1).
+    //
+    // Deliberately retain the content-addressed blob on metadata failure. An
+    // immediate "zero committed references" check is not sufficient for safe
+    // deletion: another process may have uploaded the same key and still be
+    // between its put and transaction commit. Deleting here can therefore let
+    // that request commit a version row that references a missing artifact.
+    // Garbage collection needs an age/lease boundary that excludes in-flight
+    // publishers; until then, an orphan is safer than a broken committed
+    // release (DEN-660, formal/package_publication.qnt).
     let txn = state.db.begin().await?;
     let pkg = match upsert_package(&txn, &org_row, &name, &meta).await {
         Ok(pkg) => pkg,
         Err(err) => {
             let _ = txn.rollback().await;
-            cleanup_unreferenced_blob(&state, &key).await;
             return Err(err);
         }
     };
@@ -158,10 +165,9 @@ pub async fn publish(
     match inserted {
         Ok(_) => txn.commit().await?,
         Err(err) => {
-            // Roll the metadata upsert back and drop the orphaned blob on every
-            // failure path (L3), then classify the error.
+            // Roll the metadata upsert back, retain the blob for any in-flight
+            // same-key publisher, then classify the error.
             let _ = txn.rollback().await;
-            cleanup_unreferenced_blob(&state, &key).await;
             // A concurrent publish can win the (package_id, version) unique
             // index between the check above and this insert; that is the same
             // immutability conflict, not an internal error.
@@ -176,34 +182,23 @@ pub async fn publish(
     }
 
     tracing::info!(org = %org_slug, name = %name, version = %ver, sha256 = %actual_sha, "published");
+    // Best-effort: the version is already committed, so an audit failure must
+    // not turn a successful publish into an error response (see `audit`).
+    crate::audit::record(
+        &state.db,
+        org_row.id,
+        &token,
+        zed_interfaces::registry::AuditAction::Publish,
+        format!("{org_slug}/{name}@{ver}"),
+        Some(format!("sha256={actual_sha}")),
+    )
+    .await;
     Ok(Json(PublishResponse {
         org: org_slug,
         name,
         version: ver,
         sha256: actual_sha,
     }))
-}
-
-/// Best-effort removal of a blob stored for a publish whose row insert lost
-/// the race. The racing winner may have stored the identical artifact (same
-/// sha256, same key), so only delete when no version row references the key;
-/// on any doubt (count fails), keep the blob.
-async fn cleanup_unreferenced_blob(state: &AppState, key: &str) {
-    match version::Entity::find()
-        .filter(version::Column::ArtifactKey.eq(key))
-        .count(&state.db)
-        .await
-    {
-        Ok(0) => {
-            if let Err(err) = state.store.delete(key).await {
-                tracing::warn!(key, error = %err, "failed to delete orphaned artifact blob");
-            }
-        }
-        Ok(_) => {}
-        Err(err) => {
-            tracing::warn!(key, error = %err, "skipping orphaned blob cleanup; reference check failed");
-        }
-    }
 }
 
 async fn read_multipart(multipart: &mut Multipart) -> ApiResult<(PublishMeta, Bytes)> {
@@ -278,6 +273,8 @@ async fn upsert_package<C: ConnectionTrait>(
         vcs: ActiveValue::Set(m.repository.vcs.to_string()),
         repo_url: ActiveValue::Set(m.repository.url.clone()),
         version_scheme: ActiveValue::Set(m.version_scheme.as_str().to_string()),
+        // Tags for multi-tag lookup are sourced from the manifest keywords.
+        tags: ActiveValue::Set(serde_json::json!(m.keywords)),
         created_at: ActiveValue::Set(Utc::now()),
     })
     .on_conflict(
@@ -287,6 +284,7 @@ async fn upsert_package<C: ConnectionTrait>(
                 package::Column::Vcs,
                 package::Column::RepoUrl,
                 package::Column::VersionScheme,
+                package::Column::Tags,
             ])
             .to_owned(),
     )
@@ -326,7 +324,7 @@ mod tests {
     use crate::config::{StorageConfig, TagPolicy};
     use crate::entities::{org, package, token, version};
     use crate::state::AppState;
-    use crate::storage::ArtifactStore;
+    use crate::storage::{ArtifactStore, artifact_key};
     use crate::verify::TagVerifier;
 
     const TOKEN_PLAINTEXT: &str = "zpkg_test_secret";
@@ -419,6 +417,7 @@ mod tests {
             vcs: ActiveValue::Set("git".to_string()),
             repo_url: ActiveValue::Set("https://github.com/acme/http-kit".to_string()),
             version_scheme: ActiveValue::Set("semver".to_string()),
+            tags: ActiveValue::Set(serde_json::json!([])),
             created_at: ActiveValue::Set(Utc::now()),
         }
         .insert(db)
@@ -544,5 +543,47 @@ mod tests {
             .await
             .unwrap();
         assert!(inserted.is_some(), "new version row must be committed");
+    }
+
+    /// DEN-660 / `committed_artifact_is_available`: a metadata transaction can
+    /// fail after the content-addressed put. The object must remain available
+    /// because another process may have the same key in flight and commit it
+    /// immediately after this request rolls back.
+    #[tokio::test]
+    async fn failed_metadata_transaction_retains_uploaded_blob() {
+        let db = test_db().await;
+        let (_org, pkg_id) = seed(&db, "ORIGINAL").await;
+        db.execute_unprepared(
+            "CREATE TRIGGER reject_package_update \
+             BEFORE UPDATE ON package \
+             BEGIN SELECT RAISE(ABORT, 'forced metadata failure'); END",
+        )
+        .await
+        .expect("install failure trigger");
+        let state = state_with(db).await;
+
+        let status = put_version(&state, "1.1.0", "UPDATED").await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let artifact = b"hi!";
+        let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(artifact));
+        let key = artifact_key(&sha, "tar.gz");
+        assert_eq!(
+            state.store.get_bytes(&key).await.expect("blob retained"),
+            artifact,
+            "failed transaction must not delete a key that another publisher may still commit"
+        );
+        assert_eq!(
+            description_of(&state.db, pkg_id).await.as_deref(),
+            Some("ORIGINAL"),
+            "metadata transaction must still roll back"
+        );
+        let inserted = version::Entity::find()
+            .filter(version::Column::PackageId.eq(pkg_id))
+            .filter(version::Column::Version.eq("1.1.0"))
+            .one(&state.db)
+            .await
+            .unwrap();
+        assert!(inserted.is_none(), "failed transaction must not add a row");
     }
 }

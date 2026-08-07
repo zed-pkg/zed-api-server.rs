@@ -1,0 +1,42 @@
+# Re-opens exactly what the cluster-local bootstrap API needs on top of the
+# tenant's default-deny policy. While authentication, rate limiting, tag
+# verification, and object storage are disabled, ingress-nginx and Internet
+# egress are intentionally absent. Public promotion must replace this policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dd-zed-api-server
+  namespace: zed
+spec:
+  podSelector:
+    matchLabels:
+      app: dd-zed-api-server
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - { protocol: TCP, port: 8080 }
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: zed
+      ports:
+        - { protocol: TCP, port: 8080 }
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app: zed-postgres
+      ports:
+        - { protocol: TCP, port: 5432 }

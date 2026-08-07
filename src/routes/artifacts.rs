@@ -32,6 +32,21 @@ pub async fn get_artifact(
         Download::Redirect(url) => {
             Ok((StatusCode::FOUND, [(header::LOCATION, url)]).into_response())
         }
+        // Process-memory downloads reuse the store's immutable ref-counted
+        // buffer. Body::from(Bytes) does not copy the artifact.
+        Download::Bytes { bytes } => Ok((
+            StatusCode::OK,
+            [
+                (
+                    header::CONTENT_TYPE,
+                    artifact_format(&row.format).content_type().to_string(),
+                ),
+                (header::CACHE_CONTROL, IMMUTABLE.to_string()),
+                (header::CONTENT_LENGTH, bytes.len().to_string()),
+            ],
+            Body::from(bytes),
+        )
+            .into_response()),
         // Streamed, never buffered: serving a 100 MB artifact costs a read
         // buffer, not 100 MB of resident memory per concurrent request.
         Download::File { file, len } => Ok((

@@ -1,3 +1,10 @@
 /target
 /.data
 /.env
+/.formal-artifacts
+/.formal-tools
+/_apalache-out
+tmp
+temp
+tmp/worktrees
+temp/worktrees

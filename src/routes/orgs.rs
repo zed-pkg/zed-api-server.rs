@@ -144,8 +144,9 @@ async fn claim_org_serialized(
             });
         }
     }
+    let new_org_id = Uuid::new_v4();
     let insert = org::ActiveModel {
-        id: ActiveValue::Set(Uuid::new_v4()),
+        id: ActiveValue::Set(new_org_id),
         slug: ActiveValue::Set(request.slug.clone()),
         created_at: ActiveValue::Set(Utc::now()),
         created_by_token: ActiveValue::Set(Some(token.id)),
@@ -165,6 +166,17 @@ async fn claim_org_serialized(
         return Err(err.into());
     }
     txn.commit().await?;
+    // Recorded against the newly created org, after commit (best-effort; see
+    // `audit`) so the trail shows who first took the namespace.
+    crate::audit::record(
+        &state.db,
+        new_org_id,
+        token,
+        zed_interfaces::registry::AuditAction::OrgClaim,
+        request.slug.clone(),
+        None,
+    )
+    .await;
     Ok(Json(ClaimOrgResponse {
         slug: request.slug.clone(),
         created: true,

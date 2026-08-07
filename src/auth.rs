@@ -1,6 +1,9 @@
 use axum::http::HeaderMap;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
+};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::entities::token;
 use crate::error::{ApiErr, ApiResult};
@@ -24,6 +27,9 @@ pub async fn require_token(
     db: &DatabaseConnection,
     headers: &HeaderMap,
 ) -> ApiResult<token::Model> {
+    if auth_disabled() {
+        return insecure_operator_token(db).await;
+    }
     let plaintext = bearer_token(headers).ok_or_else(ApiErr::unauthorized)?;
     let row = token::Entity::find()
         .filter(token::Column::TokenHash.eq(hash_token(&plaintext)))
@@ -43,6 +49,42 @@ pub async fn require_token(
         return Err(ApiErr::unauthorized());
     }
     Ok(row)
+}
+
+/// Explicit temporary bootstrap mode for a private/test registry. This is
+/// deliberately loud and opt-in; normal behavior remains bearer-token auth.
+pub fn auth_disabled() -> bool {
+    std::env::var("ZED_AUTH_DISABLED").as_deref() == Ok("1")
+}
+
+/// Return a durable synthetic admin token for auth-disabled mode. It is stored
+/// in the database (instead of returning an in-memory model) because org and
+/// audit rows have foreign keys to tokens.
+async fn insecure_operator_token(db: &DatabaseConnection) -> ApiResult<token::Model> {
+    let id = Uuid::from_u128(1);
+    if let Some(row) = token::Entity::find_by_id(id).one(db).await? {
+        return Ok(row);
+    }
+    let inserted = token::ActiveModel {
+        id: ActiveValue::Set(id),
+        name: ActiveValue::Set("auth-disabled-operator".to_string()),
+        token_hash: ActiveValue::Set(hash_token("zed-auth-disabled-operator")),
+        org_id: ActiveValue::Set(None),
+        role: ActiveValue::Set("admin".to_string()),
+        created_at: ActiveValue::Set(chrono::Utc::now()),
+        expires_at: ActiveValue::Set(None),
+        revoked_at: ActiveValue::Set(None),
+    }
+    .insert(db)
+    .await;
+    match inserted {
+        Ok(row) => Ok(row),
+        // Another first request may have inserted it concurrently.
+        Err(error) => token::Entity::find_by_id(id)
+            .one(db)
+            .await?
+            .ok_or_else(|| error.into()),
+    }
 }
 
 #[cfg(test)]

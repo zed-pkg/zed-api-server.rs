@@ -30,6 +30,12 @@ pub struct FiduciaConfig {
 
 #[derive(Debug, Clone)]
 pub enum StorageConfig {
+    /// Process-local, bounded artifact storage for disposable publish and
+    /// install certification. Every restart starts empty; never use this as a
+    /// durable production registry.
+    Memory {
+        max_bytes: u64,
+    },
     Local {
         dir: String,
     },
@@ -56,6 +62,15 @@ fn env_or(key: &str, default: &str) -> String {
 impl Config {
     pub fn from_env() -> Result<Self> {
         let storage = match env_or("STORAGE_BACKEND", "local").as_str() {
+            "memory" => {
+                let max_bytes = env_or("STORAGE_MEMORY_MAX_BYTES", "268435456")
+                    .parse::<u64>()
+                    .context("STORAGE_MEMORY_MAX_BYTES must be a number")?;
+                if max_bytes == 0 {
+                    bail!("STORAGE_MEMORY_MAX_BYTES must be greater than zero");
+                }
+                StorageConfig::Memory { max_bytes }
+            }
             "local" => StorageConfig::Local {
                 dir: env_or("STORAGE_LOCAL_DIR", ".data/artifacts"),
             },
@@ -65,7 +80,7 @@ impl Config {
                 region: env_or("S3_REGION", "auto"),
                 force_path_style: env_or("S3_FORCE_PATH_STYLE", "true") == "true",
             },
-            other => bail!("STORAGE_BACKEND must be local or s3, got `{other}`"),
+            other => bail!("STORAGE_BACKEND must be memory, local, or s3, got `{other}`"),
         };
         let verify_tags = match env_or("ZED_VERIFY_TAGS", "off").as_str() {
             "off" => TagPolicy::Off,

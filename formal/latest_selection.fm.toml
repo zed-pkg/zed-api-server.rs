@@ -1,0 +1,39 @@
+# Second schema-v1 fmctl model for DEN-731. The separate manifest keeps latest
+# selection and yank state independent from the publication-finalization state
+# space while retaining the same pinned runner and verifier contract.
+schema_version = 1
+project = "zed-api-server"
+model = "latest-selection"
+language = "quint"
+spec = "formal/latest_selection.qnt"
+main = "latest_selection"
+init = "init"
+step = "step"
+invariants = ["selection_safety"]
+witnesses = [
+  "out_of_order_publish_reached",
+  "yank_latest_reached",
+  "restore_newer_reached",
+  "idempotent_replay_reached",
+  "all_yanked_reached",
+]
+
+[toolchain]
+quint = "0.32.0"
+java = ">=17"
+node = "22"
+npx = "npx"
+
+[execution]
+timeout_seconds = 600
+max_output_bytes = 8388608
+artifacts_dir = ".formal-artifacts/latest-selection"
+
+[simulation]
+backend = "typescript"
+max_samples = 5000
+max_steps = 12
+
+[verification]
+backend = "tlc"
+exhaustive_finite_model = true

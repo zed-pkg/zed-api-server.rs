@@ -1,0 +1,225 @@
+name: registry publish e2e
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - migration/**
+      - src/**
+      - .github/workflows/registry-publish-e2e.yml
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - migration/**
+      - src/**
+      - .github/workflows/registry-publish-e2e.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zed-registry-publish-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  ZED_CLI_SHA: 8929a58c6591c7a964d7f91412665d7c8a4afdf3
+  ZED_PKG_REGISTRY: http://127.0.0.1:8080
+  ZED_PKG_TOKEN: ci-admin-token
+  ZED_PKG_ALLOW_NO_MANIFEST: "1"
+  ZED_PKG_INSTALL_MODE: copy
+
+jobs:
+  publish-install-roundtrip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.2-pg17-bookworm
+        env:
+          POSTGRES_USER: zed
+          POSTGRES_PASSWORD: zed
+          POSTGRES_DB: zed
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U zed -d zed"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Check out only the registry server
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: stable
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+      - name: Build the locked registry and install the reviewed Zed CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --quiet --locked
+          cargo install --quiet \
+            --git https://github.com/zed-pkg/zed-cli.git \
+            --rev "$ZED_CLI_SHA" \
+            --locked \
+            --root "$RUNNER_TEMP/zed-cli"
+          "$RUNNER_TEMP/zed-cli/bin/zed" --help >/dev/null
+      - name: Start the real Rust registry against Postgres with pgvector
+        shell: bash
+        env:
+          DATABASE_URL: postgres://zed:zed@127.0.0.1:5432/zed
+          AUTO_MIGRATE: "true"
+          BIND_ADDR: 127.0.0.1:8080
+          PUBLIC_BASE_URL: http://127.0.0.1:8080
+          STORAGE_BACKEND: local
+          STORAGE_LOCAL_DIR: ${{ runner.temp }}/artifacts
+          ZED_VERIFY_TAGS: "off"
+          ZED_AUTH_DISABLED: "1"
+          ZED_RATE_LIMIT_DISABLED: "1"
+          DB_CONNECT_MAX_WAIT_SECS: "30"
+          RUST_LOG: info
+        run: |
+          set -euo pipefail
+          mkdir -p "$STORAGE_LOCAL_DIR"
+          ./target/debug/zed-api-server >"$RUNNER_TEMP/zed-api.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/zed-api.pid"
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/zed-api.log"
+          exit 1
+      - name: Prepare a tagged package and manifestless consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$RUNNER_TEMP/package"
+          consumer_dir="$RUNNER_TEMP/consumer"
+          mkdir -p "$package_dir" "$consumer_dir" "$RUNNER_TEMP/zed-home"
+          printf 'PACKAGE_DIR=%s\nCONSUMER_DIR=%s\nZED_PKG_HOME=%s\n' \
+            "$package_dir" "$consumer_dir" "$RUNNER_TEMP/zed-home" >>"$GITHUB_ENV"
+          cat >"$package_dir/.zpkg.toml" <<'TOML'
+          [package]
+          org = "e2e"
+          name = "registry-smoke"
+          version = "0.1.0"
+          description = "Real zed-api-server publish and install fixture"
+          license = "MIT"
+
+          [package.repository]
+          vcs = "git"
+          url = "https://github.com/zed-pkg/zed-api-server.rs"
+
+          [publish]
+          include_readme = true
+          tag_format = "v{version}"
+          smoke_test = "test -f \"$ZED_PKG_TEST_TARGET/hello.txt\""
+          TOML
+          printf 'hello from the real registry\n' >"$package_dir/hello.txt"
+          printf '# registry smoke fixture\n' >"$package_dir/README.md"
+          git -C "$package_dir" init -q
+          git -C "$package_dir" config user.name "Zed Registry E2E"
+          git -C "$package_dir" config user.email "zed-registry-e2e@example.invalid"
+          git -C "$package_dir" add .
+          git -C "$package_dir" commit -qm "test fixture"
+          git -C "$package_dir" tag v0.1.0
+      - name: Claim the organization through the public CLI contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/zed-cli/bin/zed" org claim e2e
+      - name: Publish the tagged artifact through the multipart HTTP endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PACKAGE_DIR"
+          "$RUNNER_TEMP/zed-cli/bin/zed" publish
+      - name: Install and verify the package in a manifestless consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$CONSUMER_DIR"
+          "$RUNNER_TEMP/zed-cli/bin/zed" install e2e/registry-smoke@0.1.0 --skip-manifest
+          find zed_modules -type f -name hello.txt -print -quit | grep -q .
+          grep -R "hello from the real registry" zed_modules >/dev/null
+      - name: Restore the exact artifact from the frozen lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$CONSUMER_DIR"
+          "$RUNNER_TEMP/zed-cli/bin/zed" uninstall
+          "$RUNNER_TEMP/zed-cli/bin/zed" install --frozen --skip-manifest
+          grep -R "hello from the real registry" zed_modules >/dev/null
+      - name: Verify canonical package metadata from the server
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata=$(curl -fsS \
+            http://127.0.0.1:8080/v1/packages/e2e/registry-smoke/versions/0.1.0)
+          printf '%s\n' "$metadata" | jq .
+          printf '%s\n' "$metadata" \
+            | jq -e '
+                . as $metadata
+                | $metadata.org == "e2e"
+                and $metadata.name == "registry-smoke"
+                and $metadata.version == "0.1.0"
+                and $metadata.format == "tar.gz"
+                and ($metadata.sha256 | test("^[0-9a-f]{64}$"))
+                and ($metadata.download_url
+                  | endswith("/v1/artifacts/" + $metadata.sha256))
+                and $metadata.yanked == false
+              ' >/dev/null
+      - name: Verify idempotency and immutable version contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$PACKAGE_DIR/.zed"
+          test -z "$(git -C "$PACKAGE_DIR" status --porcelain)"
+
+          identical_output=$(cd "$PACKAGE_DIR" && "$RUNNER_TEMP/zed-cli/bin/zed" publish 2>&1)
+          printf '%s\n' "$identical_output"
+          printf '%s\n' "$identical_output" \
+            | grep -Eiq 'already published.*identical|identical sha256|skipping'
+
+          printf 'changed content for immutable-version rejection\n' >"$PACKAGE_DIR/hello.txt"
+          git -C "$PACKAGE_DIR" add hello.txt
+          git -C "$PACKAGE_DIR" commit -qm "mutate immutable fixture"
+          git -C "$PACKAGE_DIR" tag -f v0.1.0 >/dev/null
+          rm -rf "$PACKAGE_DIR/.zed"
+          test -z "$(git -C "$PACKAGE_DIR" status --porcelain)"
+
+          set +e
+          changed_output=$(cd "$PACKAGE_DIR" && "$RUNNER_TEMP/zed-cli/bin/zed" publish 2>&1)
+          changed_status=$?
+          set -e
+          printf '%s\n' "$changed_output"
+          test "$changed_status" -ne 0
+          printf '%s\n' "$changed_output" \
+            | grep -Eiq 'version_exists|already exists|immutable|different sha256'
+      - name: Print registry and filesystem diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          printf '%s\n' '--- registry log ---'
+          cat "$RUNNER_TEMP/zed-api.log" || true
+          printf '%s\n' '--- package tree ---'
+          find "${PACKAGE_DIR:-$RUNNER_TEMP/package}" -maxdepth 3 -type f -print 2>/dev/null || true
+          printf '%s\n' '--- consumer tree ---'
+          find "${CONSUMER_DIR:-$RUNNER_TEMP/consumer}" -maxdepth 5 -type f -print 2>/dev/null || true
+      - name: Stop the registry
+        if: always()
+        shell: bash
+        run: |
+          if test -f "$RUNNER_TEMP/zed-api.pid"; then
+            kill "$(cat "$RUNNER_TEMP/zed-api.pid")" 2>/dev/null || true
+          fi

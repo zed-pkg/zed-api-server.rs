@@ -1,0 +1,102 @@
+# dd-zed-api-server — temporary bootstrap profile: Postgres metadata and
+# artifact tarballs/zip files in bounded Rust process memory. This intentionally
+# avoids R2/S3 while package fan-out is exercised end to end.
+#
+# Layer-2 (app-owned) manifest: namespace-scoped ONLY. The `zed` Namespace, its
+# ResourceQuota/LimitRange and the default-deny NetworkPolicy are Layer-1, owned by
+# ORESoftware/k8s-cluster (remote/argocd/projects/zed.tenant.yaml). Do NOT add a
+# Namespace/ClusterRole/CRD here — the `zed` AppProject enforces
+# clusterResourceWhitelist: [] and the sync will fail.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dd-zed-api-server
+  namespace: zed
+  labels:
+    app: dd-zed-api-server
+    app.kubernetes.io/name: dd-zed-api-server
+    app.kubernetes.io/part-of: zed
+spec:
+  # Process memory is replica-local. Keep one replica until shared object
+  # storage is enabled; multiple replicas would return intermittent artifact
+  # 404s.
+  replicas: 1
+  # RollingUpdate may temporarily run two pods with unrelated in-process
+  # artifact stores. Recreate preserves a single storage owner throughout
+  # bootstrap promotion.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: dd-zed-api-server
+  template:
+    metadata:
+      labels:
+        app: dd-zed-api-server
+        app.kubernetes.io/name: dd-zed-api-server
+        app.kubernetes.io/part-of: zed
+    spec:
+      # Talks only to namespace-local Postgres and DNS in this bootstrap profile;
+      # it never calls the Kubernetes API.
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: zed-ghcr
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: zed-api-server
+          # `main` is a compatibility placeholder for source rendering. The
+          # deployment controller resolves the reviewed commit tag to a digest
+          # and replaces this value before applying anything to a cluster.
+          image: ghcr.io/zed-pkg/zed-api-server:main
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - { name: BIND_ADDR, value: "0.0.0.0:8080" }
+            - { name: PUBLIC_BASE_URL, value: "https://registry.zpkg.tech" }
+            - { name: STORAGE_BACKEND, value: "memory" }
+            # Keep artifact bytes below half the pod's 512 MiB limit so Tokio,
+            # multipart parsing, metadata, and archive extraction retain
+            # explicit headroom. The server rejects writes over this total.
+            - { name: STORAGE_MEMORY_MAX_BYTES, value: "268435456" }
+            # TEMPORARY bootstrap posture. Restore all three controls before
+            # adding any public API route.
+            - { name: ZED_AUTH_DISABLED, value: "1" }
+            - { name: ZED_RATE_LIMIT_DISABLED, value: "1" }
+            - { name: ZED_VERIFY_TAGS, value: "off" }
+            - { name: AUTO_MIGRATE, value: "true" }
+            - { name: MAX_ARTIFACT_BYTES, value: "104857600" }
+            - { name: RUST_LOG, value: "info" }
+            # TEMPORARY bootstrap database. The platform layer runs an
+            # in-memory Postgres in this namespace with trust auth and an
+            # ingress policy limited to Zed pods. Restore the ExternalSecret
+            # before switching to durable production metadata.
+            - { name: DATABASE_URL, value: "postgres://zed@zed-postgres.zed.svc.cluster.local:5432/zed" }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 1, memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+          lifecycle:
+            preStop:
+              exec: { command: ["sleep", "5"] }
+      volumes:
+        - name: tmp
+          emptyDir: {}

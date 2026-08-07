@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dd-zed-api-server
+  namespace: zed
+  labels:
+    app: dd-zed-api-server
+    app.kubernetes.io/part-of: zed
+spec:
+  type: ClusterIP
+  selector:
+    app: dd-zed-api-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

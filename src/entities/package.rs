@@ -12,6 +12,11 @@ pub struct Model {
     pub repo_url: String,
     #[sea_orm(default_value = "semver")]
     pub version_scheme: String,
+    /// Free-form tags for multi-tag lookup. A JSON array of strings; jsonb on
+    /// Postgres (GIN-indexed for containment/overlap), text on the SQLite test
+    /// backend. Defaults to `[]`.
+    #[sea_orm(column_type = "Json")]
+    pub tags: Json,
     pub created_at: DateTimeUtc,
 }
 

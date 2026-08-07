@@ -10,3 +10,11 @@ path = "src/lib.rs"
 
 [dependencies]
 sea-orm-migration = { version = "1", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
+
+# The upgrade-path test drives the migrations against in-memory SQLite, so the
+# path that ships is the one that is exercised.
+[dev-dependencies]
+chrono = "0.4"
+sea-orm = { version = "1", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+uuid = { version = "1", features = ["v4"] }

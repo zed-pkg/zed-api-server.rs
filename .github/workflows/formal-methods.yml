@@ -1,0 +1,112 @@
+name: Formal methods
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  registry-safety:
+    name: fmctl + Quint registry safety
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      NO_COLOR: '1'
+      RUST_BACKTRACE: '1'
+    steps:
+      - name: Checkout Zed API server
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # fmctl is still incubating in opto-sync while DEN-580 extracts the same
+      # manifest/process contract into ORESoftware/formal-methods.rs. Pin the
+      # exact source revision so verifier behavior cannot drift under this job.
+      - name: Checkout the pinned fmctl incubator
+        uses: actions/checkout@v4
+        with:
+          repository: opto-sync/opto-sync-clients
+          ref: c2146ef9f054d24e1488c216547852aa148285cf
+          path: .formal-tools/opto-sync-clients
+          persist-credentials: false
+
+      - name: Install the fmctl Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Java for TLC
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Build the pinned fmctl runner
+        run: |
+          # Build outside the Zed Cargo workspace. Leaving the standalone crate
+          # beneath this repository makes Cargo discover the product workspace
+          # and resolve product-only path dependencies before compiling fmctl.
+          mkdir -p "$RUNNER_TEMP/fmctl-source"
+          cp -R .formal-tools/opto-sync-clients/tools/fmctl/. "$RUNNER_TEMP/fmctl-source/"
+          cargo build \
+            --locked \
+            --release \
+            --manifest-path "$RUNNER_TEMP/fmctl-source/Cargo.toml"
+          echo "FMCTL=$RUNNER_TEMP/fmctl-source/target/release/fmctl" >> "$GITHUB_ENV"
+
+      - name: Validate both formal-methods manifests
+        run: |
+          mkdir -p .formal-artifacts/fmctl .formal-artifacts/latest-selection
+          "$FMCTL" --format json validate \
+            | tee .formal-artifacts/fmctl/validate.json
+          "$FMCTL" \
+            --manifest formal/latest_selection.fm.toml \
+            --format json \
+            validate \
+            | tee .formal-artifacts/latest-selection/validate.json
+
+      - name: Record and validate the formal toolchain
+        run: |
+          "$FMCTL" --format json doctor \
+            | tee .formal-artifacts/fmctl/doctor.json
+
+      - name: Type-check both registry models
+        run: |
+          "$FMCTL" check
+          "$FMCTL" --manifest formal/latest_selection.fm.toml check
+
+      - name: Reach every configured registry witness
+        run: |
+          "$FMCTL" simulate
+          "$FMCTL" --manifest formal/latest_selection.fm.toml simulate
+
+      - name: Exhaust both finite registry state graphs
+        run: |
+          "$FMCTL" verify
+          "$FMCTL" --manifest formal/latest_selection.fm.toml verify
+
+      - name: Upload model-checker evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-api-registry-formal-methods
+          path: |
+            .formal-artifacts/
+            formal/fm.toml
+            formal/latest_selection.fm.toml
+            formal/latest_selection.qnt
+            formal/package_publication.qnt
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Query, State};
 use sea_orm::sea_query::LikeExpr;
-use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QuerySelect};
 use serde::Deserialize;
 use zed_interfaces::registry::{PackageSummary, SearchResponse};
 
@@ -17,6 +17,26 @@ use crate::state::AppState;
 pub struct SearchParams {
     #[serde(default)]
     q: String,
+    /// Optional comma-separated tag filter; a result must carry every tag.
+    #[serde(default)]
+    tags: Option<String>,
+}
+
+/// Parse the comma-separated `tags` query param into a normalized list.
+pub(super) fn parse_tag_filter(raw: &Option<String>) -> Vec<String> {
+    raw.as_deref()
+        .map(|s| {
+            s.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// True if `have` contains every tag in `want` (AND semantics).
+pub(super) fn has_all_tags(have: &[String], want: &[String]) -> bool {
+    want.iter().all(|w| have.iter().any(|h| h == w))
 }
 
 /// Neutralize LIKE wildcards in user queries so `%`/`_` match literally
@@ -46,21 +66,25 @@ pub async fn search(
         .limit(50)
         .all(&state.db)
         .await?;
+    let want_tags = parse_tag_filter(&params.tags);
     let mut items = Vec::with_capacity(rows.len());
     for (pkg, org_row) in rows {
         let Some(org_row) = org_row else { continue };
-        let latest = version::Entity::find()
+        let tags = super::tags_of(&pkg);
+        if !has_all_tags(&tags, &want_tags) {
+            continue;
+        }
+        let versions = version::Entity::find()
             .filter(version::Column::PackageId.eq(pkg.id))
-            .filter(version::Column::Yanked.eq(false))
-            .order_by_desc(version::Column::PublishedAt)
-            .one(&state.db)
-            .await?
-            .map(|v| v.version);
+            .all(&state.db)
+            .await?;
+        let latest = super::latest_visible_version(&versions);
         items.push(PackageSummary {
             org: org_row.slug,
             name: pkg.name,
             description: pkg.description,
             latest,
+            tags,
         });
     }
     Ok(Json(SearchResponse {
@@ -72,6 +96,21 @@ pub async fn search(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tag_filter_parsing_and_matching() {
+        assert_eq!(
+            parse_tag_filter(&Some("cli, http ,,web".into())),
+            vec!["cli", "http", "web"]
+        );
+        assert!(parse_tag_filter(&None).is_empty());
+        assert!(parse_tag_filter(&Some("  ".into())).is_empty());
+
+        let have = vec!["cli".to_string(), "rust".to_string(), "http".to_string()];
+        assert!(has_all_tags(&have, &["cli".into(), "http".into()])); // all present
+        assert!(has_all_tags(&have, &[])); // no filter matches everything
+        assert!(!has_all_tags(&have, &["cli".into(), "python".into()])); // one missing
+    }
 
     #[test]
     fn like_escaping_neutralizes_wildcards() {

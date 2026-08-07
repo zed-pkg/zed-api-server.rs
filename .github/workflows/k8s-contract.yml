@@ -1,0 +1,67 @@
+name: k8s contract
+
+on:
+  push:
+    branches: [main]
+    paths: ['k8s/**', '.github/workflows/k8s-contract.yml']
+  pull_request:
+    paths: ['k8s/**', '.github/workflows/k8s-contract.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Render AWS overlay
+        run: kubectl kustomize k8s/overlays/aws > /tmp/aws.yaml
+
+      - name: Render Hetzner overlay
+        run: kubectl kustomize k8s/overlays/hetzner > /tmp/hetzner.yaml
+
+      - name: Verify bounded process-memory singleton bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          for rendered in /tmp/aws.yaml /tmp/hetzner.yaml; do
+            grep -q 'replicas: 1' "$rendered"
+            grep -q 'strategy:' "$rendered"
+            grep -q 'type: Recreate' "$rendered"
+            grep -q 'name: STORAGE_BACKEND' "$rendered"
+            grep -q 'value: memory' "$rendered"
+            grep -q 'name: STORAGE_MEMORY_MAX_BYTES' "$rendered"
+            grep -Eq 'value: "?268435456"?' "$rendered"
+            ! grep -q 'name: STORAGE_LOCAL_DIR' "$rendered"
+            ! grep -q 'mountPath: /var/lib/zed/artifacts' "$rendered"
+            ! grep -q 'medium: Memory' "$rendered"
+            grep -q 'name: ZED_AUTH_DISABLED' "$rendered"
+            grep -q 'name: ZED_RATE_LIMIT_DISABLED' "$rendered"
+            grep -q 'name: ZED_VERIFY_TAGS' "$rendered"
+            grep -q 'image: ghcr.io/zed-pkg/zed-api-server:main' "$rendered"
+          done
+
+      - name: Prove temporary bypasses are cluster-local
+        shell: bash
+        run: |
+          set -euo pipefail
+          for rendered in /tmp/aws.yaml /tmp/hetzner.yaml; do
+            ! grep -q '^kind: Ingress$' "$rendered"
+            ! grep -q 'cert-manager.io/cluster-issuer' "$rendered"
+            ! grep -q 'kubernetes.io/metadata.name: ingress-nginx' "$rendered"
+            ! grep -q 'cidr: 0.0.0.0/0' "$rendered"
+            ! grep -q 'port: 443' "$rendered"
+            ! grep -q 'port: 6543' "$rendered"
+            grep -q 'kubernetes.io/metadata.name: observability' "$rendered"
+            grep -q 'app.kubernetes.io/part-of: zed' "$rendered"
+            grep -q 'app: zed-postgres' "$rendered"
+            grep -q 'kind: Service' "$rendered"
+            grep -q 'type: ClusterIP' "$rendered"
+          done
+          grep -q 'registry.aws.zpkg.tech' /tmp/aws.yaml
+          grep -q 'registry.hetzner.zpkg.tech' /tmp/hetzner.yaml

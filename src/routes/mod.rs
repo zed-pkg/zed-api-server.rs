@@ -4,10 +4,13 @@
 //! and every client cannot disagree on the URL scheme.
 
 mod artifacts;
+mod audit;
+mod list;
 mod orgs;
 mod packages;
 mod publish;
 mod search;
+mod semantic;
 mod yank;
 
 use std::sync::Arc;
@@ -28,7 +31,12 @@ pub const ROUTE_VERSION: &str = "/v1/packages/{org}/{name}/versions/{version}";
 pub const ROUTE_YANK: &str = "/v1/packages/{org}/{name}/versions/{version}/yank";
 pub const ROUTE_ARTIFACT: &str = "/v1/artifacts/{sha256}";
 pub const ROUTE_SEARCH: &str = "/v1/search";
+pub const ROUTE_PACKAGES_LIST: &str = "/v1/packages";
+pub const ROUTE_SEMANTIC: &str = "/v1/search/semantic";
+pub const ROUTE_EMBEDDING: &str = "/v1/packages/{org}/{name}/embedding";
 pub const ROUTE_ORGS: &str = "/v1/orgs";
+pub const ROUTE_AUDIT: &str = "/v1/orgs/{org}/audit";
+pub const ROUTE_AUDIT_VERIFY: &str = "/v1/orgs/{org}/audit/verify";
 pub const ROUTE_FILES: &str = "/v1/files/{org}/{name}/{version}/{*path}";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -80,10 +88,18 @@ pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
 
     Router::new()
         .route("/healthz", get(healthz))
+        .route(ROUTE_PACKAGES_LIST, get(list::list_packages))
         .route(ROUTE_PACKAGE, get(packages::get_package))
+        .route(
+            ROUTE_EMBEDDING,
+            axum::routing::put(semantic::upsert_embedding),
+        )
         .route(ROUTE_YANK, post(yank::yank))
         .route(ROUTE_SEARCH, get(search::search))
+        .route(ROUTE_SEMANTIC, post(semantic::semantic_search))
         .route(ROUTE_ORGS, post(orgs::claim_org))
+        .route(ROUTE_AUDIT, get(audit::get_audit_log))
+        .route(ROUTE_AUDIT_VERIFY, get(audit::verify_audit_log))
         .merge(artifact_routes)
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
         .merge(publish_route)
@@ -147,6 +163,39 @@ pub(super) fn sort_versions_desc(versions: &mut [String]) {
     zed_interfaces::version::sort_desc(versions);
 }
 
+/// Return every visible version in deterministic version-identity order.
+///
+/// `published_at` is deliberately irrelevant: backfilling an older release
+/// must not make it newer than an already-published higher version. Keeping
+/// yank filtering and ordering in this one helper also prevents package,
+/// listing, and search endpoints from disagreeing about `latest`.
+pub(super) fn visible_versions_desc(rows: &[version::Model]) -> Vec<String> {
+    let mut versions: Vec<String> = rows
+        .iter()
+        .filter(|row| !row.yanked)
+        .map(|row| row.version.clone())
+        .collect();
+    sort_versions_desc(&mut versions);
+    versions
+}
+
+pub(super) fn latest_visible_version(rows: &[version::Model]) -> Option<String> {
+    visible_versions_desc(rows).into_iter().next()
+}
+
+/// Extract a package's tags (stored as a JSON array of strings) into a Vec.
+/// Tolerates a malformed/legacy value by yielding an empty list.
+pub(super) fn tags_of(pkg: &package::Model) -> Vec<String> {
+    pkg.tags
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Parse the stored `format` column ("tar.gz" / "zip") back into the shared
 /// enum; unknown spellings fall back to the default (tar.gz).
 pub(super) fn artifact_format(format: &str) -> ArtifactFormat {
@@ -185,7 +234,48 @@ mod tests {
     use crate::storage::ArtifactStore;
     use crate::verify::TagVerifier;
     use axum::http::StatusCode;
+    use chrono::{Duration, Utc};
     use tower::util::ServiceExt;
+    use uuid::Uuid;
+
+    fn version_row(identity: &str, yanked: bool, published_offset: i64) -> version::Model {
+        version::Model {
+            id: Uuid::new_v4(),
+            package_id: Uuid::nil(),
+            version: identity.to_string(),
+            sha256: "a".repeat(64),
+            size: 1,
+            format: "tar.gz".to_string(),
+            vcs_tag: format!("v{identity}"),
+            vcs_commit: None,
+            artifact_key: format!("artifacts/{identity}.tar.gz"),
+            yanked,
+            published_at: Utc::now() + Duration::seconds(published_offset),
+        }
+    }
+
+    /// DEN-731: selection is a pure function of version identity and yank
+    /// state, never publication order. Restoring the highest version makes it
+    /// visible again without changing its immutable publication timestamp.
+    #[test]
+    fn latest_visible_version_is_ordered_and_yank_safe() {
+        let mut rows = vec![
+            version_row("2.0.0", false, 0),
+            version_row("1.9.0", false, 10),
+            version_row("3.0.0", true, 5),
+        ];
+
+        assert_eq!(latest_visible_version(&rows).as_deref(), Some("2.0.0"));
+        assert_eq!(visible_versions_desc(&rows), ["2.0.0", "1.9.0"]);
+
+        rows[2].yanked = false;
+        assert_eq!(latest_visible_version(&rows).as_deref(), Some("3.0.0"));
+
+        for row in &mut rows {
+            row.yanked = true;
+        }
+        assert_eq!(latest_visible_version(&rows), None);
+    }
 
     /// Route patterns must line up with the URL helpers every client uses.
     #[test]
@@ -207,7 +297,12 @@ mod tests {
         assert_eq!(fill(ROUTE_YANK), r::yank_path("acme", "http-kit", "1.2.0"));
         assert_eq!(fill(ROUTE_ARTIFACT), r::artifact_path("abc"));
         assert_eq!(ROUTE_SEARCH, r::search_path());
+        assert_eq!(ROUTE_PACKAGES_LIST, r::packages_list_path());
+        assert_eq!(ROUTE_SEMANTIC, r::semantic_search_path());
+        assert_eq!(fill(ROUTE_EMBEDDING), r::embedding_path("acme", "http-kit"));
         assert_eq!(ROUTE_ORGS, r::orgs_path());
+        assert_eq!(fill(ROUTE_AUDIT), r::audit_path("acme"));
+        assert_eq!(fill(ROUTE_AUDIT_VERIFY), r::audit_verify_path("acme"));
         assert_eq!(
             fill(ROUTE_FILES),
             r::file_path("acme", "http-kit", "1.2.0", "dist/style.css")

@@ -3,27 +3,36 @@
 #
 #   docker build -f zed-api-server.rs/Dockerfile -t ghcr.io/zed-pkg/zed-api-server:dev .
 #
-# Base images are pinned to explicit minor tags (not floating rust:1-slim /
-# debian:stable-slim) so rebuilds are reproducible. The toolchain must be
-# The toolchain must satisfy the crate's `edition = "2024"` (>= 1.85) AND the
+# The toolchain must satisfy the crate's `edition = "2024"` (>= 1.85) and the
 # aws-sdk-* crates' MSRV (>= 1.94.1), so the base is pinned to 1.97.1.
-# RUSTUP_TOOLCHAIN (set to the base image's exact version) overrides the repo's
-# rust-toolchain.toml (channel = "stable"), so a Docker build uses the installed
-# toolchain and never downloads a floating one — reproducible, no build-time CDN.
-# -bookworm (not the default trixie) so the build glibc matches the
-# debian:12-slim (bookworm) runtime stage below — a trixie build links against
-# GLIBC_2.39 that bookworm's 2.36 does not provide.
+# RUSTUP_TOOLCHAIN overrides the repo's floating rust-toolchain.toml channel so
+# the build uses the toolchain already present in the image.
+# `-bookworm` keeps the build glibc compatible with the Debian 12 runtime stage.
 FROM rust:1.97-slim-bookworm AS build
 ENV RUSTUP_TOOLCHAIN=1.97.1
 WORKDIR /work
 COPY zed-interfaces ./zed-interfaces
 COPY zed-api-server.rs ./zed-api-server.rs
 WORKDIR /work/zed-api-server.rs
-# --locked must fail the build if Cargo.lock is stale; never fall back to an
-# unlocked build that could silently pull different dependency versions.
 RUN cargo build --release --locked
 
 FROM debian:12-slim
+ARG ZED_API_REVISION=unknown
+ARG ZED_INTERFACES_REVISION=unknown
+LABEL org.opencontainers.image.title="Zed registry API" \
+      org.opencontainers.image.description="Zed package registry API server" \
+      org.opencontainers.image.source="https://github.com/zed-pkg/zed-api-server.rs" \
+      org.opencontainers.image.revision="$ZED_API_REVISION" \
+      org.opencontainers.image.licenses="MIT" \
+      io.zpkg.interfaces.revision="$ZED_INTERFACES_REVISION"
+# ca-certificates is required, not cosmetic: the AWS SDK builds its TLS trust
+# store from the system roots, so without it every HTTPS S3 endpoint fails at
+# handshake and uploads die as "s3 put_object failed". That includes Cloudflare
+# R2, the production storage backend -- only a plaintext-HTTP MinIO stands in
+# for it locally, which is why the gap does not show up in the compose stack.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 zed
 COPY --from=build /work/zed-api-server.rs/target/release/zed-api-server /usr/local/bin/zed-api-server
 USER zed

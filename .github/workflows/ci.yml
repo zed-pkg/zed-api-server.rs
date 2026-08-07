@@ -1,44 +1,91 @@
-# Fast Rust CI (zed-docs issue #8): rust-cache cross-run compile caching, mold as the linker, and cargo-nextest for parallel tests. The
-# toolchain is pinned via rust-toolchain.toml so the cache key stays stable.
+# Fast Rust CI: immutable source graph, mold as the linker, cargo-nextest for
+# parallel tests, and a dependency cache that degrades gracefully.
 name: ci
+
 on:
   push:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: zed-api-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+  ZED_INTERFACES_SHA: f141e4cfae31a74c679b46d1d4bb0146b20555f6
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          path: zed-api-server.rs
-      - uses: actions/checkout@v4
+          persist-credentials: false
+      - name: Verify the standalone immutable source graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test ! -e ../zed-interfaces
+          python3 - <<'PY'
+          from pathlib import Path
+          import tomllib
+
+          manifest = tomllib.loads(Path("Cargo.toml").read_text())
+          spec = manifest["dependencies"]["zed-interfaces"]
+          expected = "f141e4cfae31a74c679b46d1d4bb0146b20555f6"
+          assert "path" not in spec, spec
+          assert spec["rev"] == expected, spec
+          lock = Path("Cargo.lock").read_text()
+          source = f"git+https://github.com/zed-pkg/zed-interfaces.git?rev={expected}#{expected}"
+          assert source in lock, "Cargo.lock does not pin the reviewed zed-interfaces source"
+          PY
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
-          repository: zed-pkg/zed-interfaces
-          path: zed-interfaces
-      - uses: dtolnay/rust-toolchain@stable
+          components: rustfmt
       - name: Install mold (fast linker)
-        uses: rui314/setup-mold@v1
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
         with:
           make-default: true
-      # sccache was removed after repeated GitHub cache-service outages took
-      # CI down mid-build (even health-probed); rust-cache below degrades
-      # gracefully during outages and covers the cross-run caching need.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          workspaces: zed-api-server.rs
+          shared-key: tests
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@a6e08638ce5ee7b285b1e051c006e3be64fcff91 # nextest
+      - name: Resolve only the committed lockfile
+        run: cargo metadata --locked --format-version 1 >/dev/null
       - name: Format
         run: cargo fmt --check
-        working-directory: zed-api-server.rs
       - name: Test (nextest)
-        run: cargo nextest run --workspace
-        working-directory: zed-api-server.rs
+        run: cargo nextest run --workspace --locked
       - name: Doctests
-        run: cargo test --workspace --doc
-        working-directory: zed-api-server.rs
+        run: cargo test --workspace --doc --locked
+
+  clippy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy
+      - name: Install mold (fast linker)
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+        with:
+          make-default: true
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: clippy
+      - name: Deny every Rust warning from the committed lockfile
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --quiet --workspace --all-targets --locked -- -D warnings 2>&1 \
+            | tee "$RUNNER_TEMP/clippy.log"

@@ -11,7 +11,7 @@ use crate::entities::version;
 use crate::error::{ApiErr, ApiResult};
 use crate::state::AppState;
 
-use super::{find_org, find_package, sort_versions_desc, version_metadata};
+use super::{find_org, find_package, version_metadata, visible_versions_desc};
 
 pub async fn get_package(
     State(state): State<Arc<AppState>>,
@@ -21,11 +21,11 @@ pub async fn get_package(
     let pkg = find_package(&state, &org_row, &name).await?;
     let rows = version::Entity::find()
         .filter(version::Column::PackageId.eq(pkg.id))
-        .filter(version::Column::Yanked.eq(false))
         .all(&state.db)
         .await?;
-    let mut versions: Vec<String> = rows.iter().map(|r| r.version.clone()).collect();
-    sort_versions_desc(&mut versions);
+    let versions = visible_versions_desc(&rows);
+    // Compute before moving fields out of `pkg`.
+    let tags = super::tags_of(&pkg);
     Ok(Json(PackageMetadata {
         org: org_slug,
         name,
@@ -36,6 +36,7 @@ pub async fn get_package(
             &pkg.version_scheme,
         ),
         latest: versions.first().cloned(),
+        tags,
         versions,
     }))
 }

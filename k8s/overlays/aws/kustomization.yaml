@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+# The AWS bootstrap remains cluster-local while auth/rate/tag checks are
+# disabled. PUBLIC_BASE_URL preserves the future canonical metadata identity;
+# the certification CLI rewrites artifact downloads through its configured
+# cluster-local registry base.
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: dd-zed-api-server
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: dd-zed-api-server
+      spec:
+        template:
+          spec:
+            containers:
+              - name: zed-api-server
+                env:
+                  - name: PUBLIC_BASE_URL
+                    value: https://registry.aws.zpkg.tech

@@ -70,9 +70,56 @@ pub fn authorize_publish(token_org: Option<Uuid>, role: Role, target_org: Uuid) 
     }
 }
 
+/// Authorize an org-management read/write (today: reading the audit log) of
+/// `target_org`. Same scope rule as publishing, but requires the `owner` role:
+/// the audit trail names who acted, so it is owner-only information.
+pub fn authorize_manage(token_org: Option<Uuid>, role: Role, target_org: Uuid) -> ApiResult<()> {
+    match token_org {
+        None => Ok(()),
+        Some(scope) if scope != target_org => Err(ApiErr::unauthorized()),
+        Some(_) if role.can_manage() => Ok(()),
+        Some(_) => Err(ApiErr::forbidden(
+            "insufficient_role",
+            format!(
+                "this token's role (`{}`) cannot manage the org; an `owner` token is required",
+                role.as_str()
+            ),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manage_authorization_is_owner_only() {
+        let org = Uuid::from_u128(1);
+        let other = Uuid::from_u128(2);
+        // Admin (unscoped) may manage any org.
+        assert!(authorize_manage(None, Role::Reader, org).is_ok());
+        // Only owner among scoped roles.
+        assert!(authorize_manage(Some(org), Role::Owner, org).is_ok());
+        assert_eq!(
+            authorize_manage(Some(org), Role::Publisher, org)
+                .unwrap_err()
+                .code,
+            "insufficient_role"
+        );
+        assert_eq!(
+            authorize_manage(Some(org), Role::Reader, org)
+                .unwrap_err()
+                .code,
+            "insufficient_role"
+        );
+        // Wrong org loses before role is considered.
+        assert_eq!(
+            authorize_manage(Some(other), Role::Owner, org)
+                .unwrap_err()
+                .code,
+            "unauthorized"
+        );
+    }
 
     #[test]
     fn role_capabilities() {

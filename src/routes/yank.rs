@@ -46,6 +46,19 @@ pub async fn yank(
     let updated = active.update(&state.db).await?;
 
     tracing::info!(org = %org_slug, name = %name, version = %ver, yanked = updated.yanked, "yank state changed");
+    crate::audit::record(
+        &state.db,
+        org_row.id,
+        &token,
+        if updated.yanked {
+            zed_interfaces::registry::AuditAction::Yank
+        } else {
+            zed_interfaces::registry::AuditAction::Unyank
+        },
+        format!("{org_slug}/{name}@{ver}"),
+        None,
+    )
+    .await;
     Ok(Json(YankResponse {
         org: org_slug,
         name,
@@ -83,6 +96,7 @@ mod tests {
             schema.create_table_from_entity(token::Entity),
             schema.create_table_from_entity(package::Entity),
             schema.create_table_from_entity(version::Entity),
+            schema.create_table_from_entity(crate::entities::audit_log::Entity),
         ] {
             db.execute(backend.build(&stmt)).await.unwrap();
         }
@@ -138,6 +152,7 @@ mod tests {
             vcs: ActiveValue::Set("git".to_string()),
             repo_url: ActiveValue::Set("https://github.com/acme/http-kit".to_string()),
             version_scheme: ActiveValue::Set("semver".to_string()),
+            tags: ActiveValue::Set(serde_json::json!([])),
             created_at: ActiveValue::Set(Utc::now()),
         }
         .insert(&state.db)
@@ -264,5 +279,73 @@ mod tests {
             .expect_err("cross-org yank must fail");
         assert_eq!(err.code, "unauthorized");
         assert!(!is_yanked(&state).await);
+    }
+
+    /// A successful yank/restore leaves an audit record naming the actor and
+    /// the exact version, and a *denied* attempt leaves none (zed-docs #7).
+    #[tokio::test]
+    async fn yank_is_audited_and_denials_are_not() {
+        use crate::entities::audit_log;
+        let state = test_state().await;
+        let publisher = seed(&state, "publisher").await;
+
+        let _ = call(&state, bearer(&publisher), true).await.unwrap();
+        let rows = audit_log::Entity::find().all(&state.db).await.unwrap();
+        assert_eq!(rows.len(), 1, "one audit row after a yank");
+        assert_eq!(rows[0].action, "yank");
+        assert_eq!(rows[0].subject, "acme/http-kit@1.0.0");
+        assert_eq!(rows[0].actor_role, "publisher");
+        assert_eq!(rows[0].actor_token_name, "t");
+
+        // Restoring records the inverse action, not another `yank`.
+        let _ = call(&state, bearer(&publisher), false).await.unwrap();
+        let actions: Vec<String> = audit_log::Entity::find()
+            .all(&state.db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.action)
+            .collect();
+        assert!(actions.contains(&"unyank".to_string()), "got {actions:?}");
+
+        // A refused yank must not be recorded as if it happened.
+        let before = audit_log::Entity::find()
+            .all(&state.db)
+            .await
+            .unwrap()
+            .len();
+        let reader = seed_reader(&state).await;
+        call(&state, bearer(&reader), true).await.unwrap_err();
+        let after = audit_log::Entity::find()
+            .all(&state.db)
+            .await
+            .unwrap()
+            .len();
+        assert_eq!(before, after, "a denied mutation must not be audited");
+    }
+
+    /// Add a second, reader-scoped token to the already-seeded `acme` org.
+    async fn seed_reader(state: &AppState) -> String {
+        let org_id = org::Entity::find()
+            .one(&state.db)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let plaintext = format!("zpkg_reader_{}", Uuid::new_v4().simple());
+        token::ActiveModel {
+            id: ActiveValue::Set(Uuid::new_v4()),
+            name: ActiveValue::Set("r".to_string()),
+            token_hash: ActiveValue::Set(hash_token(&plaintext)),
+            org_id: ActiveValue::Set(Some(org_id)),
+            role: ActiveValue::Set("reader".to_string()),
+            created_at: ActiveValue::Set(Utc::now()),
+            expires_at: ActiveValue::Set(None),
+            revoked_at: ActiveValue::Set(None),
+        }
+        .insert(&state.db)
+        .await
+        .unwrap();
+        plaintext
     }
 }
