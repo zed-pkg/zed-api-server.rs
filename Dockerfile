@@ -25,6 +25,14 @@ LABEL org.opencontainers.image.title="Zed registry API" \
       org.opencontainers.image.revision="$ZED_API_REVISION" \
       org.opencontainers.image.licenses="MIT" \
       io.zpkg.interfaces.revision="$ZED_INTERFACES_REVISION"
+# ca-certificates is required, not cosmetic: the AWS SDK builds its TLS trust
+# store from the system roots, so without it every HTTPS S3 endpoint fails at
+# handshake and uploads die as "s3 put_object failed". That includes Cloudflare
+# R2, the production storage backend -- only a plaintext-HTTP MinIO stands in
+# for it locally, which is why the gap does not show up in the compose stack.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 zed
 COPY --from=build /work/zed-api-server.rs/target/release/zed-api-server /usr/local/bin/zed-api-server
 USER zed
