@@ -6,6 +6,9 @@ use anyhow::{Context, Result, bail};
 pub struct Config {
     pub bind_addr: String,
     pub database_url: String,
+    /// Transitional local-development escape hatch. Production deployments
+    /// must leave this false and apply reviewed dpm migrations as a discrete
+    /// release step before rolling the API.
     pub auto_migrate: bool,
     pub storage: StorageConfig,
     pub public_base_url: String,
@@ -90,7 +93,7 @@ impl Config {
         Ok(Self {
             bind_addr: env_or("BIND_ADDR", "0.0.0.0:8080"),
             database_url: std::env::var("DATABASE_URL").context("DATABASE_URL is required")?,
-            auto_migrate: env_or("AUTO_MIGRATE", "true") == "true",
+            auto_migrate: env_or("AUTO_MIGRATE", "false") == "true",
             storage,
             public_base_url: env_or("PUBLIC_BASE_URL", "http://localhost:8080"),
             verify_tags,
