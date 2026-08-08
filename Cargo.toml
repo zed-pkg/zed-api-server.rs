@@ -11,9 +11,12 @@ members = [".", "migration"]
 
 [dependencies]
 # Keep the service standalone-cloneable. This immutable revision is the same
-# compatibility boundary already exercised by the repository CI. Bumped for the
-# audited dependency-graph v1 contract (DEN-2864, zed-interfaces#52).
-zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "a8aa3f9d34cbcb7a1e2c0f4b9e34e0e69bd0e0f6" }
+# compatibility boundary already exercised by the repository CI. Bumped to the
+# audited dependency-graph v1 contract (DEN-2864, zed-interfaces#52). Held at
+# that commit rather than today's contract `main`: the polyglot restructure
+# landed after it and moves the crate to `src/rust`, which every consumer has to
+# absorb in its own change.
+zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "30d739167036f54b7919c5776c453123f206ca3c" }
 migration = { path = "migration" }
 anyhow = "1"
 # Distributed locks/leases (fiducia.cloud). Blocking (ureq) client — call it
