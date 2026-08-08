@@ -648,7 +648,7 @@ fn render_mermaid(document: &DependencyGraphDocument) -> String {
          %% Use the JSON, YAML, or TOML representation for interchange.\n\
          graph LR\n",
     );
-    let mut label = |text: &str| format!("  {}[{}]\n", mermaid_id(text), json_string(text));
+    let label = |text: &str| format!("  {}[{}]\n", mermaid_id(text), json_string(text));
     match &document.graph {
         DependencyGraphData::Declared {
             package,
