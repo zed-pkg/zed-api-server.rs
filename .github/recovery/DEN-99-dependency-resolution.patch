@@ -1,0 +1,494 @@
+diff --git a/.github/workflows/formal-methods.yml b/.github/workflows/formal-methods.yml
+index e76870d..8c870a6 100644
+--- a/.github/workflows/formal-methods.yml
++++ b/.github/workflows/formal-methods.yml
+@@ -65,9 +65,12 @@ jobs:
+             --manifest-path "$RUNNER_TEMP/fmctl-source/Cargo.toml"
+           echo "FMCTL=$RUNNER_TEMP/fmctl-source/target/release/fmctl" >> "$GITHUB_ENV"
+ 
+-      - name: Validate both formal-methods manifests
++      - name: Validate all formal-methods manifests
+         run: |
+-          mkdir -p .formal-artifacts/fmctl .formal-artifacts/latest-selection
++          mkdir -p \
++            .formal-artifacts/fmctl \
++            .formal-artifacts/latest-selection \
++            .formal-artifacts/dependency-resolution
+           "$FMCTL" --format json validate \
+             | tee .formal-artifacts/fmctl/validate.json
+           "$FMCTL" \
+@@ -75,26 +78,34 @@ jobs:
+             --format json \
+             validate \
+             | tee .formal-artifacts/latest-selection/validate.json
++          "$FMCTL" \
++            --manifest formal/dependency_resolution.fm.toml \
++            --format json \
++            validate \
++            | tee .formal-artifacts/dependency-resolution/validate.json
+ 
+       - name: Record and validate the formal toolchain
+         run: |
+           "$FMCTL" --format json doctor \
+             | tee .formal-artifacts/fmctl/doctor.json
+ 
+-      - name: Type-check both registry models
++      - name: Type-check all registry models
+         run: |
+           "$FMCTL" check
+           "$FMCTL" --manifest formal/latest_selection.fm.toml check
++          "$FMCTL" --manifest formal/dependency_resolution.fm.toml check
+ 
+       - name: Reach every configured registry witness
+         run: |
+           "$FMCTL" simulate
+           "$FMCTL" --manifest formal/latest_selection.fm.toml simulate
++          "$FMCTL" --manifest formal/dependency_resolution.fm.toml simulate
+ 
+-      - name: Exhaust both finite registry state graphs
++      - name: Exhaust all finite registry state graphs
+         run: |
+           "$FMCTL" verify
+           "$FMCTL" --manifest formal/latest_selection.fm.toml verify
++          "$FMCTL" --manifest formal/dependency_resolution.fm.toml verify
+ 
+       - name: Upload model-checker evidence
+         if: always()
+@@ -105,6 +116,8 @@ jobs:
+             .formal-artifacts/
+             formal/fm.toml
+             formal/latest_selection.fm.toml
++            formal/dependency_resolution.fm.toml
++            formal/dependency_resolution.qnt
+             formal/latest_selection.qnt
+             formal/package_publication.qnt
+           include-hidden-files: true
+diff --git a/formal/README.md b/formal/README.md
+index f58bedc..a898842 100644
+--- a/formal/README.md
++++ b/formal/README.md
+@@ -65,6 +65,29 @@ and the all-versions-yanked state. The integer identities abstract the shared
+ Rust version comparator into a finite total order; Rust regression tests check
+ the concrete semantic-version and timestamp-independent selection behavior.
+ 
++## Dependency-resolution and lockfile model
++
++`dependency_resolution.qnt`, configured by `dependency_resolution.fm.toml`,
++models a root package and one transitive dependency over two totally ordered
++immutable versions. It explores publication, yank/restore, mirror visibility,
++missing transitive artifacts, dependency cycles, resolution, and idempotent
++replay before one immutable result is emitted.
++
++The composed `resolution_safety` invariant checks that:
++
++1. only published, mirrored, non-yanked versions enter a successful lock;
++2. the transitive version requirement is closed;
++3. dependency cycles fail closed;
++4. a failed resolution never emits a partial lock; and
++5. the same finite registry snapshot always produces the same maximal solution
++   or the same structured failure.
++
++Simulation must reach highest-version selection, yank fallback, mirror-lag
++failure, a missing transitive dependency, a cycle failure, and idempotent replay.
++The model intentionally freezes registry state once resolution returns. Concrete
++Rust/SeaORM/Postgres and `zed-cli` replay remains a separate implementation-
++refinement obligation.
++
+ ## Concurrency finding: retain before safe garbage collection
+ 
+ The model makes artifact availability a safety property. Immediate blob
+@@ -98,34 +121,44 @@ fmctl --manifest formal/latest_selection.fm.toml validate
+ fmctl --manifest formal/latest_selection.fm.toml check
+ fmctl --manifest formal/latest_selection.fm.toml simulate
+ fmctl --manifest formal/latest_selection.fm.toml verify
++
++fmctl --manifest formal/dependency_resolution.fm.toml validate
++fmctl --manifest formal/dependency_resolution.fm.toml check
++fmctl --manifest formal/dependency_resolution.fm.toml simulate
++fmctl --manifest formal/dependency_resolution.fm.toml verify
+ ```
+ 
+-Both manifests pin Quint `0.32.0`, bound simulation to 5,000 samples (16 steps
+-for publication and 12 for latest selection), bound retained child output to 8
+-MiB, and give each operation a 10-minute wall-clock budget. `verify` uses TLC
++All three manifests pin Quint `0.32.0`. Publication and latest selection use
++5,000 simulation samples; dependency resolution uses 10,000. Their step bounds
++are 16, 12, and 14 respectively. Every manifest bounds retained child output to
++8 MiB and gives each operation a 10-minute wall-clock budget. `verify` uses TLC
+ to exhaust each complete finite state graph.
+ 
+ Normalized stdout, stderr, and result records are written beneath
+ `.formal-artifacts/fmctl/` for publication and
+-`.formal-artifacts/latest-selection/fmctl/` for selection. CI uploads both even
+-when verification fails, so counterexamples and exact command provenance
+-remain inspectable.
++`.formal-artifacts/latest-selection/fmctl/` for selection, and
++`.formal-artifacts/dependency-resolution/fmctl/` for dependency resolution. CI
++uploads all three even when verification fails, so counterexamples and exact
++command provenance remain inspectable.
+ 
+ ## What this proves—and what it does not
+ 
+ A green `fmctl verify` proves `publication_safety` for every reachable state in
+ the publication model and `selection_safety` for every reachable state in the
+-latest-selection model. It does not by itself prove:
++latest-selection model. It also proves `resolution_safety` for every reachable
++state in the finite dependency-resolution model. It does not by itself prove:
+ 
+ - that every Rust/SeaORM/S3 execution refines the Quint transition system;
+ - Postgres, object-store, filesystem, or network durability;
+ - fairness or eventual successful publication;
+ - safe age/lease-aware orphan garbage collection;
+-- dependency-graph resolution, mirror fan-out, or provenance verification;
++- arbitrary-size dependency graphs, range semantics outside the finite model,
++  or Rust/SeaORM/Postgres/`zed-cli` implementation refinement;
++- target fan-out or provenance verification;
+ - ordering correctness outside the concrete comparator behavior covered by
+   Rust tests; or
+ - correctness outside the tool versions, assumptions, and bounds recorded in
+-  the two manifests.
++  the three manifests.
+ 
+ Rust handler tests cover the matching immutability and transaction regressions.
+ Later work can add an ITF adapter that drives the real in-memory HTTP/SQLite
+diff --git a/formal/dependency_resolution.fm.toml b/formal/dependency_resolution.fm.toml
+new file mode 100644
+index 0000000..d377af9
+--- /dev/null
++++ b/formal/dependency_resolution.fm.toml
+@@ -0,0 +1,40 @@
++# Third schema-v1 fmctl model for DEN-99. This isolates deterministic dependency
++# resolution and lockfile safety from publication finalization and latest-version
++# selection while retaining the same pinned runner and verifier contract.
++schema_version = 1
++project = "zed-api-server"
++model = "dependency-resolution"
++language = "quint"
++spec = "formal/dependency_resolution.qnt"
++main = "dependency_resolution"
++init = "init"
++step = "step"
++invariants = ["resolution_safety"]
++witnesses = [
++  "highest_solution_reached",
++  "yank_fallback_reached",
++  "mirror_lag_failure_reached",
++  "missing_dependency_reached",
++  "cycle_failure_reached",
++  "idempotent_replay_reached",
++]
++
++[toolchain]
++quint = "0.32.0"
++java = ">=17"
++node = "22"
++npx = "npx"
++
++[execution]
++timeout_seconds = 600
++max_output_bytes = 8388608
++artifacts_dir = ".formal-artifacts/dependency-resolution"
++
++[simulation]
++backend = "typescript"
++max_samples = 10000
++max_steps = 14
++
++[verification]
++backend = "tlc"
++exhaustive_finite_model = true
+diff --git a/formal/dependency_resolution.qnt b/formal/dependency_resolution.qnt
+new file mode 100644
+index 0000000..dabfa8e
+--- /dev/null
++++ b/formal/dependency_resolution.qnt
+@@ -0,0 +1,289 @@
++// Finite model of deterministic Zed dependency resolution and lockfile safety.
++//
++// Package A is the root dependency and package B is transitive. Each package has
++// two totally ordered immutable versions. A@2 requires B@2; A@1 accepts B@1 or
++// B@2. Publication, yank/restore, mirror visibility, cycle detection, resolution,
++// and idempotent replay are modeled before one immutable lock result is emitted.
++module dependency_resolution {
++  pure val NONE = 0
++  pure val UNRESOLVED = 0
++  pure val LOCKED = 1
++  pure val FAILED = 2
++  pure val VERSIONS = Set(1, 2)
++
++  type State = {
++    published_a: Set[int],
++    published_b: Set[int],
++    yanked_a: Set[int],
++    yanked_b: Set[int],
++    mirrored_a: Set[int],
++    mirrored_b: Set[int],
++    cycle_present: bool,
++    status: int,
++    locked_a: int,
++    locked_b: int,
++    saw_highest_solution: bool,
++    saw_yank_fallback: bool,
++    saw_mirror_lag_failure: bool,
++    saw_missing_dependency: bool,
++    saw_cycle_failure: bool,
++    saw_idempotent_replay: bool,
++  }
++
++  var s: State
++
++  pure def highest_visible(published, yanked, mirrored) =
++    if (and {
++      published.contains(2),
++      mirrored.contains(2),
++      not(yanked.contains(2)),
++    }) 2
++    else if (and {
++      published.contains(1),
++      mirrored.contains(1),
++      not(yanked.contains(1)),
++    }) 1
++    else NONE
++
++  pure def expected_a(st) =
++    highest_visible(st.published_a, st.yanked_a, st.mirrored_a)
++
++  pure def expected_b(st) =
++    if (expected_a(st) == 2)
++      if (and {
++        st.published_b.contains(2),
++        st.mirrored_b.contains(2),
++        not(st.yanked_b.contains(2)),
++      }) 2 else NONE
++    else if (expected_a(st) == 1)
++      highest_visible(st.published_b, st.yanked_b, st.mirrored_b)
++    else NONE
++
++  pure def can_resolve(st) = and {
++    not(st.cycle_present),
++    expected_a(st) != NONE,
++    expected_b(st) != NONE,
++  }
++
++  action init = {
++    s' = {
++      published_a: Set(),
++      published_b: Set(),
++      yanked_a: Set(),
++      yanked_b: Set(),
++      mirrored_a: Set(),
++      mirrored_b: Set(),
++      cycle_present: false,
++      status: UNRESOLVED,
++      locked_a: NONE,
++      locked_b: NONE,
++      saw_highest_solution: false,
++      saw_yank_fallback: false,
++      saw_mirror_lag_failure: false,
++      saw_missing_dependency: false,
++      saw_cycle_failure: false,
++      saw_idempotent_replay: false,
++    }
++  }
++
++  action publish_a(version) = all {
++    s.status == UNRESOLVED,
++    VERSIONS.contains(version),
++    not(s.published_a.contains(version)),
++    s' = { ...s, published_a: s.published_a.union(Set(version)) },
++  }
++
++  action publish_b(version) = all {
++    s.status == UNRESOLVED,
++    VERSIONS.contains(version),
++    not(s.published_b.contains(version)),
++    s' = { ...s, published_b: s.published_b.union(Set(version)) },
++  }
++
++  action sync_a(version) = all {
++    s.status == UNRESOLVED,
++    s.published_a.contains(version),
++    not(s.mirrored_a.contains(version)),
++    s' = { ...s, mirrored_a: s.mirrored_a.union(Set(version)) },
++  }
++
++  action sync_b(version) = all {
++    s.status == UNRESOLVED,
++    s.published_b.contains(version),
++    not(s.mirrored_b.contains(version)),
++    s' = { ...s, mirrored_b: s.mirrored_b.union(Set(version)) },
++  }
++
++  action yank_a(version) = all {
++    s.status == UNRESOLVED,
++    s.published_a.contains(version),
++    not(s.yanked_a.contains(version)),
++    s' = { ...s, yanked_a: s.yanked_a.union(Set(version)) },
++  }
++
++  action yank_b(version) = all {
++    s.status == UNRESOLVED,
++    s.published_b.contains(version),
++    not(s.yanked_b.contains(version)),
++    s' = { ...s, yanked_b: s.yanked_b.union(Set(version)) },
++  }
++
++  action restore_a(version) = all {
++    s.status == UNRESOLVED,
++    s.yanked_a.contains(version),
++    s' = { ...s, yanked_a: s.yanked_a.exclude(Set(version)) },
++  }
++
++  action restore_b(version) = all {
++    s.status == UNRESOLVED,
++    s.yanked_b.contains(version),
++    s' = { ...s, yanked_b: s.yanked_b.exclude(Set(version)) },
++  }
++
++  action introduce_cycle = all {
++    s.status == UNRESOLVED,
++    not(s.cycle_present),
++    s' = { ...s, cycle_present: true },
++  }
++
++  action resolve = all {
++    s.status == UNRESOLVED,
++    s' = if (can_resolve(s)) {
++      ...s,
++      status: LOCKED,
++      locked_a: expected_a(s),
++      locked_b: expected_b(s),
++      saw_highest_solution:
++        s.saw_highest_solution or and { expected_a(s) == 2, expected_b(s) == 2 },
++      saw_yank_fallback:
++        s.saw_yank_fallback or and {
++          s.published_a.contains(2),
++          s.yanked_a.contains(2),
++          expected_a(s) == 1,
++        },
++    } else {
++      ...s,
++      status: FAILED,
++      locked_a: NONE,
++      locked_b: NONE,
++      saw_mirror_lag_failure:
++        s.saw_mirror_lag_failure or or {
++          not(s.published_a.subseteq(s.mirrored_a)),
++          not(s.published_b.subseteq(s.mirrored_b)),
++        },
++      saw_missing_dependency:
++        s.saw_missing_dependency or and {
++          not(s.cycle_present),
++          expected_a(s) != NONE,
++          expected_b(s) == NONE,
++        },
++      saw_cycle_failure: s.saw_cycle_failure or s.cycle_present,
++    },
++  }
++
++  // A frozen resolver may be asked to replay the same already-decided request.
++  // The immutable lock result or structured failure must not change.
++  action replay_resolve = all {
++    s.status != UNRESOLVED,
++    s' = { ...s, saw_idempotent_replay: true },
++  }
++
++  action idle = s' = s
++
++  action step = {
++    nondet version = VERSIONS.oneOf()
++    any {
++      publish_a(version),
++      publish_b(version),
++      sync_a(version),
++      sync_b(version),
++      yank_a(version),
++      yank_b(version),
++      restore_a(version),
++      restore_b(version),
++      introduce_cycle,
++      resolve,
++      replay_resolve,
++      idle,
++    }
++  }
++
++  val registry_sets_are_well_formed = and {
++    s.published_a.subseteq(VERSIONS),
++    s.published_b.subseteq(VERSIONS),
++    s.yanked_a.subseteq(s.published_a),
++    s.yanked_b.subseteq(s.published_b),
++    s.mirrored_a.subseteq(s.published_a),
++    s.mirrored_b.subseteq(s.published_b),
++  }
++
++  val result_shape_is_total = or {
++    and {
++      s.status == UNRESOLVED,
++      s.locked_a == NONE,
++      s.locked_b == NONE,
++    },
++    and {
++      s.status == FAILED,
++      s.locked_a == NONE,
++      s.locked_b == NONE,
++    },
++    and {
++      s.status == LOCKED,
++      VERSIONS.contains(s.locked_a),
++      VERSIONS.contains(s.locked_b),
++    },
++  }
++
++  val locked_versions_are_visible = or {
++    s.status != LOCKED,
++    and {
++      s.published_a.contains(s.locked_a),
++      s.mirrored_a.contains(s.locked_a),
++      not(s.yanked_a.contains(s.locked_a)),
++      s.published_b.contains(s.locked_b),
++      s.mirrored_b.contains(s.locked_b),
++      not(s.yanked_b.contains(s.locked_b)),
++    },
++  }
++
++  val transitive_requirement_is_closed = or {
++    s.status != LOCKED,
++    s.locked_b >= s.locked_a,
++  }
++
++  val cycles_fail_closed = not(and {
++    s.cycle_present,
++    s.status == LOCKED,
++  })
++
++  val resolution_is_deterministic = or {
++    s.status == UNRESOLVED,
++    and {
++      s.status == LOCKED,
++      can_resolve(s),
++      s.locked_a == expected_a(s),
++      s.locked_b == expected_b(s),
++    },
++    and {
++      s.status == FAILED,
++      not(can_resolve(s)),
++    },
++  }
++
++  val resolution_safety = and {
++    registry_sets_are_well_formed,
++    result_shape_is_total,
++    locked_versions_are_visible,
++    transitive_requirement_is_closed,
++    cycles_fail_closed,
++    resolution_is_deterministic,
++  }
++
++  val highest_solution_reached = s.saw_highest_solution
++  val yank_fallback_reached = s.saw_yank_fallback
++  val mirror_lag_failure_reached = s.saw_mirror_lag_failure
++  val missing_dependency_reached = s.saw_missing_dependency
++  val cycle_failure_reached = s.saw_cycle_failure
++  val idempotent_replay_reached = s.saw_idempotent_replay
++}
