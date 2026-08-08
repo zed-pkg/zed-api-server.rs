@@ -43,6 +43,9 @@ pub(crate) async fn run() -> Result<()> {
     }
     let db = connect_with_retry(&cfg).await?;
     if cfg.auto_migrate {
+        tracing::warn!(
+            "AUTO_MIGRATE is enabled; this transitional path is allowed only for the disposable local Docker Compose stack. Production and Kubernetes releases must apply reviewed dpm migrations before starting the API"
+        );
         migration::Migrator::up(&db, None)
             .await
             .context("migrations failed")?;
