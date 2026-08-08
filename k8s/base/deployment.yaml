@@ -58,7 +58,7 @@ spec:
               containerPort: 8080
           env:
             - { name: BIND_ADDR, value: "0.0.0.0:8080" }
-            - { name: PUBLIC_BASE_URL, value: "https://registry.zpkg.tech" }
+            - { name: PUBLIC_BASE_URL, value: "https://registry.zpkg.net" }
             - { name: STORAGE_BACKEND, value: "memory" }
             # Keep artifact bytes below half the pod's 512 MiB limit so Tokio,
             # multipart parsing, metadata, and archive extraction retain

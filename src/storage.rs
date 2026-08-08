@@ -34,14 +34,6 @@ pub enum ArtifactStore {
 /// bucket, must not be able to pull an unbounded allocation into the server.
 pub const MAX_BUFFERED_ARTIFACT_BYTES: u64 = 100 * 1024 * 1024;
 
-/// Artifacts are content-addressed and immutable, so every download path must
-/// advertise the same long-lived immutable caching contract. The process-memory
-/// and local backends set this header on the response directly (see
-/// `routes::artifacts`); the s3/R2 backend serves a 302 to a presigned URL, so
-/// the header must be baked into the stored object and the presigned request or
-/// it is silently lost on the redirect.
-const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
-
 /// How a download should be served to the client.
 pub enum Download {
     /// 302 to a presigned URL (S3/R2).
@@ -138,7 +130,6 @@ impl ArtifactStore {
                     .bucket(bucket)
                     .key(key)
                     .content_type(content_type)
-                    .cache_control(IMMUTABLE_CACHE_CONTROL)
                     .body(bytes.into())
                     .send()
                     .await
@@ -169,11 +160,6 @@ impl ArtifactStore {
                     .get_object()
                     .bucket(bucket)
                     .key(key)
-                    // Override the response Cache-Control on the presigned GET so
-                    // the immutable contract holds even for objects stored before
-                    // put-time cache metadata was set. Without this the 302 target
-                    // returns whatever (if anything) the object was stored with.
-                    .response_cache_control(IMMUTABLE_CACHE_CONTROL)
                     .presigned(PresigningConfig::expires_in(Duration::from_secs(600))?)
                     .await
                     .context("s3 presign failed")?;
