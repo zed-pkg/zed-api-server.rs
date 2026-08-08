@@ -1,12 +1,13 @@
 # zed-api-server
 
 The [zed-pkg](https://zpkg.tech) registry REST API, in Rust: package and
-version metadata in Postgres (SeaORM + the `migration/` crate), with artifact
-archives (tar.gz/zip) in bounded process memory for disposable certification,
-local disk for development/self-hosting, or any S3-compatible object storage —
-Cloudflare R2 in production and AWS S3 or MinIO as alternatives. This is the
-service `zed publish` and `zed install` talk to, and the whole stack is
-self-hostable for private registries.
+version metadata in Postgres through SeaORM, with production schema changes
+reviewed and applied through `dpm`, and artifact archives (tar.gz/zip) in
+bounded process memory for disposable certification, local disk for
+development/self-hosting, or any S3-compatible object storage — Cloudflare R2
+in production and AWS S3 or MinIO as alternatives. This is the service
+`zed publish` and `zed install` talk to, and the whole stack is self-hostable
+for private registries.
 
 ## Endpoints
 
@@ -35,8 +36,8 @@ version.
 | Var | Default | Notes |
 | --- | --- | --- |
 | `BIND_ADDR` | `0.0.0.0:8080` | |
-| `DATABASE_URL` | required | Postgres |
-| `AUTO_MIGRATE` | `true` | run `migration/` on boot |
+| `DATABASE_URL` | required | Postgres runtime credential; DML only in production |
+| `AUTO_MIGRATE` | `false` | transitional disposable-local escape hatch only; production/Kubernetes must use a discrete reviewed `dpm` release job |
 | `STORAGE_BACKEND` | `local` | `memory`, `local`, or `s3` |
 | `STORAGE_MEMORY_MAX_BYTES` | `268435456` | hard total for the process-memory backend; must be greater than zero |
 | `STORAGE_LOCAL_DIR` | `.data/artifacts` | local backend |
@@ -56,6 +57,21 @@ throwaway metadata during certification. See
 [`docs/memory-publish-certification.md`](docs/memory-publish-certification.md)
 for the `zed r2g` + real-server test contract and the Kubernetes promotion
 boundary.
+
+## Database ownership
+
+This process is the sole runtime writer for the shared registry schema. The web
+server receives a separate read-only identity and sends every mutation through
+this API over private-cluster HTTP. Production migrations run once as a
+reviewed release step with a dedicated migrator identity; normal API replicas
+do not receive DDL privileges and do not migrate on boot.
+
+The shared-library rollout, role split, migration evidence, and exact
+`zed-orm` pin are documented in
+[`docs/database-boundary.md`](docs/database-boundary.md). The disposable Docker
+Compose stack explicitly opts into the legacy SeaORM boot migration while the
+legacy migration crate is converted to a declarative source. That exception is
+not valid for Kubernetes or durable self-hosted deployments.
 
 ### Cloudflare R2 mapping
 
@@ -79,10 +95,11 @@ client-side either way.
 ## Run it
 
 ```sh
-# full local stack: postgres + minio + api (from the parent directory)
+# disposable local stack: postgres + minio + api (from the parent directory)
+# docker-compose.yml explicitly enables the legacy local boot migration.
 docker compose -f zed-api-server.rs/docker-compose.yml up --build
 
-# or bare, against your own postgres and a disposable in-memory artifact store
+# or bare, after applying the reviewed schema to your own Postgres
 DATABASE_URL=postgres://zed:zed@localhost:5432/zed \
 STORAGE_BACKEND=memory \
 STORAGE_MEMORY_MAX_BYTES=268435456 \

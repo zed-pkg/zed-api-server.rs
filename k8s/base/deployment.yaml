@@ -69,7 +69,8 @@ spec:
             - { name: ZED_AUTH_DISABLED, value: "1" }
             - { name: ZED_RATE_LIMIT_DISABLED, value: "1" }
             - { name: ZED_VERIFY_TAGS, value: "off" }
-            - { name: AUTO_MIGRATE, value: "true" }
+            # AUTO_MIGRATE is intentionally absent. A separate release job must
+            # apply and verify the reviewed dpm plan before this Deployment rolls.
             - { name: MAX_ARTIFACT_BYTES, value: "104857600" }
             - { name: RUST_LOG, value: "info" }
             # TEMPORARY bootstrap database. The platform layer runs an
