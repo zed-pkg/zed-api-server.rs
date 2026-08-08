@@ -849,7 +849,7 @@ url = "https://github.com/acme/app"
     #[test]
     fn download_filenames_are_built_only_from_safe_characters() {
         let stem = filename_stem("../../etc", "a\"; drop\r\n", "1.0.0\u{0000}");
-        assert_eq!(stem, ".._.._etc_a_____drop___1.0.0_");
+        assert_eq!(stem, ".._.._etc_a___drop___1.0.0_");
         assert!(!stem.contains('/'));
         assert!(!stem.contains('"'));
         assert!(!stem.contains('\r'));
