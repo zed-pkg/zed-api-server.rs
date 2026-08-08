@@ -72,9 +72,13 @@ pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
     // The two endpoints that buffer a whole artifact in memory get their own,
     // tighter concurrency limit so they can't exhaust pod memory even while
     // the global limit still admits cheap JSON requests.
+    //
+    // The declared dependency graph reads its manifest out of the stored
+    // artifact, so it buffers one too and belongs under the same budget.
     let artifact_routes = Router::new()
         .route(ROUTE_ARTIFACT, get(artifacts::get_artifact))
         .route(ROUTE_FILES, get(artifacts::get_file))
+        .route(ROUTE_DECLARED_GRAPH, get(graph::get_declared_graph))
         .layer(tower::limit::ConcurrencyLimitLayer::new(
             artifact_serve_concurrency(max_artifact_bytes),
         ));
