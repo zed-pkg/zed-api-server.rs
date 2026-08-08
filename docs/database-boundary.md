@@ -2,6 +2,8 @@
 
 Tracking: [DEN-2788](https://linear.app/denman/issue/DEN-2788/zed-pkg-shared-seaorm-boundary-orm-crate-in-zed-lib-zed-api-serverzed)
 
+Canonical ORM owner: [`zed-pkg/zed-orm-core`](https://github.com/zed-pkg/zed-orm-core), currently under review in [PR #1](https://github.com/zed-pkg/zed-orm-core/pull/1).
+
 `zed-api-server` is the sole request-serving writer for registry business data. The browser-facing `zed-web-server` may read approved data but must never acquire this service's write credential or run mutations against the shared schema.
 
 ## Runtime roles
@@ -16,26 +18,34 @@ Role names are illustrative until the centralized slug map is finalized, but the
 
 ## Shared ORM package
 
-The root `.zpkg.toml` imports `zed-pkg/zed-lib`. `zed-lib` PR #1 provides `zed-orm`, whose reviewed API is:
+The root `.zpkg.toml` imports `zed-pkg/zed-orm-core`. The canonical crate must provide:
 
-- `DbRole::ReadWrite` for this API;
-- `DbRole::ReadOnly` plus `assert_read_only` for the web tier;
-- `ORG_SCHEMA = "zed_pkg"` and a pinned schema search path;
-- named `queries::read` / `queries::write` functions rather than handing callers an unrestricted ORM session.
+- an opaque read/write context for this API, available only with the explicit `read-write` feature;
+- an opaque default read context for the web tier;
+- role-aware connection setup, pinned `zed_pkg` schema search paths, and a startup read-only assertion for web consumers;
+- named policy-aware read and write operations without publicly re-exporting raw SeaORM connections, entity managers, or query builders;
+- entities generated from the Zed slice of `ORESoftware/k8s-libs-and-shared-defs` rather than an independently authored schema.
 
-After `zed-lib` PR #1 merges and this repository can regenerate `Cargo.lock`, the intended Cargo dependency is:
+After `zed-orm-core` PR #1 is completed and merged, the intended API dependency is:
 
 ```toml
-zed-orm = {
-  package = "zed-orm",
-  git = "https://github.com/zed-pkg/zed-lib.git",
-  rev = "6b7bdcc984a75997d5b72f01a17d9eca507c9a01"
+zed-orm-core = {
+  git = "https://github.com/zed-pkg/zed-orm-core.git",
+  rev = "6ed5fc430c4769cee1d4dddf297f7cb1cd63575d",
+  default-features = false,
+  features = ["read-write"]
 }
 ```
 
-The revision above is the reviewed head of the library PR. Replace it with the merge commit before enabling the dependency. The connection seam then becomes `zed_orm::connect(&database_url, DbRole::ReadWrite)` and all new shared-schema queries should move behind named functions in `zed-orm`.
+```rust
+use zed_orm_core::{WriteContext, connect_read_write};
 
-This rollout deliberately does not add an unlocked git dependency: CI uses `--locked`, and a manifest-only change would make otherwise unrelated builds non-reproducible.
+let registry_db: WriteContext = connect_read_write(&database_url).await?;
+```
+
+The revision above is the current head of the canonical scaffold PR, not yet a production-ready consumer pin. Before enabling it, that PR must pin shared definitions, implement opaque contexts and role-aware connections, add working named queries, compile every write type/function only under `read-write`, and provide compile-fail consumer fixtures plus live PostgreSQL/CockroachDB permission evidence. Replace the scaffold revision with the merge commit after those gates pass.
+
+The earlier `zed-lib` ORM branch is an implementation donor only; it must not remain as a second authoritative package. This rollout deliberately does not add an unlocked Cargo git dependency: CI uses `--locked`, and a manifest-only change would make otherwise unrelated builds non-reproducible. The zed dependency records the canonical repository relationship now.
 
 ## Migration policy
 
