@@ -34,6 +34,14 @@ pub enum ArtifactStore {
 /// bucket, must not be able to pull an unbounded allocation into the server.
 pub const MAX_BUFFERED_ARTIFACT_BYTES: u64 = 100 * 1024 * 1024;
 
+/// Artifacts are content-addressed and immutable, so every download path must
+/// advertise the same long-lived immutable caching contract. The process-memory
+/// and local backends set this header on the response directly (see
+/// `routes::artifacts`); the s3/R2 backend serves a 302 to a presigned URL, so
+/// the header must be baked into the stored object and the presigned request or
+/// it is silently lost on the redirect.
+const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+
 /// How a download should be served to the client.
 pub enum Download {
     /// 302 to a presigned URL (S3/R2).
