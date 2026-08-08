@@ -169,6 +169,11 @@ impl ArtifactStore {
                     .get_object()
                     .bucket(bucket)
                     .key(key)
+                    // Override the response Cache-Control on the presigned GET so
+                    // the immutable contract holds even for objects stored before
+                    // put-time cache metadata was set. Without this the 302 target
+                    // returns whatever (if anything) the object was stored with.
+                    .response_cache_control(IMMUTABLE_CACHE_CONTROL)
                     .presigned(PresigningConfig::expires_in(Duration::from_secs(600))?)
                     .await
                     .context("s3 presign failed")?;
