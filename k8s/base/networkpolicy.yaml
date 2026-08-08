@@ -43,3 +43,5 @@ spec:
               app: zed-postgres
       ports:
         - { protocol: TCP, port: 5432 }
+    - ports:
+        - { protocol: TCP, port: 443 }
