@@ -1,3 +1,4 @@
+mod api_docs;
 mod audit;
 mod auth;
 mod config;
