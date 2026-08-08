@@ -20,7 +20,10 @@ fn zed_package_declares_the_canonical_orm_core() {
         "\"zed-pkg/zed-orm-core\" = \"^0.1.0\"",
         "dir = \".vendor/.zed\"",
     ] {
-        assert!(manifest.contains(contract), "zed package contract lost {contract}");
+        assert!(
+            manifest.contains(contract),
+            "zed package contract lost {contract}"
+        );
     }
     assert!(
         !manifest.contains("\"zed-pkg/zed-lib\""),
