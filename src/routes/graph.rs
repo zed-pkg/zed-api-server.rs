@@ -709,7 +709,9 @@ mod tests {
 org = "acme"
 name = "app"
 version = "1.0.0"
-repository = "https://github.com/acme/app"
+
+[package.repository]
+url = "https://github.com/acme/app"
 
 [dependencies]
 "acme/corelib" = "^2"
