@@ -345,21 +345,26 @@ fn respond(
         format.extension()
     );
 
-    let mut response_headers = vec![
-        (header::ETAG, etag.clone()),
-        (header::CACHE_CONTROL, IMMUTABLE.to_string()),
-        (header::CONTENT_DISPOSITION, disposition),
-    ];
+    let header_value = |value: &str| {
+        header::HeaderValue::from_str(value)
+            .map_err(|_| ApiErr::from(anyhow::anyhow!("graph response header is not valid ASCII")))
+    };
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(header::ETAG, header_value(&etag)?);
+    response_headers.insert(header::CACHE_CONTROL, header_value(IMMUTABLE)?);
+    response_headers.insert(header::CONTENT_DISPOSITION, header_value(&disposition)?);
     // Header name is a contract constant, so clients and server cannot drift.
-    let digest_header = header::HeaderName::from_static(DEPENDENCY_GRAPH_DIGEST_HEADER);
-    response_headers.push((digest_header, graph_digest));
+    response_headers.insert(
+        header::HeaderName::from_static(DEPENDENCY_GRAPH_DIGEST_HEADER),
+        header_value(&graph_digest)?,
+    );
 
     if if_none_match_matches(headers, &etag) {
         // 304 carries the validators and cache policy, never a body.
         return Ok((StatusCode::NOT_MODIFIED, response_headers).into_response());
     }
 
-    response_headers.push((header::CONTENT_TYPE, format.media_type().to_string()));
+    response_headers.insert(header::CONTENT_TYPE, header_value(format.media_type())?);
     Ok((StatusCode::OK, response_headers, body).into_response())
 }
 
