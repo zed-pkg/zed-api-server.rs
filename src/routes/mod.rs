@@ -5,6 +5,7 @@
 
 mod artifacts;
 mod audit;
+mod graph;
 mod list;
 mod orgs;
 mod packages;
