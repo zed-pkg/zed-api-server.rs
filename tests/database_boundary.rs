@@ -12,16 +12,20 @@ fn read(relative: &str) -> String {
 }
 
 #[test]
-fn zed_package_declares_the_shared_data_library() {
+fn zed_package_declares_the_canonical_orm_core() {
     let manifest = read(".zpkg.toml");
     for contract in [
         "org = \"zed-pkg\"",
         "name = \"zed-api-server\"",
-        "\"zed-pkg/zed-lib\" = \"^0.1.0\"",
+        "\"zed-pkg/zed-orm-core\" = \"^0.1.0\"",
         "dir = \".vendor/.zed\"",
     ] {
         assert!(manifest.contains(contract), "zed package contract lost {contract}");
     }
+    assert!(
+        !manifest.contains("\"zed-pkg/zed-lib\""),
+        "the general library must not become a second ORM package owner"
+    );
 }
 
 #[test]
@@ -49,8 +53,9 @@ fn role_and_migration_contract_stays_explicit() {
         "zed_pkg__api_rw",
         "zed_pkg__web_ro",
         "zed_pkg__migrator",
-        "DbRole::ReadWrite",
-        "DbRole::ReadOnly",
+        "zed-orm-core",
+        "read-write",
+        "opaque read/write context",
         "dpm verify",
         "expand → backfill → contract",
     ] {
