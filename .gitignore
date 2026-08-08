@@ -3,4 +3,5 @@
 /.env
 /.formal-artifacts
 /.formal-tools
+/.vendor/.zed/
 /_apalache-out
