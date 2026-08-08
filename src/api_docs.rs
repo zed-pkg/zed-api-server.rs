@@ -5,10 +5,10 @@
 //! rate-limit, timeout, or body-limit policy on package operations.
 
 use axum::{
-    body::Body,
-    http::{header, Response, StatusCode},
-    routing::get,
     Router,
+    body::Body,
+    http::{Response, StatusCode, header},
+    routing::get,
 };
 
 pub const DISCOVERY_PATH: &str = "/.well-known/api-docs";
@@ -16,11 +16,9 @@ pub const OPENAPI_PATH: &str = "/openapi.json";
 pub const OPENAPI_ALIAS: &str = "/api/docs.json";
 pub const DOCS_PATH: &str = "/api/docs";
 pub const DOCS_ALIAS: &str = "/docs/api";
-pub const OPENAPI_SHA256: &str =
-    "a21a6e2ef19ea14c34e4d92f318872f45fa1b2869c36392645927f355ed785d8";
+pub const OPENAPI_SHA256: &str = "a21a6e2ef19ea14c34e4d92f318872f45fa1b2869c36392645927f355ed785d8";
 
-const OPENAPI_ETAG: &str =
-    "\"a21a6e2ef19ea14c34e4d92f318872f45fa1b2869c36392645927f355ed785d8\"";
+const OPENAPI_ETAG: &str = "\"a21a6e2ef19ea14c34e4d92f318872f45fa1b2869c36392645927f355ed785d8\"";
 const OPENAPI_MEDIA_TYPE: &str = "application/vnd.oai.openapi+json;version=3.1";
 const OPENAPI: &str = include_str!("../openapi/zed.openapi.json");
 const MANIFEST: &str = include_str!("../openapi/api-docs.manifest.json");
@@ -202,10 +200,7 @@ mod tests {
         assert_eq!(manifest["schemaVersion"], "ore.api-docs.v1");
         assert_eq!(manifest["public"]["openapi"]["path"], OPENAPI_PATH);
         assert_eq!(manifest["public"]["openapi"]["sha256"], OPENAPI_SHA256);
-        assert_eq!(
-            manifest["mcp"]["repository"],
-            "zed-pkg/zed-mcp-server.rs"
-        );
+        assert_eq!(manifest["mcp"]["repository"], "zed-pkg/zed-mcp-server.rs");
         assert_eq!(manifest["mcp"]["mode"], "read-only");
         assert_eq!(manifest["internal"]["available"], false);
     }
