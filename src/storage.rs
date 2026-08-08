@@ -138,6 +138,7 @@ impl ArtifactStore {
                     .bucket(bucket)
                     .key(key)
                     .content_type(content_type)
+                    .cache_control(IMMUTABLE_CACHE_CONTROL)
                     .body(bytes.into())
                     .send()
                     .await
