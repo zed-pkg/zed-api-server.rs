@@ -1,0 +1,15 @@
+[package]
+org = "zed-pkg"
+name = "zed-api-server"
+version = "0.1.0"
+description = "Zed registry API and sole runtime writer for the zed_pkg schema"
+
+[package.repository]
+vcs = "git"
+url = "https://github.com/zed-pkg/zed-api-server.rs"
+
+[dependencies]
+"zed-pkg/zed-lib" = "^0.1.0"
+
+[install]
+dir = ".vendor/.zed"
