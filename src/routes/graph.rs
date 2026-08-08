@@ -152,9 +152,8 @@ pub async fn get_resolution_graph(
 /// local alias cannot reinterpret a stored graph.
 fn registry_id(public_base_url: &str) -> String {
     let host = public_base_url
-        .split("://")
-        .next_back()
-        .unwrap_or(public_base_url)
+        .split_once("://")
+        .map_or(public_base_url, |(_scheme, rest)| rest)
         .split('/')
         .next()
         .unwrap_or(public_base_url)
