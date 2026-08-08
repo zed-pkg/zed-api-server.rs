@@ -1,0 +1,41 @@
+{
+  "schemaVersion": "ore.api-docs.v1",
+  "service": {
+    "name": "zed-api-server",
+    "version": "0.1.0"
+  },
+  "public": {
+    "openapi": {
+      "path": "/openapi.json",
+      "aliases": [
+        "/api/docs.json"
+      ],
+      "mediaType": "application/vnd.oai.openapi+json;version=3.1",
+      "sha256": "a21a6e2ef19ea14c34e4d92f318872f45fa1b2869c36392645927f355ed785d8"
+    },
+    "ui": {
+      "path": "/api/docs",
+      "aliases": [
+        "/docs/api"
+      ]
+    }
+  },
+  "internal": {
+    "available": false
+  },
+  "mcp": {
+    "repository": "zed-pkg/zed-mcp-server.rs",
+    "mode": "read-only",
+    "tools": [
+      "api_docs_discover",
+      "api_docs_get_openapi",
+      "api_docs_validate",
+      "api_docs_list_operations",
+      "api_docs_describe_operation"
+    ]
+  },
+  "provenance": {
+    "sourceRepository": "zed-pkg/zed-api-server.rs",
+    "gitSha": "f6e206a520500cec0ee1d2317554cb3f5cf538b2"
+  }
+}
