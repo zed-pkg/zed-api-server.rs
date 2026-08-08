@@ -53,10 +53,9 @@ patches:
                     value: auto
                   - name: S3_FORCE_PATH_STYLE
                     value: "true"
-                  # Drop the memory-backend cap so it is not carried alongside
-                  # the s3 backend where it has no meaning.
-                  - name: STORAGE_MEMORY_MAX_BYTES
-                    value: null
+                # STORAGE_MEMORY_MAX_BYTES is inherited from the base and ignored
+                # by the s3 backend; left in place rather than deleted so the env
+                # list patch stays a clean strategic merge.
                 envFrom:
                   - secretRef:
                       name: zed-r2-creds
