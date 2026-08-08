@@ -1,0 +1,503 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Zed Package Registry API",
+    "version": "0.1.0",
+    "description": "Public HTTP contract for package discovery, immutable publication, artifacts, organization ownership, semantic search, and audit verification."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "system"
+    },
+    {
+      "name": "packages"
+    },
+    {
+      "name": "publishing"
+    },
+    {
+      "name": "artifacts"
+    },
+    {
+      "name": "search"
+    },
+    {
+      "name": "organizations"
+    },
+    {
+      "name": "audit"
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Report registry and database health",
+        "tags": [
+          "system"
+        ],
+        "responses": {
+          "200": {
+            "description": "Health status"
+          }
+        },
+        "security": [],
+        "x-ore-visibility": "public",
+        "x-ore-stability": "stable",
+        "x-ore-mcp-expose": true,
+        "x-ore-mcp-mutating": false
+      }
+    },
+    "/v1/packages": {
+      "get": {
+        "operationId": "listPackages",
+        "summary": "List visible registry packages",
+        "tags": [
+          "packages"
+        ],
+        "responses": {
+          "200": {
+            "description": "Package listing"
+          }
+        },
+        "x-ore-visibility": "public",
+        "x-ore-stability": "stable",
+        "x-ore-mcp-expose": true,
+        "x-ore-mcp-mutating": false
+      }
+    },
+    "/v1/packages/{org}/{name}": {
+      "parameters": [
+        {
+          "name": "org",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Organization slug."
+        },
+        {
+          "name": "name",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Package name."
+        }
+      ],
+      "get": {
+        "operationId": "getPackage",
+        "summary": "Get package metadata and visible versions",
+        "tags": [
+          "packages"
+        ],
+        "responses": {
+          "200": {
+            "description": "Package metadata"
+          },
+          "404": {
+            "description": "Package not found"
+          }
+        },
+        "x-ore-visibility": "public",
+        "x-ore-stability": "stable",
+        "x-ore-mcp-expose": true,
+        "x-ore-mcp-mutating": false
+      }
+    },
+    "/v1/packages/{org}/{name}/versions/{version}": {
+      "parameters": [
+        {
+          "name": "org",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Organization slug."
+        },
+        {
+          "name": "name",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Package name."
+        },
+        {
+          "name": "version",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Package version identity."
+        }
+      ],
+      "get": {
+        "operationId": "getPackageVersion",
+        "summary": "Get one package version",
+        "tags": [
+          "packages"
+        ],
+        "responses": {
+          "200": {
+            "description": "Version metadata"
+          },
+          "404": {
+            "description": "Version not found"
+          }
+        },
+        "x-ore-visibility": "public",
+        "x-ore-stability": "stable",
+        "x-ore-mcp-expose": true,
+        "x-ore-mcp-mutating": false
+      },
+      "put": {
+        "operationId": "publishPackageVersion",
+        "summary": "Publish an immutable package version",
+        "tags": [
+          "publishing"
+        ],
+        "responses": {
+          "201": {
+            "description": "Version published"
+          },
+          "409": {
+            "description": "Version already exists"
+          }
+        },
+        "x-ore-visibility": "public",
+        "x-ore-stability": "stable",
+        "x-ore-mcp-expose": false,
+        "x-ore-mcp-mutating": true
+      }
+    },
+    "/v1/packages/{org}/{name}/versions/{version}/yank": {
+      "parameters": [
+        {
+          "name": "org",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Organization slug."
+        },
+        {
+          "name": "name",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Package name."
+        },
+        {
+          "name": "version",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Package version identity."
+        }
+      ],
+      "post": {
+        "operationId": "setPackageVersionYankState",
+        "summary": "Yank or restore a package version",
+        "tags": [
+          "publishing"
+        ],
+        "responses": {
+          "200": {
+            "description": "Yank state updated"
+          },
+          "404": {
+            "description": "Version not found"
+          }
+        },
+        "x-ore-visibility": "public",
+        "x-ore-stability": "stable",
+        "x-ore-mcp-expose": false,
+        "x-ore-mcp-mutating": true
+      }
+    },
+    "/v1/artifacts/{sha256}": {
+      "parameters": [
+        {
+          "name": "sha256",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "description": "Artifact SHA-256 digest."
+        }
+      ],
+      "get": {
+        "operationId": "downloadArtifact",
+        "summary": "Download a package artifact by digest",
+        "tags": [
+          "artifacts"
+        ],
+        "responses": {
+          "200": {
+            "description": "Artifact bytes"
+          },
+          "404": {
+            "description": "Artifact not found"
+          }
+        },
+        "x-ore-visibility": "public",
+        "x-ore-stability": "stable",
+        "x-ore-mcp-expose": true,
+        "x-ore-mcp-mutating": false
+      }
+    },
+    "/v1/files/{org}/{name}/{version}/{path}": {
+      "parameters": [
+        {
+          "name": "org",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Organization slug."
+        },
+        {
+          "name": "name",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Package name."
+        },
+        {
+          "name": "version",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Package version identity."
+        },
+        {
+          "name": "path",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Path inside the package artifact."
+        }
+      ],
+      "get": {
+        "operationId": "getPackageFile",
+        "summary": "Read one file from a package artifact",
+        "tags": [
+          "artifacts"
+        ],
+        "responses": {
+          "200": {
+            "description": "File bytes"
+          },
+          "404": {
+            "description": "File not found"
+          }
+        },
+        "x-ore-visibility": "public",
+        "x-ore-stability": "stable",
+        "x-ore-mcp-expose": true,
+        "x-ore-mcp-mutating": false
+      }
+    },
+    "/v1/search": {
+      "get": {
+        "operationId": "searchPackages",
+        "summary": "Search registry packages",
+        "tags": [
+          "search"
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results"
+          }
+        },
+        "x-ore-visibility": "public",
+        "x-ore-stability": "stable",
+        "x-ore-mcp-expose": true,
+        "x-ore-mcp-mutating": false
+      }
+    },
+    "/v1/search/semantic": {
+      "post": {
+        "operationId": "semanticSearchPackages",
+        "summary": "Search packages using an embedding query",
+        "tags": [
+          "search"
+        ],
+        "responses": {
+          "200": {
+            "description": "Semantic search results"
+          }
+        },
+        "x-ore-visibility": "public",
+        "x-ore-stability": "beta",
+        "x-ore-mcp-expose": false,
+        "x-ore-mcp-mutating": true
+      }
+    },
+    "/v1/packages/{org}/{name}/embedding": {
+      "parameters": [
+        {
+          "name": "org",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Organization slug."
+        },
+        {
+          "name": "name",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Package name."
+        }
+      ],
+      "put": {
+        "operationId": "upsertPackageEmbedding",
+        "summary": "Create or replace a package embedding",
+        "tags": [
+          "search"
+        ],
+        "responses": {
+          "200": {
+            "description": "Embedding stored"
+          },
+          "404": {
+            "description": "Package not found"
+          }
+        },
+        "x-ore-visibility": "public",
+        "x-ore-stability": "beta",
+        "x-ore-mcp-expose": false,
+        "x-ore-mcp-mutating": true
+      }
+    },
+    "/v1/orgs": {
+      "post": {
+        "operationId": "claimOrganization",
+        "summary": "Claim a registry organization",
+        "tags": [
+          "organizations"
+        ],
+        "responses": {
+          "201": {
+            "description": "Organization claimed"
+          },
+          "409": {
+            "description": "Organization already claimed"
+          }
+        },
+        "x-ore-visibility": "public",
+        "x-ore-stability": "stable",
+        "x-ore-mcp-expose": false,
+        "x-ore-mcp-mutating": true
+      }
+    },
+    "/v1/orgs/{org}/audit": {
+      "parameters": [
+        {
+          "name": "org",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Organization slug."
+        }
+      ],
+      "get": {
+        "operationId": "getOrganizationAuditLog",
+        "summary": "Read an organization audit log",
+        "tags": [
+          "audit"
+        ],
+        "responses": {
+          "200": {
+            "description": "Audit log"
+          },
+          "404": {
+            "description": "Organization not found"
+          }
+        },
+        "x-ore-visibility": "public",
+        "x-ore-stability": "stable",
+        "x-ore-mcp-expose": true,
+        "x-ore-mcp-mutating": false
+      }
+    },
+    "/v1/orgs/{org}/audit/verify": {
+      "parameters": [
+        {
+          "name": "org",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Organization slug."
+        }
+      ],
+      "get": {
+        "operationId": "verifyOrganizationAuditLog",
+        "summary": "Verify an organization audit hash chain",
+        "tags": [
+          "audit"
+        ],
+        "responses": {
+          "200": {
+            "description": "Audit verification result"
+          },
+          "404": {
+            "description": "Organization not found"
+          }
+        },
+        "x-ore-visibility": "public",
+        "x-ore-stability": "stable",
+        "x-ore-mcp-expose": true,
+        "x-ore-mcp-mutating": false
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque registry token"
+      }
+    }
+  }
+}
