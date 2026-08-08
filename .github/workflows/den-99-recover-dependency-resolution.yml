@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: den-99-dependency-resolution-recovery-${{ github.ref }}
@@ -17,7 +17,6 @@ concurrency:
 
 jobs:
   recover:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -26,7 +25,7 @@ jobs:
         with:
           ref: agent/den-99-dependency-resolution-recovery
           fetch-depth: 0
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Install Node.js for pinned Quint validation
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -54,8 +53,8 @@ jobs:
         run: |
           set -euo pipefail
           git apply --check --3way .github/recovery/DEN-99-dependency-resolution.patch
-          git apply --3way --index .github/recovery/DEN-99-dependency-resolution.patch
-          git diff --cached --check
+          git apply --3way .github/recovery/DEN-99-dependency-resolution.patch
+          git diff --check
           ! grep -RInE '^(<<<<<<<|=======|>>>>>>>)' \
             .github/workflows/formal-methods.yml \
             formal/README.md \
@@ -116,29 +115,44 @@ jobs:
             exit 1
           fi
 
-      - name: Replace carriers with product-only commit
+      - name: Export exact validated product tree
         shell: bash
         run: |
           set -euo pipefail
-          base=9d019325d42508aec883cfe86f59ce1461063b9c
-          git rm \
-            .github/recovery/DEN-99-dependency-resolution.patch \
-            .github/workflows/den-99-recover-dependency-resolution.yml
-          git add \
-            .github/workflows/formal-methods.yml \
-            formal/README.md \
-            formal/dependency_resolution.fm.toml \
-            formal/dependency_resolution.qnt
-          git diff --cached --check
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'feat(DEN-99): model deterministic dependency resolution'
-          git diff --name-only "$base"...HEAD | sort > /tmp/product.actual
-          cat > /tmp/product.expected <<'EOF'
-          .github/workflows/formal-methods.yml
-          formal/README.md
-          formal/dependency_resolution.fm.toml
-          formal/dependency_resolution.qnt
+          root="$RUNNER_TEMP/den-99-product"
+          mkdir -p "$root/.github/workflows" "$root/formal"
+          cp .github/workflows/formal-methods.yml "$root/.github/workflows/formal-methods.yml"
+          cp formal/README.md "$root/formal/README.md"
+          cp formal/dependency_resolution.fm.toml "$root/formal/dependency_resolution.fm.toml"
+          cp formal/dependency_resolution.qnt "$root/formal/dependency_resolution.qnt"
+          (
+            cd "$root"
+            find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          )
+          cat > "$root/RECOVERY_EVIDENCE.json" <<EOF
+          {
+            "schema_version": 1,
+            "source_branch_head": "${GITHUB_SHA}",
+            "base_commit": "9d019325d42508aec883cfe86f59ce1461063b9c",
+            "source_artifact": "DEN-99-dependency-resolution.patch",
+            "source_file_id": "file_00000000810481f78c4cd3b1052881c9",
+            "validation": [
+              "git-apply-three-way",
+              "diff-check",
+              "conflict-marker-scan",
+              "actionlint",
+              "manifest-contract",
+              "quint-0.32.0-typecheck",
+              "credential-shape-scan"
+            ]
+          }
           EOF
-          diff -u /tmp/product.expected /tmp/product.actual
-          git push origin HEAD:agent/den-99-dependency-resolution-recovery
+
+      - name: Upload product tree for authenticated App publication
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: den-99-product-${{ github.sha }}
+          path: ${{ runner.temp }}/den-99-product
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: error
