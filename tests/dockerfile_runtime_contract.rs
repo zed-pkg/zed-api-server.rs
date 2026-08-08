@@ -23,6 +23,12 @@ fn runtime_image_installs_a_system_tls_trust_store_before_dropping_privileges() 
         .find("USER zed")
         .expect("runtime stage must still drop to the unprivileged zed user");
 
-    assert!(install < cleanup, "apt indexes must be removed after installation");
-    assert!(cleanup < user, "the trust store must be installed before USER zed");
+    assert!(
+        install < cleanup,
+        "apt indexes must be removed after installation"
+    );
+    assert!(
+        cleanup < user,
+        "the trust store must be installed before USER zed"
+    );
 }
