@@ -1,7 +1,10 @@
 # Re-opens exactly what the cluster-local bootstrap API needs on top of the
-# tenant's default-deny policy. While authentication, rate limiting, tag
-# verification, and object storage are disabled, ingress-nginx and Internet
-# egress are intentionally absent. Public promotion must replace this policy.
+# tenant's default-deny policy. While authentication and rate limiting are
+# disabled, ingress-nginx is intentionally absent. Public promotion must
+# replace this policy. HTTPS egress is open: the s3 storage backend uploads
+# to and presigns against Cloudflare R2, and ZED_VERIFY_TAGS=github calls
+# api.github.com — with only DNS+postgres egress every publish times out in
+# put_object and surfaces as a bare 500 (verified live 2026-08-08).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -40,3 +43,5 @@ spec:
               app: zed-postgres
       ports:
         - { protocol: TCP, port: 5432 }
+    - ports:
+        - { protocol: TCP, port: 443 }
