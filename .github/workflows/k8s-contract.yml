@@ -63,5 +63,5 @@ jobs:
             grep -q 'kind: Service' "$rendered"
             grep -q 'type: ClusterIP' "$rendered"
           done
-          grep -q 'registry.aws.zpkg.tech' /tmp/aws.yaml
-          grep -q 'registry.hetzner.zpkg.tech' /tmp/hetzner.yaml
+          grep -q 'registry.aws.zpkg.net' /tmp/aws.yaml
+          grep -q 'registry.hetzner.zpkg.net' /tmp/hetzner.yaml
