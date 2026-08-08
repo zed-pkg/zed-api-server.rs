@@ -1,0 +1,144 @@
+name: DEN-99 recover dependency-resolution model
+
+on:
+  push:
+    branches:
+      - agent/den-99-dependency-resolution-recovery
+    paths:
+      - .github/workflows/den-99-recover-dependency-resolution.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: den-99-dependency-resolution-recovery-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  recover:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact recovery branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: agent/den-99-dependency-resolution-recovery
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install Node.js for pinned Quint validation
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Verify current-main ancestry and bounded carrier scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=9d019325d42508aec883cfe86f59ce1461063b9c
+          test "$(git branch --show-current)" = agent/den-99-dependency-resolution-recovery
+          test "$(git merge-base HEAD "$base")" = "$base"
+          git diff --name-only "$base"...HEAD | sort > /tmp/carriers.actual
+          cat > /tmp/carriers.expected <<'EOF'
+          .github/recovery/DEN-99-dependency-resolution.patch
+          .github/workflows/den-99-recover-dependency-resolution.yml
+          EOF
+          diff -u /tmp/carriers.expected /tmp/carriers.actual
+          test ! -e formal/dependency_resolution.fm.toml
+          test ! -e formal/dependency_resolution.qnt
+
+      - name: Apply the reviewed patch with three-way safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check --3way .github/recovery/DEN-99-dependency-resolution.patch
+          git apply --3way --index .github/recovery/DEN-99-dependency-resolution.patch
+          git diff --cached --check
+          ! grep -RInE '^(<<<<<<<|=======|>>>>>>>)' \
+            .github/workflows/formal-methods.yml \
+            formal/README.md \
+            formal/dependency_resolution.fm.toml \
+            formal/dependency_resolution.qnt
+
+      - name: Validate workflow and manifest structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            .github/workflows/formal-methods.yml
+          python3 - <<'PY'
+          from pathlib import Path
+          import tomllib
+
+          manifest = tomllib.loads(
+              Path('formal/dependency_resolution.fm.toml').read_text(encoding='utf-8')
+          )
+          assert manifest['schema_version'] == 1
+          assert manifest['project'] == 'zed-api-server'
+          assert manifest['model'] == 'dependency-resolution'
+          assert manifest['spec'] == 'formal/dependency_resolution.qnt'
+          assert manifest['main'] == 'dependency_resolution'
+          assert manifest['invariants'] == ['resolution_safety']
+          assert set(manifest['witnesses']) == {
+              'highest_solution_reached',
+              'yank_fallback_reached',
+              'mirror_lag_failure_reached',
+              'missing_dependency_reached',
+              'cycle_failure_reached',
+              'idempotent_replay_reached',
+          }
+          assert manifest['toolchain']['quint'] == '0.32.0'
+          assert manifest['verification']['backend'] == 'tlc'
+          assert manifest['verification']['exhaustive_finite_model'] is True
+          PY
+
+      - name: Type-check the recovered Quint model
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx --yes --package='@informalsystems/quint@0.32.0' \
+            quint typecheck formal/dependency_resolution.qnt
+
+      - name: Scan intended product content for credential material
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -RInE \
+            '(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)' \
+            .github/workflows/formal-methods.yml \
+            formal/README.md \
+            formal/dependency_resolution.fm.toml \
+            formal/dependency_resolution.qnt; then
+            echo 'credential-shaped material found in intended product scope' >&2
+            exit 1
+          fi
+
+      - name: Replace carriers with product-only commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=9d019325d42508aec883cfe86f59ce1461063b9c
+          git rm \
+            .github/recovery/DEN-99-dependency-resolution.patch \
+            .github/workflows/den-99-recover-dependency-resolution.yml
+          git add \
+            .github/workflows/formal-methods.yml \
+            formal/README.md \
+            formal/dependency_resolution.fm.toml \
+            formal/dependency_resolution.qnt
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(DEN-99): model deterministic dependency resolution'
+          git diff --name-only "$base"...HEAD | sort > /tmp/product.actual
+          cat > /tmp/product.expected <<'EOF'
+          .github/workflows/formal-methods.yml
+          formal/README.md
+          formal/dependency_resolution.fm.toml
+          formal/dependency_resolution.qnt
+          EOF
+          diff -u /tmp/product.expected /tmp/product.actual
+          git push origin HEAD:agent/den-99-dependency-resolution-recovery
