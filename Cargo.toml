@@ -52,6 +52,14 @@ zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# Independent parsers for the YAML/TOML representations this service emits.
+# Test-only on purpose: the emitters are hand-written because the contract
+# constrains the output past what a general serializer guarantees (safe YAML
+# subset, normalized TOML, absent optionals omitted), so round-trip tests have
+# to be judged by a third-party parser rather than by the same code that wrote
+# the bytes.
+serde_yaml = "0.9"
+toml = "0.9"
 # SQLite is pulled in only for tests (dev-dependencies are excluded from
 # `cargo build --release`), giving publish/claim handlers a real in-memory
 # database to exercise transaction/immutability behavior against.
