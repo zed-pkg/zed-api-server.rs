@@ -39,6 +39,9 @@ pub const ROUTE_ORGS: &str = "/v1/orgs";
 pub const ROUTE_AUDIT: &str = "/v1/orgs/{org}/audit";
 pub const ROUTE_AUDIT_VERIFY: &str = "/v1/orgs/{org}/audit/verify";
 pub const ROUTE_FILES: &str = "/v1/files/{org}/{name}/{version}/{*path}";
+pub const ROUTE_DECLARED_GRAPH: &str =
+    "/v1/packages/{org}/{name}/versions/{version}/dependency-graph";
+pub const ROUTE_RESOLUTION_GRAPH: &str = "/v1/resolutions/{resolution_digest}/dependency-graph";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_IN_FLIGHT_REQUESTS: usize = 512;
