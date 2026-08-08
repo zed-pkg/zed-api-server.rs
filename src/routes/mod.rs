@@ -108,6 +108,7 @@ pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
         .route(ROUTE_ORGS, post(orgs::claim_org))
         .route(ROUTE_AUDIT, get(audit::get_audit_log))
         .route(ROUTE_AUDIT_VERIFY, get(audit::verify_audit_log))
+        .route(ROUTE_RESOLUTION_GRAPH, get(graph::get_resolution_graph))
         .merge(artifact_routes)
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
         .merge(publish_route)
