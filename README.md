@@ -1,6 +1,6 @@
 # zed-api-server
 
-The [zed-pkg](https://zpkg.net) registry REST API, in Rust: package and
+The [zed-pkg](https://zpkg.tech) registry REST API, in Rust: package and
 version metadata in Postgres (SeaORM + the `migration/` crate), with artifact
 archives (tar.gz/zip) in bounded process memory for disposable certification,
 local disk for development/self-hosting, or any S3-compatible object storage —

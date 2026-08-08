@@ -17,12 +17,6 @@ WORKDIR /work/zed-api-server.rs
 RUN cargo build --release --locked
 
 FROM debian:12-slim
-# Root CAs are required for outbound TLS: the s3 storage backend (Cloudflare
-# R2 / AWS) and ZED_VERIFY_TAGS=github both dial https endpoints, and
-# debian:12-slim ships no trust store.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
 ARG ZED_API_REVISION=unknown
 ARG ZED_INTERFACES_REVISION=unknown
 LABEL org.opencontainers.image.title="Zed registry API" \
@@ -31,6 +25,12 @@ LABEL org.opencontainers.image.title="Zed registry API" \
       org.opencontainers.image.revision="$ZED_API_REVISION" \
       org.opencontainers.image.licenses="MIT" \
       io.zpkg.interfaces.revision="$ZED_INTERFACES_REVISION"
+# The AWS SDK and reqwest both need a system trust store for HTTPS S3-compatible
+# endpoints. Debian slim does not include one, so Cloudflare R2 and AWS S3 fail
+# during TLS setup even though plaintext local MinIO remains healthy.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 zed
 COPY --from=build /work/zed-api-server.rs/target/release/zed-api-server /usr/local/bin/zed-api-server
 USER zed
