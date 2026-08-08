@@ -941,6 +941,319 @@ url = "https://github.com/acme/app"
         );
     }
 
+    // -----------------------------------------------------------------------
+    // End-to-end through the real router, against a real stored artifact.
+    // -----------------------------------------------------------------------
+
+    /// A published artifact carrying the fixture manifest, so the endpoint
+    /// reads its declaration from package bytes exactly as in production.
+    fn artifact_with_manifest() -> Vec<u8> {
+        use std::io::Write;
+        let manifest = r#"
+[package]
+org = "acme"
+name = "http-kit"
+version = "1.0.0"
+
+[package.repository]
+url = "https://github.com/acme/http-kit"
+
+[dependencies]
+"acme/corelib" = "^2"
+"#;
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(manifest.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(
+                    &mut header,
+                    format!(
+                        "{}/{}",
+                        zed_interfaces::paths::ARCHIVE_ROOT,
+                        zed_interfaces::paths::MANIFEST_FILE
+                    ),
+                    manifest.as_bytes(),
+                )
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let mut encoder =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&tar_bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    async fn seeded_app() -> axum::Router {
+        use chrono::Utc;
+        use sea_orm::{ActiveModelTrait, ActiveValue, ConnectionTrait, Database, Schema};
+        use uuid::Uuid;
+
+        use crate::config::{StorageConfig, TagPolicy};
+        use crate::entities::{org, package, token, version};
+        use crate::storage::ArtifactStore;
+        use crate::verify::TagVerifier;
+
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let backend = db.get_database_backend();
+        let schema = Schema::new(backend);
+        for stmt in [
+            schema.create_table_from_entity(org::Entity),
+            schema.create_table_from_entity(token::Entity),
+            schema.create_table_from_entity(package::Entity),
+            schema.create_table_from_entity(version::Entity),
+        ] {
+            db.execute(backend.build(&stmt)).await.unwrap();
+        }
+
+        let org_id = Uuid::new_v4();
+        let pkg_id = Uuid::new_v4();
+        org::ActiveModel {
+            id: ActiveValue::Set(org_id),
+            slug: ActiveValue::Set("acme".to_string()),
+            created_at: ActiveValue::Set(Utc::now()),
+            created_by_token: ActiveValue::Set(None),
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        package::ActiveModel {
+            id: ActiveValue::Set(pkg_id),
+            org_id: ActiveValue::Set(org_id),
+            name: ActiveValue::Set("http-kit".to_string()),
+            description: ActiveValue::Set(None),
+            vcs: ActiveValue::Set("git".to_string()),
+            repo_url: ActiveValue::Set("https://github.com/acme/http-kit".to_string()),
+            version_scheme: ActiveValue::Set("semver".to_string()),
+            tags: ActiveValue::Set(serde_json::json!([])),
+            created_at: ActiveValue::Set(Utc::now()),
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        version::ActiveModel {
+            id: ActiveValue::Set(Uuid::new_v4()),
+            package_id: ActiveValue::Set(pkg_id),
+            version: ActiveValue::Set("1.0.0".to_string()),
+            sha256: ActiveValue::Set("a".repeat(64)),
+            size: ActiveValue::Set(1),
+            format: ActiveValue::Set("tar.gz".to_string()),
+            vcs_tag: ActiveValue::Set("v1.0.0".to_string()),
+            vcs_commit: ActiveValue::Set(None),
+            artifact_key: ActiveValue::Set("artifacts/graph.tar.gz".to_string()),
+            yanked: ActiveValue::Set(false),
+            published_at: ActiveValue::Set(Utc::now()),
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("zed-api-graph-test-{}", Uuid::new_v4()));
+        let store = ArtifactStore::from_config(&StorageConfig::Local {
+            dir: dir.to_string_lossy().to_string(),
+        })
+        .await
+        .unwrap();
+        store
+            .put(
+                "artifacts/graph.tar.gz",
+                artifact_with_manifest().into(),
+                "application/gzip",
+            )
+            .await
+            .unwrap();
+
+        super::super::router(
+            Arc::new(AppState {
+                db,
+                store,
+                verifier: TagVerifier::new(TagPolicy::Off),
+                public_base_url: "https://registry.zpkg.net".to_string(),
+                max_orgs_per_token: 5,
+                fiducia: None,
+                rate_limiter: None,
+            }),
+            8 * 1024 * 1024,
+        )
+    }
+
+    async fn request(
+        app: &axum::Router,
+        method: &str,
+        uri: &str,
+        request_headers: &[(header::HeaderName, &str)],
+    ) -> Response {
+        use tower::util::ServiceExt;
+        let mut builder = axum::http::Request::builder().method(method).uri(uri);
+        for (name, value) in request_headers {
+            builder = builder.header(name, *value);
+        }
+        app.clone()
+            .oneshot(builder.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    const DECLARED_URI: &str =
+        "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph?view=declared";
+
+    /// The served declaration comes from the published artifact and verifies
+    /// byte-exactly as canonical JSON.
+    #[tokio::test]
+    async fn declared_graph_is_served_from_the_published_artifact() {
+        let app = seeded_app().await;
+        let response = request(&app, "GET", DECLARED_URI, &[]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            DependencyGraphFormat::Json.media_type()
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename=\"acme_http-kit_1.0.0.dependency-graph.json\""
+        );
+        let digest = response
+            .headers()
+            .get(DEPENDENCY_GRAPH_DIGEST_HEADER)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let document = DependencyGraphDocument::parse_verified_canonical(&body)
+            .expect("served bytes are canonical and verify");
+        assert_eq!(document.graph_digest.as_deref(), Some(digest.as_str()));
+        let DependencyGraphData::Declared {
+            package,
+            dependencies,
+        } = &document.graph
+        else {
+            panic!("declared view");
+        };
+        assert_eq!(package.registry_id, "registry:registry.zpkg.net");
+        assert_eq!(package.name, "http-kit");
+        assert_eq!(dependencies.len(), 1);
+        assert_eq!(dependencies[0].requirement, "^2");
+    }
+
+    /// `HEAD` answers with the same metadata and no body; a matching
+    /// `If-None-Match` yields 304 for that representation only.
+    #[tokio::test]
+    async fn head_and_conditional_requests_behave_per_representation() {
+        let app = seeded_app().await;
+        let head = request(&app, "HEAD", DECLARED_URI, &[]).await;
+        assert_eq!(head.status(), StatusCode::OK);
+        let etag = head.headers().get(header::ETAG).unwrap().to_str().unwrap().to_string();
+        assert!(head.headers().contains_key(DEPENDENCY_GRAPH_DIGEST_HEADER));
+        let head_body = axum::body::to_bytes(head.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(head_body.is_empty(), "HEAD carries no body");
+
+        let conditional = request(
+            &app,
+            "GET",
+            DECLARED_URI,
+            &[(header::IF_NONE_MATCH, etag.as_str())],
+        )
+        .await;
+        assert_eq!(conditional.status(), StatusCode::NOT_MODIFIED);
+
+        // The same validator against the YAML representation must NOT match.
+        let other = request(
+            &app,
+            "GET",
+            &format!("{DECLARED_URI}&format=yaml"),
+            &[(header::IF_NONE_MATCH, etag.as_str())],
+        )
+        .await;
+        assert_eq!(other.status(), StatusCode::OK);
+    }
+
+    /// Every miss — unknown org, package, version, or resolution digest —
+    /// answers identically, so probing cannot enumerate what exists.
+    #[tokio::test]
+    async fn misses_are_indistinguishable() {
+        let app = seeded_app().await;
+        let mut bodies = Vec::new();
+        for uri in [
+            "/v1/packages/nope/http-kit/versions/1.0.0/dependency-graph?view=declared",
+            "/v1/packages/acme/nope/versions/1.0.0/dependency-graph?view=declared",
+            "/v1/packages/acme/http-kit/versions/9.9.9/dependency-graph?view=declared",
+            "/v1/resolutions/sha256:0000000000000000000000000000000000000000000000000000000000000000/dependency-graph",
+            "/v1/resolutions/not-a-digest/dependency-graph",
+        ] {
+            let response = request(&app, "GET", uri, &[]).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+            bodies.push(
+                axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            );
+        }
+        assert!(
+            bodies.windows(2).all(|pair| pair[0] == pair[1]),
+            "denial bodies must be byte-identical: {bodies:?}"
+        );
+    }
+
+    /// The package-version route serves declarations only: asking it for a
+    /// resolved graph is an explicit error, never a different answer.
+    #[tokio::test]
+    async fn package_route_refuses_to_invent_a_universal_resolved_graph() {
+        let app = seeded_app().await;
+        for uri in [
+            "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph",
+            "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph?view=resolved",
+        ] {
+            let response = request(&app, "GET", uri, &[]).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(error["code"], "unsupported_view");
+        }
+    }
+
+    /// Negotiation over the wire: each representation is served under its own
+    /// media type, and a conflict is refused rather than silently resolved.
+    #[tokio::test]
+    async fn representations_and_conflicts_over_http() {
+        let app = seeded_app().await;
+        for (format, expected) in [
+            ("yaml", DependencyGraphFormat::Yaml),
+            ("toml", DependencyGraphFormat::Toml),
+            ("dot", DependencyGraphFormat::Dot),
+            ("mermaid", DependencyGraphFormat::Mermaid),
+        ] {
+            let response =
+                request(&app, "GET", &format!("{DECLARED_URI}&format={format}"), &[]).await;
+            assert_eq!(response.status(), StatusCode::OK, "{format}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                expected.media_type(),
+                "{format}"
+            );
+        }
+
+        let conflict = request(
+            &app,
+            "GET",
+            &format!("{DECLARED_URI}&format=toml"),
+            &[(header::ACCEPT, DependencyGraphFormat::Json.media_type())],
+        )
+        .await;
+        assert_eq!(conflict.status(), StatusCode::NOT_ACCEPTABLE);
+    }
+
     #[test]
     fn convenience_renderings_declare_they_are_not_authoritative() {
         let document = sample_document();
