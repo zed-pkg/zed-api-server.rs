@@ -1,0 +1,62 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Durable-storage overlay: Cloudflare R2 (S3 API) instead of the base's
+# process-memory bootstrap. This overlay is INTENTIONALLY not one of the
+# cluster-local bootstrap overlays (aws/hetzner), which the k8s-contract render
+# gate pins to STORAGE_BACKEND=memory until public promotion (DEN-534/535). It
+# exists so that promotion can adopt a pre-certified R2 configuration instead of
+# hand-editing env on a live deployment.
+#
+# Certified live on dd-ec2-runtime 2026-08-08: full CLI lifecycle (publish,
+# idempotent republish, changed-bytes rejection, find, install, yank) with
+# download 302ing to a 600s presigned R2 URL and the artifact byte-identical in
+# the bucket.
+#
+# Prerequisites the platform layer still owns:
+#   * a pgvector-capable Postgres (the embeddings_and_tags migration needs the
+#     `vector` extension; postgres:16-alpine crash-loops the API)
+#   * a Secret `zed-r2-creds` in ns `zed` carrying AWS_ACCESS_KEY_ID /
+#     AWS_SECRET_ACCESS_KEY for the bucket. The account-wide R2 pair is slated
+#     for rotation under DEN-2836 — re-seed the Secret when that lands. The
+#     dormant k8s/externalsecret.yaml is the eventual ESO path once
+#     dd-cluster-secrets carries the R2 pair.
+
+resources:
+  - ../../base
+  - networkpolicy-egress.yaml
+
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: dd-zed-api-server
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: dd-zed-api-server
+      spec:
+        template:
+          spec:
+            containers:
+              - name: zed-api-server
+                env:
+                  - name: STORAGE_BACKEND
+                    value: s3
+                  - name: S3_BUCKET
+                    value: zed-pkg-artifacts
+                  - name: S3_ENDPOINT_URL
+                    value: https://62b833940607839add74bd2379cac303.r2.cloudflarestorage.com
+                  - name: S3_REGION
+                    value: auto
+                  - name: S3_FORCE_PATH_STYLE
+                    value: "true"
+                  # Drop the memory-backend cap so it is not carried alongside
+                  # the s3 backend where it has no meaning.
+                  - name: STORAGE_MEMORY_MAX_BYTES
+                    value: null
+                envFrom:
+                  - secretRef:
+                      name: zed-r2-creds
