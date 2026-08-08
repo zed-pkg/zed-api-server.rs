@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::state::AppState;
 use crate::storage::ArtifactStore;
 use crate::verify::TagVerifier;
-use crate::{auth, ratelimit, routes, tokens};
+use crate::{api_docs, auth, ratelimit, routes, tokens};
 
 #[derive(Debug, PartialEq, Eq)]
 enum ProcessCommand<'a> {
@@ -77,7 +77,11 @@ pub(crate) async fn run() -> Result<()> {
         rate_limiter,
     });
 
-    let app = routes::router(state, cfg.max_artifact_bytes);
+    // Keep the state-free public documentation surface outside the registry
+    // router so it cannot inherit token auth or per-token rate limiting.
+    let app = axum::Router::new()
+        .merge(api_docs::router())
+        .merge(routes::router(state, cfg.max_artifact_bytes));
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     tracing::info!("zed-api-server listening on {}", cfg.bind_addr);
     axum::serve(listener, app).await?;
