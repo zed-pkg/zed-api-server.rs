@@ -59,22 +59,11 @@ spec:
           env:
             - { name: BIND_ADDR, value: "0.0.0.0:8080" }
             - { name: PUBLIC_BASE_URL, value: "https://registry.zpkg.tech" }
-            # Durable artifact storage on Cloudflare R2 (S3 API). Certified
-            # live on dd-ec2-runtime 2026-08-08: publish -> put_object -> R2,
-            # download -> 302 to a 600s presigned R2 URL. Requires the 443
-            # egress rule in networkpolicy.yaml, a pgvector-capable Postgres
-            # (the embeddings migration), and the AWS_* key pair from the
-            # zed-r2-creds Secret (out-of-band today; move to the
-            # dd-zed-api-secrets ExternalSecret once the dd-cluster-secrets
-            # store carries the R2 pair).
-            - { name: STORAGE_BACKEND, value: "s3" }
-            - { name: S3_BUCKET, value: "zed-pkg-artifacts" }
-            - { name: S3_ENDPOINT_URL, value: "https://62b833940607839add74bd2379cac303.r2.cloudflarestorage.com" }
-            - { name: S3_REGION, value: "auto" }
-            - { name: S3_FORCE_PATH_STYLE, value: "true" }
-          envFrom:
-            - secretRef:
-                name: zed-r2-creds
+            - { name: STORAGE_BACKEND, value: "memory" }
+            # Keep artifact bytes below half the pod's 512 MiB limit so Tokio,
+            # multipart parsing, metadata, and archive extraction retain
+            # explicit headroom. The server rejects writes over this total.
+            - { name: STORAGE_MEMORY_MAX_BYTES, value: "268435456" }
             # TEMPORARY bootstrap posture. Restore all three controls before
             # adding any public API route.
             - { name: ZED_AUTH_DISABLED, value: "1" }
