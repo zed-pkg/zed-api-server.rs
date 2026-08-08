@@ -316,6 +316,16 @@ mod tests {
             fill(ROUTE_FILES),
             r::file_path("acme", "http-kit", "1.2.0", "dist/style.css")
         );
+        // The declared helper carries the mandatory `?view=declared` selector;
+        // the route pattern is the path half of it.
+        assert_eq!(
+            format!("{}?view=declared", fill(ROUTE_DECLARED_GRAPH)),
+            zed_interfaces::declared_dependency_graph_path("acme", "http-kit", "1.2.0")
+        );
+        assert_eq!(
+            ROUTE_RESOLUTION_GRAPH.replace("{resolution_digest}", "sha256:abc"),
+            zed_interfaces::resolution_dependency_graph_path("sha256:abc")
+        );
     }
 
     #[tokio::test]
