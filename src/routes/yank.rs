@@ -103,6 +103,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("zed-api-yank-test-{}", Uuid::new_v4()));
         Arc::new(AppState {
             db,
+            registry_read: None,
+            registry_write: None,
             store: ArtifactStore::from_config(&StorageConfig::Local {
                 dir: dir.to_string_lossy().to_string(),
             })

@@ -13,53 +13,60 @@ const ACCOUNT_BODY_LIMIT: usize = 64 * 1024;
 const ACCOUNT_TIMEOUT: Duration = Duration::from_secs(15);
 const ACCOUNT_MAX_IN_FLIGHT: usize = 256;
 
-/// Account and organization management is intentionally isolated from legacy
-/// package-token routes. It carries the same resource/security layers while
-/// using Shared Auth plus zed-orm membership authorization.
-pub fn router(state: Arc<AppState>) -> Router {
+fn account_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/v1/auth/config", get(account::auth_config))
-        .route("/v1/auth/exchange", post(account::exchange_supabase))
+        .route("/auth/config", get(account::auth_config))
+        .route("/auth/exchange", post(account::exchange_supabase))
         .route(
-            "/v1/account/me",
+            "/account/me",
             get(account::me).put(account::update_user_settings),
         )
-        .route("/v1/account/home", get(account::home))
-        .route("/v1/account/search", get(account::search))
-        .route("/v1/account/orgs", post(account::create_org))
-        .route("/v1/account/orgs/{org}", get(account::org_dashboard))
+        .route("/account/home", get(account::home))
+        .route("/account/search", get(account::search))
+        .route("/account/orgs", post(account::create_org))
+        .route("/account/orgs/{org}", get(account::org_dashboard))
         .route(
-            "/v1/account/orgs/{org}/invitations",
+            "/account/orgs/{org}/invitations",
             post(account::invite_org_member),
         )
         .route(
-            "/v1/account/orgs/{org}/projects",
+            "/account/orgs/{org}/projects",
             post(account::create_project),
         )
         .route(
-            "/v1/account/orgs/{org}/projects/{project}/invitations",
+            "/account/orgs/{org}/projects/{project}/invitations",
             post(account::invite_project_member),
         )
         .route(
-            "/v1/account/orgs/{org}/packages",
+            "/account/orgs/{org}/packages",
             post(account::create_package),
         )
         .route(
-            "/v1/account/orgs/{org}/packages/{package}/settings",
+            "/account/orgs/{org}/packages/{package}/settings",
             put(account::update_package_settings),
         )
         .route(
-            "/v1/account/orgs/{org}/packages/{package}/public",
+            "/account/orgs/{org}/packages/{package}/public",
             post(account::make_package_public),
         )
         .route(
-            "/v1/account/orgs/{org}/packages/{package}/licenses",
+            "/account/orgs/{org}/packages/{package}/licenses",
             post(account::add_package_license),
         )
         .route(
-            "/v1/account/orgs/{org}/packages/{package}/uploads",
+            "/account/orgs/{org}/packages/{package}/uploads",
             post(account::register_package_upload),
         )
+}
+
+/// Browser/account management is intentionally isolated from machine package
+/// tokens. `/api/v1` is canonical; `/v1` remains a bounded compatibility alias
+/// while older web clients migrate.
+pub fn router(state: Arc<AppState>) -> Router {
+    let routes = account_routes();
+    Router::new()
+        .nest("/api/v1", routes.clone())
+        .nest("/v1", routes)
         .layer(DefaultBodyLimit::max(ACCOUNT_BODY_LIMIT))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -83,14 +90,19 @@ pub fn router(state: Arc<AppState>) -> Router {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn account_routes_are_namespaced_away_from_legacy_tokens() {
+    fn account_routes_have_a_canonical_api_namespace_and_a_legacy_alias() {
         for route in [
-            "/v1/account/me",
-            "/v1/account/home",
-            "/v1/account/orgs/{org}",
-            "/v1/account/orgs/{org}/packages/{package}/public",
+            "/api/v1/account/me",
+            "/api/v1/account/home",
+            "/api/v1/account/orgs/{org}",
+            "/api/v1/account/orgs/{org}/packages/{package}/public",
         ] {
-            assert!(route.starts_with("/v1/account/"));
+            assert!(route.starts_with("/api/v1/account/"));
+            assert!(
+                route
+                    .replacen("/api/v1", "/v1", 1)
+                    .starts_with("/v1/account/")
+            );
         }
     }
 }

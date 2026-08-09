@@ -314,6 +314,8 @@ mod tests {
         let dir = std::env::temp_dir().join("zed-api-test-store");
         let state = Arc::new(AppState {
             db: sea_orm::DatabaseConnection::Disconnected,
+            registry_read: None,
+            registry_write: None,
             store: ArtifactStore::from_config(&crate::config::StorageConfig::Local {
                 dir: dir.to_string_lossy().to_string(),
             })
@@ -346,6 +348,8 @@ mod tests {
         let dir = std::env::temp_dir().join("zed-api-rl-test-store");
         Arc::new(AppState {
             db: sea_orm::DatabaseConnection::Disconnected,
+            registry_read: None,
+            registry_write: None,
             store: ArtifactStore::from_config(&crate::config::StorageConfig::Local {
                 dir: dir.to_string_lossy().to_string(),
             })

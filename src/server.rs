@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use migration::MigratorTrait;
 use sea_orm::{ConnectOptions, Database};
 use tracing_subscriber::EnvFilter;
+use zed_orm_core::{ConnectPolicy, ReadContext, WriteContext};
 
 use crate::config::Config;
 use crate::shared_auth::SharedAuthClient;
@@ -40,16 +41,18 @@ pub(crate) async fn run() -> Result<()> {
 
     let cfg = Config::from_env()?;
     let db = connect_with_retry(&cfg).await?;
+    let registry_write = connect_registry_write_with_retry(&cfg).await?;
     if command == ProcessCommand::Migrate {
-        migrate_database(&db).await?;
+        migrate_database(&db, &registry_write).await?;
         return Ok(());
     }
     if cfg.auto_migrate {
         tracing::warn!(
             "AUTO_MIGRATE=true is development-only; production must run `zed-api-server migrate` as a one-shot Job"
         );
-        migrate_database(&db).await?;
+        migrate_database(&db, &registry_write).await?;
     }
+    let registry_read = connect_registry_read_with_retry(&cfg).await?;
     let store = ArtifactStore::from_config(&cfg.storage).await?;
     let fiducia = cfg.fiducia.as_ref().map(|configuration| {
         tracing::info!("fiducia locks enabled at {}", configuration.url);
@@ -83,6 +86,8 @@ pub(crate) async fn run() -> Result<()> {
     }
     let state = Arc::new(AppState {
         db,
+        registry_read: Some(registry_read),
+        registry_write: Some(registry_write),
         store,
         verifier: TagVerifier::new(cfg.verify_tags),
         public_base_url: cfg.public_base_url.trim_end_matches('/').to_string(),
@@ -99,7 +104,7 @@ pub(crate) async fn run() -> Result<()> {
             .shared_auth
             .as_ref()
             .map(|configuration| configuration.application_id.clone())
-            .unwrap_or_else(|| "zed-pkg".into()),
+            .unwrap_or_else(|| "zpkg-web".into()),
         shared_auth_public_url: cfg
             .shared_auth
             .as_ref()
@@ -124,34 +129,30 @@ fn process_command(args: &[String]) -> ProcessCommand<'_> {
     }
 }
 
-/// During the expand migration, the legacy registry migration runs first and
-/// zed-orm then owns all account, membership, search-vector, artifact-fact, and
-/// visibility-policy migrations. This command is serialized again inside
-/// zed-orm with a PostgreSQL advisory lock.
-async fn migrate_database(db: &sea_orm::DatabaseConnection) -> Result<()> {
+/// Apply the legacy machine-registry compatibility schema first, then the
+/// canonical `zed_*` contract under zed-orm-core's own advisory lock.
+async fn migrate_database(
+    db: &sea_orm::DatabaseConnection,
+    registry_write: &WriteContext,
+) -> Result<()> {
     migration::Migrator::up(db, None)
         .await
         .context("legacy registry migrations failed")?;
-    let report = zed_orm::migrate(db)
+    let report = zed_orm_core::migrations::migrate(registry_write)
         .await
-        .context("zed-orm migrations failed")?;
+        .context("canonical registry migrations failed")?;
     tracing::info!(
         migration = report.version,
         applied = report.applied,
-        "zed-orm migration batch complete"
+        "canonical registry migration batch complete"
     );
     Ok(())
 }
 
-/// Connect to Postgres, retrying until it is reachable or a bounded deadline
-/// passes.
+/// Connect to the legacy compatibility schema, retrying until it is reachable
+/// or the bounded deadline passes.
 async fn connect_with_retry(cfg: &Config) -> Result<sea_orm::DatabaseConnection> {
-    let max_wait = Duration::from_secs(
-        std::env::var("DB_CONNECT_MAX_WAIT_SECS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(30),
-    );
+    let max_wait = database_connect_max_wait();
     let started = std::time::Instant::now();
     let mut attempt = 0u32;
     loop {
@@ -171,8 +172,7 @@ async fn connect_with_retry(cfg: &Config) -> Result<sea_orm::DatabaseConnection>
             }
             Err(error) if started.elapsed() >= max_wait => {
                 return Err(anyhow::Error::new(error).context(format!(
-                    "failed to connect to DATABASE_URL after {attempt} attempts \
-                     over {}s (DB_CONNECT_MAX_WAIT_SECS)",
+                    "failed to connect to DATABASE_URL after {attempt} attempts over {}s",
                     started.elapsed().as_secs()
                 )));
             }
@@ -182,6 +182,71 @@ async fn connect_with_retry(cfg: &Config) -> Result<sea_orm::DatabaseConnection>
             }
         }
     }
+}
+
+async fn connect_registry_write_with_retry(cfg: &Config) -> Result<WriteContext> {
+    let max_wait = database_connect_max_wait();
+    let started = std::time::Instant::now();
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let policy = ConnectPolicy::default().with_max_connections(cfg.db_max_connections);
+        match zed_orm_core::connect_read_write_with_policy(&cfg.database_url, policy).await {
+            Ok(context) => {
+                if attempt > 1 {
+                    tracing::info!(attempt, "connected canonical write context after retry");
+                }
+                return Ok(context);
+            }
+            Err(error) if started.elapsed() >= max_wait => {
+                return Err(anyhow::Error::new(error).context(format!(
+                    "failed to connect canonical registry write context after {attempt} attempts over {}s",
+                    started.elapsed().as_secs()
+                )));
+            }
+            Err(error) => {
+                tracing::warn!(%error, attempt, "canonical write context not ready; retrying in 2s");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+}
+
+async fn connect_registry_read_with_retry(cfg: &Config) -> Result<ReadContext> {
+    let max_wait = database_connect_max_wait();
+    let started = std::time::Instant::now();
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let policy = ConnectPolicy::default().with_max_connections(cfg.db_max_connections);
+        match zed_orm_core::connect_read_only_with_policy(&cfg.database_url, policy).await {
+            Ok(context) => {
+                if attempt > 1 {
+                    tracing::info!(attempt, "connected canonical read context after retry");
+                }
+                return Ok(context);
+            }
+            Err(error) if started.elapsed() >= max_wait => {
+                return Err(anyhow::Error::new(error).context(format!(
+                    "failed to connect canonical registry read context after {attempt} attempts over {}s",
+                    started.elapsed().as_secs()
+                )));
+            }
+            Err(error) => {
+                tracing::warn!(%error, attempt, "canonical read context not ready; retrying in 2s");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+}
+
+fn database_connect_max_wait() -> Duration {
+    Duration::from_secs(
+        std::env::var("DB_CONNECT_MAX_WAIT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(30),
+    )
 }
 
 /// Probe the local `/healthz` endpoint for the container HEALTHCHECK.

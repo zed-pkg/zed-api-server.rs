@@ -3,7 +3,7 @@ use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use zed_orm::registry::FederatedIdentity;
+use zed_orm_core::models::SessionIdentity;
 
 use crate::entities::token;
 use crate::error::{ApiErr, ApiResult};
@@ -11,19 +11,14 @@ use crate::shared_auth::{ClientError, Introspection};
 use crate::state::AppState;
 
 const REQUIRED_ACCOUNT_SCOPE: &str = "zpkg:account";
+const CUSTOMER_AUTH_REALM: &str = "customer";
 
 /// Verified browser/account identity. The Shared Auth token is intentionally
 /// not retained: handlers receive only the canonical identity facts needed to
 /// project a registry user and evaluate product memberships.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountIdentity {
-    pub federated: FederatedIdentity,
-}
-
-impl AccountIdentity {
-    pub fn subject(&self) -> &str {
-        &self.federated.subject
-    }
+    pub session: SessionIdentity,
 }
 
 /// Tokens are stored as sha256 hex; the plaintext is shown exactly once by
@@ -69,14 +64,18 @@ fn account_from_introspection(
     if !introspection.active {
         return Err(ApiErr::unauthorized());
     }
-    let subject = required_claim(introspection.sub.as_deref())?;
-    let issuer = required_claim(introspection.iss.as_deref())?;
+    let subject = required_claim(introspection.sub.as_deref())?
+        .parse::<Uuid>()
+        .map_err(|_| ApiErr::unauthorized())?;
+    // Presence and shape of the issuer are part of the protected
+    // introspection contract even though the registry keys identities by the
+    // Shared Auth realm and canonical UUID rather than by a URL string.
+    required_claim(introspection.iss.as_deref())?;
 
     // Shared Auth represents a browser user with a revocable session-backed
     // base token and then mints a short-lived delegated product token. Its
     // protected introspection response exposes that provenance as `sid`, `azp`,
-    // and `parent_jti`; it does not emit the previous synthetic `actor_kind` or
-    // `application_id` fields.
+    // and `parent_jti`.
     let session_id = optional_rest_string(introspection, "sid")?;
     let authorized_party = optional_rest_string(introspection, "azp")?;
     let parent_jti = optional_rest_string(introspection, "parent_jti")?;
@@ -109,20 +108,23 @@ fn account_from_introspection(
         ));
     }
 
-    let supabase_user_id = optional_rest_string(introspection, "supabase_user_id")?
-        .map(|value| value.parse::<Uuid>().map_err(|_| ApiErr::unauthorized()))
-        .transpose()?;
-    let display_name = optional_rest_string(introspection, "display_name")?;
-    let avatar_url = optional_rest_string(introspection, "avatar_url")?;
+    let realm = optional_rest_string(introspection, "auth_realm")?
+        .or(optional_rest_string(introspection, "realm")?)
+        .unwrap_or_else(|| CUSTOMER_AUTH_REALM.to_owned());
+    if realm != CUSTOMER_AUTH_REALM {
+        return Err(ApiErr::forbidden(
+            "wrong_auth_realm",
+            "the zed-pkg browser client accepts customer identities only",
+        ));
+    }
 
     Ok(AccountIdentity {
-        federated: FederatedIdentity {
-            issuer,
+        session: SessionIdentity {
             subject,
-            supabase_user_id,
+            realm,
             email: introspection.email.clone(),
-            display_name,
-            avatar_url,
+            display_name: optional_rest_string(introspection, "display_name")?,
+            avatar_url: optional_rest_string(introspection, "avatar_url")?,
         },
     })
 }
@@ -192,6 +194,8 @@ pub async fn require_token(
 mod tests {
     use super::*;
 
+    const SUBJECT: &str = "ad7c2010-c28a-4cad-a510-4c4020f93535";
+
     #[test]
     fn hashing_is_stable_and_hex() {
         let hash = hash_token("zpkg_example");
@@ -221,24 +225,56 @@ mod tests {
     }
 
     #[test]
-    fn verified_delegated_user_claims_become_a_federated_identity() {
+    fn verified_delegated_user_claims_become_a_canonical_session_identity() {
         let mut rest = delegated_rest("zpkg-web", "zpkg:account zpkg:packages:write");
-        rest.insert(
-            "supabase_user_id".into(),
-            Value::String("ad7c2010-c28a-4cad-a510-4c4020f93535".into()),
-        );
+        rest.insert("auth_realm".into(), Value::String("customer".into()));
+        rest.insert("display_name".into(), Value::String("Registry User".into()));
         let introspection = Introspection {
             active: true,
-            sub: Some("shared-user-1".into()),
+            sub: Some(SUBJECT.into()),
             iss: Some("https://auth.example.test".into()),
             email: Some("user@example.test".into()),
             rest,
         };
         let identity = account_from_introspection(&introspection, "zpkg-web").unwrap();
-        assert_eq!(identity.subject(), "shared-user-1");
+        assert_eq!(identity.session.subject, SUBJECT.parse::<Uuid>().unwrap());
+        assert_eq!(identity.session.realm, "customer");
         assert_eq!(
-            identity.federated.supabase_user_id,
-            Some("ad7c2010-c28a-4cad-a510-4c4020f93535".parse().unwrap())
+            identity.session.display_name.as_deref(),
+            Some("Registry User")
+        );
+    }
+
+    #[test]
+    fn non_uuid_subjects_and_non_customer_realms_are_rejected() {
+        let malformed = Introspection {
+            active: true,
+            sub: Some("shared-user-1".into()),
+            iss: Some("https://auth.example.test".into()),
+            email: None,
+            rest: delegated_rest("zpkg-web", "zpkg:account"),
+        };
+        assert_eq!(
+            account_from_introspection(&malformed, "zpkg-web")
+                .unwrap_err()
+                .status,
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+
+        let mut rest = delegated_rest("zpkg-web", "zpkg:account");
+        rest.insert("auth_realm".into(), Value::String("admin".into()));
+        let admin = Introspection {
+            active: true,
+            sub: Some(SUBJECT.into()),
+            iss: Some("https://auth.example.test".into()),
+            email: None,
+            rest,
+        };
+        assert_eq!(
+            account_from_introspection(&admin, "zpkg-web")
+                .unwrap_err()
+                .code,
+            "wrong_auth_realm"
         );
     }
 
@@ -246,7 +282,7 @@ mod tests {
     fn base_tokens_and_wrong_authorized_parties_are_forbidden() {
         let base = Introspection {
             active: true,
-            sub: Some("shared-user-1".into()),
+            sub: Some(SUBJECT.into()),
             iss: Some("https://auth.example.test".into()),
             email: None,
             rest: serde_json::Map::new(),
@@ -260,7 +296,7 @@ mod tests {
 
         let wrong_party = Introspection {
             active: true,
-            sub: Some("shared-user-1".into()),
+            sub: Some(SUBJECT.into()),
             iss: Some("https://auth.example.test".into()),
             email: None,
             rest: delegated_rest("other-web", "zpkg:account"),
@@ -277,7 +313,7 @@ mod tests {
     fn delegated_token_without_account_scope_is_forbidden() {
         let introspection = Introspection {
             active: true,
-            sub: Some("shared-user-1".into()),
+            sub: Some(SUBJECT.into()),
             iss: Some("https://auth.example.test".into()),
             email: None,
             rest: delegated_rest("zpkg-web", "zpkg:packages:read"),

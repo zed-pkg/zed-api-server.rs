@@ -5169,7 +5169,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "zed-interfaces",
- "zed-orm",
+ "zed-orm-core",
  "zip",
 ]
 
@@ -5187,11 +5187,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "zed-orm"
+name = "zed-orm-core"
 version = "0.1.0"
-source = "git+https://github.com/zed-pkg/zed-lib.git?rev=3f96becea62efb452d1630e7e67711404e8131f2#3f96becea62efb452d1630e7e67711404e8131f2"
+source = "git+https://github.com/zed-pkg/zed-lib-core.git?rev=700f1f9578c6633a20693a5b1f52970ab845a740#700f1f9578c6633a20693a5b1f52970ab845a740"
 dependencies = [
+ "chrono",
  "sea-orm",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
