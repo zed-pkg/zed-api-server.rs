@@ -4,18 +4,20 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use migration::MigratorTrait;
 use sea_orm::{ConnectOptions, Database};
+use shared_auth_service_client::SharedAuthClient;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
 use crate::state::AppState;
 use crate::storage::ArtifactStore;
 use crate::verify::TagVerifier;
-use crate::{auth, ratelimit, routes, tokens};
+use crate::{ratelimit, routes, tokens};
 
 #[derive(Debug, PartialEq, Eq)]
 enum ProcessCommand<'a> {
     CreateToken(&'a [String]),
     Healthcheck,
+    Migrate,
     RevokeToken(&'a [String]),
     Serve,
 }
@@ -28,24 +30,25 @@ pub(crate) async fn run() -> Result<()> {
         .init();
 
     let args = std::env::args().collect::<Vec<_>>();
-    match process_command(&args) {
+    let command = process_command(&args);
+    match command {
         ProcessCommand::CreateToken(arguments) => return tokens::create_token(arguments).await,
         ProcessCommand::RevokeToken(arguments) => return tokens::revoke_token(arguments).await,
         ProcessCommand::Healthcheck => return healthcheck().await,
-        ProcessCommand::Serve => {}
+        ProcessCommand::Migrate | ProcessCommand::Serve => {}
     }
 
     let cfg = Config::from_env()?;
-    if auth::auth_disabled() {
-        tracing::warn!(
-            "AUTHENTICATION IS DISABLED (ZED_AUTH_DISABLED=1); every caller has admin authority"
-        );
-    }
     let db = connect_with_retry(&cfg).await?;
+    if command == ProcessCommand::Migrate {
+        migrate_database(&db).await?;
+        return Ok(());
+    }
     if cfg.auto_migrate {
-        migration::Migrator::up(&db, None)
-            .await
-            .context("migrations failed")?;
+        tracing::warn!(
+            "AUTO_MIGRATE=true is development-only; production must run `zed-api-server migrate` as a one-shot Job"
+        );
+        migrate_database(&db).await?;
     }
     let store = ArtifactStore::from_config(&cfg.storage).await?;
     let fiducia = cfg.fiducia.as_ref().map(|configuration| {
@@ -67,6 +70,17 @@ pub(crate) async fn run() -> Result<()> {
         ratelimit::spawn_sweeper(limiter.clone());
         Some(limiter)
     };
+    let shared_auth = cfg.shared_auth.as_ref().map(|configuration| {
+        Arc::new(
+            SharedAuthClient::new(configuration.url.clone())
+                .with_service_credential(configuration.service_credential.clone()),
+        )
+    });
+    if shared_auth.is_none() {
+        tracing::warn!(
+            "SHARED_AUTH_URL is not configured; browser/account routes will fail closed with 503"
+        );
+    }
     let state = Arc::new(AppState {
         db,
         store,
@@ -75,6 +89,21 @@ pub(crate) async fn run() -> Result<()> {
         max_orgs_per_token: cfg.max_orgs_per_token,
         fiducia,
         rate_limiter,
+        shared_auth,
+        shared_auth_audience: cfg
+            .shared_auth
+            .as_ref()
+            .map(|configuration| configuration.audience.clone())
+            .unwrap_or_else(|| "zed-pkg".into()),
+        shared_auth_application_id: cfg
+            .shared_auth
+            .as_ref()
+            .map(|configuration| configuration.application_id.clone())
+            .unwrap_or_else(|| "zed-pkg".into()),
+        shared_auth_public_url: cfg
+            .shared_auth
+            .as_ref()
+            .map(|configuration| configuration.public_url.clone()),
     });
 
     let app = routes::router(state, cfg.max_artifact_bytes);
@@ -89,17 +118,32 @@ fn process_command(args: &[String]) -> ProcessCommand<'_> {
         Some("create-token") => ProcessCommand::CreateToken(&args[2..]),
         Some("revoke-token") => ProcessCommand::RevokeToken(&args[2..]),
         Some("healthcheck") => ProcessCommand::Healthcheck,
+        Some("migrate") => ProcessCommand::Migrate,
         _ => ProcessCommand::Serve,
     }
 }
 
+/// During the expand migration, the legacy registry migration runs first and
+/// zed-orm then owns all account, membership, search-vector, artifact-fact, and
+/// visibility-policy migrations. This command is serialized again inside
+/// zed-orm with a PostgreSQL advisory lock.
+async fn migrate_database(db: &sea_orm::DatabaseConnection) -> Result<()> {
+    migration::Migrator::up(db, None)
+        .await
+        .context("legacy registry migrations failed")?;
+    let report = zed_orm::migrate(db)
+        .await
+        .context("zed-orm migrations failed")?;
+    tracing::info!(
+        migration = report.version,
+        applied = report.applied,
+        "zed-orm migration batch complete"
+    );
+    Ok(())
+}
+
 /// Connect to Postgres, retrying until it is reachable or a bounded deadline
 /// passes.
-///
-/// Unlike the read-only web server — which degrades to offline mode — the API
-/// server genuinely requires a database, so this still fails hard once the
-/// deadline is up. The retry covers the ordinary cold-start race against
-/// Postgres and DNS; the established pool handles later reconnects.
 async fn connect_with_retry(cfg: &Config) -> Result<sea_orm::DatabaseConnection> {
     let max_wait = Duration::from_secs(
         std::env::var("DB_CONNECT_MAX_WAIT_SECS")
@@ -185,6 +229,10 @@ mod tests {
         assert_eq!(
             process_command(&arguments(&["zed-api-server", "healthcheck"])),
             ProcessCommand::Healthcheck
+        );
+        assert_eq!(
+            process_command(&arguments(&["zed-api-server", "migrate"])),
+            ProcessCommand::Migrate
         );
         assert_eq!(
             process_command(&arguments(&["zed-api-server", "unknown"])),
