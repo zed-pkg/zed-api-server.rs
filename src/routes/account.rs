@@ -1,22 +1,30 @@
-//! Browser/account API backed by Shared Auth and the shared zed-orm data plane.
+//! Browser/account API backed by Shared Auth and the canonical zed-orm-core
+//! data plane.
 //!
 //! This module never receives passwords. Supabase access tokens are exchanged
-//! by Shared Auth, and every product operation is authorized again against
-//! registry-owned organization/project memberships.
+//! by Shared Auth, and every product mutation rechecks registry-owned
+//! organization/project membership inside the same PostgreSQL transaction as
+//! the write.
 
 use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
-use sea_orm::DbErr;
+use axum::http::{HeaderMap, StatusCode};
+use chrono::{Duration, Utc};
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
-use zed_orm::models::{PackageSettingsInput, UserSettingsInput};
-use zed_orm::registry::{CreatePackageInput, PackageLicenseInput, PackageUploadInput};
+use zed_orm_core::account::{
+    CreatePackageInput, CreateProjectInput, InvitationInput, PackageLicenseInput,
+    PackageSettingsPatch, PackageUploadInput,
+};
+use zed_orm_core::models::{
+    InvitationReceipt, OrgSummary, PackageSummary, ProjectSummary, UserSettingsInput, UserSummary,
+};
+use zed_orm_core::{OrmError, ReadContext, WriteContext};
 
-use crate::auth::{AccountIdentity, bearer_token, map_shared_auth_error, require_account};
+use crate::auth::{AccountIdentity, bearer_token, hash_token, map_shared_auth_error, require_account};
 use crate::error::{ApiErr, ApiResult};
 use crate::state::AppState;
 
@@ -30,12 +38,18 @@ pub struct HomeQuery {
 pub struct CreateOrgRequest {
     slug: String,
     name: String,
+    description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateProjectRequest {
     slug: String,
     name: String,
+    description: Option<String>,
+    #[serde(default = "default_private")]
+    visibility: String,
+    #[serde(default = "empty_object")]
+    settings: JsonValue,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,7 +65,11 @@ pub struct CreatePackageRequest {
     description: Option<String>,
     #[serde(default = "default_vcs")]
     vcs: String,
+    #[serde(default)]
     repo_url: String,
+    homepage_url: Option<String>,
+    #[serde(default = "empty_array")]
+    keywords: JsonValue,
     #[serde(default = "empty_object")]
     config: JsonValue,
     #[serde(default = "default_archive_format")]
@@ -62,8 +80,10 @@ pub struct CreatePackageRequest {
 pub struct PackageSettingsRequest {
     description: Option<String>,
     project_id: Option<Uuid>,
-    #[serde(default = "empty_object")]
-    config: JsonValue,
+    repo_url: Option<String>,
+    homepage_url: Option<String>,
+    keywords: Option<JsonValue>,
+    config: Option<JsonValue>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,29 +100,28 @@ pub struct PackageLicenseRequest {
     license_name: Option<String>,
     license_url: Option<String>,
     license_text: Option<String>,
-    checksum_sha256: Option<String>,
     #[serde(default)]
     is_primary: bool,
+    package_version_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct PackageUploadRequest {
-    source_upload_id: Option<Uuid>,
-    version: String,
-    archive_format: String,
-    #[serde(default = "default_upload_state")]
-    state: String,
+    package_version_id: Option<Uuid>,
+    #[serde(alias = "version")]
+    requested_version: String,
+    #[serde(default = "default_upload_status", alias = "state")]
+    status: String,
     #[serde(default = "default_storage_backend")]
     storage_backend: String,
-    storage_bucket: String,
-    storage_key: String,
-    original_filename: Option<String>,
-    size_bytes: i64,
-    sha256: String,
-    vcs_tag: Option<String>,
-    vcs_commit: Option<String>,
-    #[serde(default = "empty_object")]
-    metadata: JsonValue,
+    storage_key: Option<String>,
+    #[serde(alias = "archive_format")]
+    format: Option<String>,
+    size_bytes: Option<i64>,
+    sha256: Option<String>,
+    client_ip_hash: Option<String>,
+    user_agent: Option<String>,
+    error: Option<String>,
 }
 
 pub async fn auth_config(State(state): State<Arc<AppState>>) -> ApiResult<Json<JsonValue>> {
@@ -116,13 +135,13 @@ pub async fn auth_config(State(state): State<Arc<AppState>>) -> ApiResult<Json<J
         "shared_auth_url": public_url,
         "application_id": state.shared_auth_application_id,
         "audience": state.shared_auth_audience,
-        "supabase_exchange": "/v1/auth/exchange"
+        "supabase_exchange": "/api/v1/auth/exchange"
     })))
 }
 
-/// Exchange a Supabase access token for the shared-auth token used by all
-/// account endpoints. The Supabase token is forwarded only to Shared Auth and
-/// is never stored in the registry database.
+/// Exchange a Supabase access token for the Shared Auth token used by account
+/// endpoints. The Supabase token is forwarded only to Shared Auth and is never
+/// stored in the registry database.
 pub async fn exchange_supabase(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -153,18 +172,8 @@ pub async fn me(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Json<JsonValue>> {
-    let account = authenticated(&state, &headers).await?;
-    let user = zed_orm::registry::ensure_federated_user(&state.db, &account.federated)
-        .await
-        .map_err(map_db_error)?;
-    Ok(Json(json!({
-        "id": user.id,
-        "subject": user.shared_auth_subject,
-        "email": user.email,
-        "display_name": user.display_name,
-        "avatar_url": user.avatar_url,
-        "settings": user.settings
-    })))
+    let (_, user) = authenticated_and_projected(&state, &headers).await?;
+    Ok(Json(user_value(user)))
 }
 
 pub async fn home(
@@ -172,11 +181,72 @@ pub async fn home(
     headers: HeaderMap,
     Query(query): Query<HomeQuery>,
 ) -> ApiResult<Json<JsonValue>> {
-    let account = authenticated_and_projected(&state, &headers).await?;
-    let data = zed_orm::queries::read::home_for_user(&state.db, account.subject(), &query.q)
+    let (_, user) = authenticated_and_projected(&state, &headers).await?;
+    let read = registry_read(&state)?;
+    let mut orgs = zed_orm_core::read::orgs_for_user(read, user.id)
         .await
-        .map_err(map_db_error)?;
-    Ok(Json(home_value(data)))
+        .map_err(map_orm_error)?;
+    let visible_org_ids = orgs.iter().map(|org| org.id).collect::<Vec<_>>();
+
+    let mut projects = Vec::new();
+    for org in &orgs {
+        let mut rows = zed_orm_core::read::projects_for_org(read, org.id, &org.slug, true)
+            .await
+            .map_err(map_orm_error)?;
+        for project in &mut rows {
+            let direct = zed_orm_core::account::project_role_for_user(read, project.id, user.id)
+                .await
+                .map_err(map_orm_error)?;
+            project.role = strongest_role(Some(&org.role), direct.as_deref())
+                .unwrap_or("reader")
+                .to_owned();
+        }
+        projects.extend(rows);
+    }
+
+    let trimmed = query.q.trim();
+    let packages = if trimmed.is_empty() {
+        let mut rows = Vec::new();
+        for org in &orgs {
+            rows.extend(
+                zed_orm_core::read::packages_for_org(read, org.id, &org.slug, true)
+                    .await
+                    .map_err(map_orm_error)?,
+            );
+        }
+        rows
+    } else {
+        zed_orm_core::read::search_packages(read, trimmed, &visible_org_ids, 100)
+            .await
+            .map_err(map_orm_error)?
+    };
+
+    if !trimmed.is_empty() {
+        orgs.retain(|org| {
+            contains_ci(&org.slug, trimmed)
+                || contains_ci(&org.name, trimmed)
+                || org
+                    .description
+                    .as_deref()
+                    .is_some_and(|value| contains_ci(value, trimmed))
+        });
+        projects.retain(|project| {
+            contains_ci(&project.slug, trimmed)
+                || contains_ci(&project.name, trimmed)
+                || project
+                    .description
+                    .as_deref()
+                    .is_some_and(|value| contains_ci(value, trimmed))
+        });
+    }
+
+    Ok(Json(json!({
+        "user": user_value(user),
+        "orgs": orgs.into_iter().map(org_summary_value).collect::<Vec<_>>(),
+        "projects": projects.into_iter().map(project_summary_value).collect::<Vec<_>>(),
+        "packages": packages.into_iter().map(package_summary_value).collect::<Vec<_>>(),
+        "query": query.q
+    })))
 }
 
 pub async fn search(
@@ -184,11 +254,17 @@ pub async fn search(
     headers: HeaderMap,
     Query(query): Query<HomeQuery>,
 ) -> ApiResult<Json<JsonValue>> {
-    let account = authenticated_and_projected(&state, &headers).await?;
-    let hits =
-        zed_orm::registry::search_registry(&state.db, Some(&account.federated), &query.q, 50)
-            .await
-            .map_err(map_db_error)?;
+    let (_, user) = authenticated_and_projected(&state, &headers).await?;
+    let read = registry_read(&state)?;
+    let visible_org_ids = zed_orm_core::read::orgs_for_user(read, user.id)
+        .await
+        .map_err(map_orm_error)?
+        .into_iter()
+        .map(|org| org.id)
+        .collect::<Vec<_>>();
+    let hits = zed_orm_core::registry::search_registry(read, &query.q, &visible_org_ids, 50)
+        .await
+        .map_err(map_orm_error)?;
     Ok(Json(json!({
         "query": query.q,
         "hits": hits.into_iter().map(|hit| json!({
@@ -206,15 +282,16 @@ pub async fn create_org(
     headers: HeaderMap,
     Json(request): Json<CreateOrgRequest>,
 ) -> ApiResult<Json<JsonValue>> {
-    let account = authenticated_and_projected(&state, &headers).await?;
-    let org = zed_orm::queries::write::create_org(
-        &state.db,
-        account.subject(),
+    let (_, user) = authenticated_and_projected(&state, &headers).await?;
+    let org = zed_orm_core::write::create_org(
+        registry_write(&state)?,
+        user.id,
         &request.slug,
         &request.name,
+        request.description.as_deref(),
     )
     .await
-    .map_err(map_db_error)?;
+    .map_err(map_orm_error)?;
     Ok(Json(json!({
         "id": org.id,
         "slug": org.slug,
@@ -229,13 +306,44 @@ pub async fn org_dashboard(
     headers: HeaderMap,
     Path(org_slug): Path<String>,
 ) -> ApiResult<Json<JsonValue>> {
-    let account = authenticated_and_projected(&state, &headers).await?;
-    let dashboard =
-        zed_orm::queries::read::org_dashboard_for_user(&state.db, account.subject(), &org_slug)
+    let (_, user) = authenticated_and_projected(&state, &headers).await?;
+    let read = registry_read(&state)?;
+    let org = zed_orm_core::read::org_by_slug(read, &org_slug)
+        .await
+        .map_err(map_orm_error)?
+        .ok_or_else(|| ApiErr::not_found("organization"))?;
+    let role = zed_orm_core::read::org_role_for_user(read, org.id, user.id)
+        .await
+        .map_err(map_orm_error)?
+        .ok_or_else(|| ApiErr::not_found("organization"))?;
+    let org_summary = OrgSummary {
+        id: org.id,
+        slug: org.slug,
+        name: org.name,
+        description: org.description,
+        role,
+    };
+    let mut projects =
+        zed_orm_core::read::projects_for_org(read, org_summary.id, &org_summary.slug, true)
             .await
-            .map_err(map_db_error)?
-            .ok_or_else(|| ApiErr::not_found("organization"))?;
-    Ok(Json(org_dashboard_value(dashboard)))
+            .map_err(map_orm_error)?;
+    for project in &mut projects {
+        let direct = zed_orm_core::account::project_role_for_user(read, project.id, user.id)
+            .await
+            .map_err(map_orm_error)?;
+        project.role = strongest_role(Some(&org_summary.role), direct.as_deref())
+            .unwrap_or("reader")
+            .to_owned();
+    }
+    let packages =
+        zed_orm_core::read::packages_for_org(read, org_summary.id, &org_summary.slug, true)
+            .await
+            .map_err(map_orm_error)?;
+    Ok(Json(json!({
+        "org": org_summary_value(org_summary),
+        "projects": projects.into_iter().map(project_summary_value).collect::<Vec<_>>(),
+        "packages": packages.into_iter().map(package_summary_value).collect::<Vec<_>>()
+    })))
 }
 
 pub async fn invite_org_member(
@@ -244,16 +352,15 @@ pub async fn invite_org_member(
     Path(org_slug): Path<String>,
     Json(request): Json<InvitationRequest>,
 ) -> ApiResult<Json<JsonValue>> {
-    let account = authenticated_and_projected(&state, &headers).await?;
-    let invitation = zed_orm::queries::write::invite_org_member(
-        &state.db,
-        account.subject(),
+    let (_, user) = authenticated_and_projected(&state, &headers).await?;
+    let invitation = zed_orm_core::account::invite_org_member_for_user(
+        registry_write(&state)?,
+        user.id,
         &org_slug,
-        &request.email,
-        &request.role,
+        invitation_input(request),
     )
     .await
-    .map_err(map_db_error)?;
+    .map_err(map_orm_error)?;
     Ok(Json(invitation_value(invitation)))
 }
 
@@ -263,22 +370,28 @@ pub async fn create_project(
     Path(org_slug): Path<String>,
     Json(request): Json<CreateProjectRequest>,
 ) -> ApiResult<Json<JsonValue>> {
-    let account = authenticated_and_projected(&state, &headers).await?;
-    let project = zed_orm::queries::write::create_project(
-        &state.db,
-        account.subject(),
+    let (_, user) = authenticated_and_projected(&state, &headers).await?;
+    let project = zed_orm_core::account::create_project_for_user(
+        registry_write(&state)?,
+        user.id,
         &org_slug,
-        &request.slug,
-        &request.name,
+        CreateProjectInput {
+            slug: request.slug,
+            name: request.name,
+            description: request.description,
+            visibility: request.visibility,
+            settings: request.settings,
+        },
     )
     .await
-    .map_err(map_db_error)?;
+    .map_err(map_orm_error)?;
     Ok(Json(json!({
         "id": project.id,
         "org_id": project.org_id,
         "slug": project.slug,
         "name": project.name,
         "description": project.description,
+        "visibility": project.visibility,
         "settings": project.settings
     })))
 }
@@ -289,17 +402,16 @@ pub async fn invite_project_member(
     Path((org_slug, project_slug)): Path<(String, String)>,
     Json(request): Json<InvitationRequest>,
 ) -> ApiResult<Json<JsonValue>> {
-    let account = authenticated_and_projected(&state, &headers).await?;
-    let invitation = zed_orm::queries::write::invite_project_member(
-        &state.db,
-        account.subject(),
+    let (_, user) = authenticated_and_projected(&state, &headers).await?;
+    let invitation = zed_orm_core::account::invite_project_member_for_user(
+        registry_write(&state)?,
+        user.id,
         &org_slug,
         &project_slug,
-        &request.email,
-        &request.role,
+        invitation_input(request),
     )
     .await
-    .map_err(map_db_error)?;
+    .map_err(map_orm_error)?;
     Ok(Json(invitation_value(invitation)))
 }
 
@@ -309,10 +421,18 @@ pub async fn create_package(
     Path(org_slug): Path<String>,
     Json(request): Json<CreatePackageRequest>,
 ) -> ApiResult<Json<JsonValue>> {
-    let account = authenticated_and_projected(&state, &headers).await?;
-    let package = zed_orm::registry::create_package(
-        &state.db,
-        &account.federated,
+    let (_, user) = authenticated_and_projected(&state, &headers).await?;
+    let mut config = request.config;
+    let object = config.as_object_mut().ok_or_else(|| {
+        ApiErr::bad_request("invalid_request", "package config must be a JSON object")
+    })?;
+    object.insert(
+        "default_archive_format".to_owned(),
+        JsonValue::String(normalize_archive_format(&request.default_archive_format)?.to_owned()),
+    );
+    let package = zed_orm_core::account::create_package_for_user(
+        registry_write(&state)?,
+        user.id,
         &org_slug,
         CreatePackageInput {
             project_id: request.project_id,
@@ -320,12 +440,13 @@ pub async fn create_package(
             description: request.description,
             vcs: request.vcs,
             repo_url: request.repo_url,
-            config: request.config,
-            default_archive_format: request.default_archive_format,
+            homepage_url: request.homepage_url,
+            keywords: request.keywords,
+            config,
         },
     )
     .await
-    .map_err(map_db_error)?;
+    .map_err(map_orm_error)?;
     Ok(Json(package_value(package)))
 }
 
@@ -335,31 +456,35 @@ pub async fn update_package_settings(
     Path((org_slug, package_name)): Path<(String, String)>,
     Json(request): Json<PackageSettingsRequest>,
 ) -> ApiResult<Json<JsonValue>> {
-    let account = authenticated_and_projected(&state, &headers).await?;
-    let current = zed_orm::queries::read::package_for_user(
-        &state.db,
-        account.subject(),
+    let (_, user) = authenticated_and_projected(&state, &headers).await?;
+    let current = zed_orm_core::read::package_by_org_and_name(
+        registry_read(&state)?,
         &org_slug,
         &package_name,
     )
     .await
-    .map_err(map_db_error)?
+    .map_err(map_orm_error)?
+    .map(|(package, _)| package)
     .ok_or_else(|| ApiErr::not_found("package"))?;
-    let package = zed_orm::queries::write::update_package_settings(
-        &state.db,
-        account.subject(),
+    let package = zed_orm_core::account::update_package_settings_for_user(
+        registry_write(&state)?,
+        user.id,
         &org_slug,
         &package_name,
-        PackageSettingsInput {
+        PackageSettingsPatch {
             description: request.description,
             project_id: request.project_id,
-            // Visibility changes use a dedicated guarded endpoint.
-            visibility: current.visibility,
-            config: request.config,
+            repo_url: request.repo_url.unwrap_or(current.repo_url),
+            homepage_url: request.homepage_url.or(current.homepage_url),
+            keywords: request.keywords.unwrap_or(current.keywords),
+            config: request
+                .config
+                .filter(|value| !is_empty_object(value))
+                .unwrap_or(current.config),
         },
     )
     .await
-    .map_err(map_db_error)?;
+    .map_err(map_orm_error)?;
     Ok(Json(package_value(package)))
 }
 
@@ -368,15 +493,15 @@ pub async fn make_package_public(
     headers: HeaderMap,
     Path((org_slug, package_name)): Path<(String, String)>,
 ) -> ApiResult<Json<JsonValue>> {
-    let account = authenticated_and_projected(&state, &headers).await?;
-    let package = zed_orm::registry::make_package_public(
-        &state.db,
-        &account.federated,
+    let (_, user) = authenticated_and_projected(&state, &headers).await?;
+    let package = zed_orm_core::account::make_package_public_for_user(
+        registry_write(&state)?,
+        user.id,
         &org_slug,
         &package_name,
     )
     .await
-    .map_err(map_db_error)?;
+    .map_err(map_orm_error)?;
     Ok(Json(package_value(package)))
 }
 
@@ -386,30 +511,39 @@ pub async fn add_package_license(
     Path((org_slug, package_name)): Path<(String, String)>,
     Json(request): Json<PackageLicenseRequest>,
 ) -> ApiResult<Json<JsonValue>> {
-    let account = authenticated_and_projected(&state, &headers).await?;
-    let license = zed_orm::registry::add_package_license(
-        &state.db,
-        &account.federated,
+    let (_, user) = authenticated_and_projected(&state, &headers).await?;
+    let kind = if request.spdx_expression.is_some() {
+        "spdx"
+    } else if request.license_text.is_some() || request.license_url.is_some() {
+        "custom"
+    } else {
+        "proprietary"
+    };
+    let license = zed_orm_core::account::add_package_license_for_user(
+        registry_write(&state)?,
+        user.id,
         &org_slug,
         &package_name,
         PackageLicenseInput {
-            spdx_expression: request.spdx_expression,
-            license_name: request.license_name,
-            license_url: request.license_url,
-            license_text: request.license_text,
-            checksum_sha256: request.checksum_sha256,
+            package_version_id: request.package_version_id,
+            kind: kind.to_owned(),
+            spdx_id: request.spdx_expression,
+            name: request.license_name,
+            url: request.license_url,
+            text_body: request.license_text,
             is_primary: request.is_primary,
         },
     )
     .await
-    .map_err(map_db_error)?;
+    .map_err(map_orm_error)?;
     Ok(Json(json!({
         "id": license.id,
         "package_id": license.package_id,
-        "spdx_expression": license.spdx_expression,
-        "license_name": license.license_name,
-        "license_url": license.license_url,
-        "checksum_sha256": license.checksum_sha256,
+        "package_version_id": license.package_version_id,
+        "kind": license.kind,
+        "spdx_id": license.spdx_id,
+        "name": license.name,
+        "url": license.url,
         "is_primary": license.is_primary
     })))
 }
@@ -420,43 +554,50 @@ pub async fn register_package_upload(
     Path((org_slug, package_name)): Path<(String, String)>,
     Json(request): Json<PackageUploadRequest>,
 ) -> ApiResult<Json<JsonValue>> {
-    let account = authenticated_and_projected(&state, &headers).await?;
-    let upload = zed_orm::registry::register_package_upload(
-        &state.db,
-        &account.federated,
+    let (_, user) = authenticated_and_projected(&state, &headers).await?;
+    let status = normalize_upload_status(&request.status).to_owned();
+    let completed_at = matches!(status.as_str(), "verified" | "failed" | "aborted")
+        .then(|| Utc::now().fixed_offset());
+    let upload = zed_orm_core::account::register_package_upload_for_user(
+        registry_write(&state)?,
+        user.id,
         &org_slug,
         &package_name,
         PackageUploadInput {
-            source_upload_id: request.source_upload_id,
-            version: request.version,
-            archive_format: request.archive_format,
-            state: request.state,
+            package_version_id: request.package_version_id,
+            requested_version: request.requested_version,
+            status,
             storage_backend: request.storage_backend,
-            storage_bucket: request.storage_bucket,
             storage_key: request.storage_key,
-            original_filename: request.original_filename,
+            format: request
+                .format
+                .as_deref()
+                .map(normalize_archive_format)
+                .transpose()?
+                .map(str::to_owned),
             size_bytes: request.size_bytes,
             sha256: request.sha256,
-            vcs_tag: request.vcs_tag,
-            vcs_commit: request.vcs_commit,
-            metadata: request.metadata,
+            api_token_id: None,
+            client_ip_hash: request.client_ip_hash,
+            user_agent: request.user_agent,
+            error: request.error,
+            completed_at,
         },
     )
     .await
-    .map_err(map_db_error)?;
+    .map_err(map_orm_error)?;
     Ok(Json(json!({
         "id": upload.id,
         "package_id": upload.package_id,
-        "source_upload_id": upload.source_upload_id,
-        "version": upload.version,
-        "archive_format": upload.archive_format,
-        "state": upload.state,
+        "package_version_id": upload.package_version_id,
+        "requested_version": upload.requested_version,
+        "status": upload.status,
         "storage_backend": upload.storage_backend,
-        "storage_bucket": upload.storage_bucket,
         "storage_key": upload.storage_key,
+        "format": upload.format,
         "size_bytes": upload.size_bytes,
         "sha256": upload.sha256,
-        "published_at": upload.published_at
+        "completed_at": upload.completed_at
     })))
 }
 
@@ -465,26 +606,19 @@ pub async fn update_user_settings(
     headers: HeaderMap,
     Json(request): Json<UserSettingsRequest>,
 ) -> ApiResult<Json<JsonValue>> {
-    let account = authenticated_and_projected(&state, &headers).await?;
-    let user = zed_orm::queries::write::update_user_settings(
-        &state.db,
-        account.subject(),
-        UserSettingsInput {
+    let (_, user) = authenticated_and_projected(&state, &headers).await?;
+    let updated = zed_orm_core::write::update_user_settings(
+        registry_write(&state)?,
+        user.id,
+        &UserSettingsInput {
             display_name: request.display_name,
             avatar_url: request.avatar_url,
             settings: request.settings,
         },
     )
     .await
-    .map_err(map_db_error)?;
-    Ok(Json(json!({
-        "id": user.id,
-        "subject": user.subject,
-        "email": user.email,
-        "display_name": user.display_name,
-        "avatar_url": user.avatar_url,
-        "settings": user.settings
-    })))
+    .map_err(map_orm_error)?;
+    Ok(Json(user_value(updated)))
 }
 
 async fn authenticated(state: &AppState, headers: &HeaderMap) -> ApiResult<AccountIdentity> {
@@ -494,47 +628,90 @@ async fn authenticated(state: &AppState, headers: &HeaderMap) -> ApiResult<Accou
 async fn authenticated_and_projected(
     state: &AppState,
     headers: &HeaderMap,
-) -> ApiResult<AccountIdentity> {
+) -> ApiResult<(AccountIdentity, UserSummary)> {
     let account = authenticated(state, headers).await?;
-    zed_orm::registry::ensure_federated_user(&state.db, &account.federated)
-        .await
-        .map_err(map_db_error)?;
-    Ok(account)
+    let user = zed_orm_core::write::upsert_user_from_session(
+        registry_write(state)?,
+        &account.session,
+    )
+    .await
+    .map_err(map_orm_error)?;
+    Ok((account, user))
 }
 
-fn map_db_error(error: DbErr) -> ApiErr {
-    let message = error.to_string();
-    let normalized = message.to_lowercase();
-    if normalized.contains("not found") {
-        return ApiErr::not_found("resource");
-    }
-    if normalized.contains("membership required")
-        || normalized.contains("administrator role required")
-        || normalized.contains("write-capable membership required")
-    {
-        return ApiErr::forbidden("forbidden", "insufficient registry permission");
-    }
-    if normalized.contains("cannot become public")
-        || normalized.contains("older than")
-        || normalized.contains("more than fifty")
-        || normalized.contains("more than 50")
-    {
-        return ApiErr::conflict("visibility_window_closed", message);
-    }
-    if normalized.contains("duplicate") || normalized.contains("unique constraint") {
-        return ApiErr::conflict("already_exists", "the registry entity already exists");
-    }
-    if normalized.contains("invalid")
-        || normalized.contains("must belong")
-        || normalized.contains("is required")
-        || normalized.contains("cannot be")
-    {
-        return ApiErr::bad_request("invalid_request", message);
-    }
-    error.into()
+fn registry_read(state: &AppState) -> ApiResult<&ReadContext> {
+    state.registry_read.as_ref().ok_or_else(|| {
+        ApiErr::service_unavailable(
+            "registry_data_plane_unavailable",
+            "canonical registry read context is not configured",
+        )
+    })
 }
 
-fn invitation_value(invitation: zed_orm::models::InvitationReceipt) -> JsonValue {
+fn registry_write(state: &AppState) -> ApiResult<&WriteContext> {
+    state.registry_write.as_ref().ok_or_else(|| {
+        ApiErr::service_unavailable(
+            "registry_data_plane_unavailable",
+            "canonical registry write context is not configured",
+        )
+    })
+}
+
+pub(crate) fn map_orm_error(error: OrmError) -> ApiErr {
+    match error {
+        OrmError::VisibilityWindowExpired(message)
+        | OrmError::VisibilityDownloadLimitExceeded(message) => {
+            ApiErr::conflict("visibility_window_closed", message)
+        }
+        OrmError::NotFound(message) => ApiErr::not_found(&message),
+        OrmError::PolicyViolation(message) => {
+            let normalized = message.to_ascii_lowercase();
+            if normalized.contains("membership")
+                || normalized.contains("role")
+                || normalized.contains("permission")
+            {
+                ApiErr::forbidden("forbidden", "insufficient registry permission")
+            } else {
+                ApiErr::bad_request("invalid_request", message)
+            }
+        }
+        OrmError::Database(message) => {
+            let normalized = message.to_ascii_lowercase();
+            if normalized.contains("duplicate") || normalized.contains("unique") {
+                ApiErr::conflict("already_exists", "the registry entity already exists")
+            } else {
+                tracing::error!(error = %message, "canonical registry database error");
+                ApiErr {
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                    code: "internal",
+                    message: "internal database error".to_owned(),
+                }
+            }
+        }
+        _ => ApiErr {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "internal",
+            message: "internal registry error".to_owned(),
+        },
+    }
+}
+
+fn invitation_input(request: InvitationRequest) -> InvitationInput {
+    let token = format!(
+        "zpkg_inv_{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    );
+    InvitationInput {
+        email: request.email,
+        role: request.role,
+        token_hash: hash_token(&token),
+        token,
+        expires_at: (Utc::now() + Duration::days(7)).fixed_offset(),
+    }
+}
+
+fn invitation_value(invitation: InvitationReceipt) -> JsonValue {
     json!({
         "invitation_id": invitation.invitation_id,
         // One-time secret: the database stores only its digest.
@@ -544,44 +721,29 @@ fn invitation_value(invitation: zed_orm::models::InvitationReceipt) -> JsonValue
     })
 }
 
-fn home_value(data: zed_orm::models::HomePageData) -> JsonValue {
+fn user_value(user: UserSummary) -> JsonValue {
     json!({
-        "user": data.user.map(|user| json!({
-            "id": user.id,
-            "subject": user.subject,
-            "email": user.email,
-            "display_name": user.display_name,
-            "avatar_url": user.avatar_url,
-            "settings": user.settings
-        })),
-        "orgs": data.orgs.into_iter().map(|org| json!({
-            "id": org.id,
-            "slug": org.slug,
-            "name": org.name,
-            "description": org.description,
-            "role": org.role
-        })).collect::<Vec<_>>(),
-        "projects": data.projects.into_iter().map(project_summary_value).collect::<Vec<_>>(),
-        "packages": data.packages.into_iter().map(package_summary_value).collect::<Vec<_>>(),
-        "query": data.query
+        "id": user.id,
+        "subject": user.subject,
+        "realm": user.realm,
+        "email": user.email,
+        "display_name": user.display_name,
+        "avatar_url": user.avatar_url,
+        "settings": user.settings
     })
 }
 
-fn org_dashboard_value(data: zed_orm::models::OrgDashboardData) -> JsonValue {
+fn org_summary_value(org: OrgSummary) -> JsonValue {
     json!({
-        "org": {
-            "id": data.org.id,
-            "slug": data.org.slug,
-            "name": data.org.name,
-            "description": data.org.description,
-            "role": data.org.role
-        },
-        "projects": data.projects.into_iter().map(project_summary_value).collect::<Vec<_>>(),
-        "packages": data.packages.into_iter().map(package_summary_value).collect::<Vec<_>>()
+        "id": org.id,
+        "slug": org.slug,
+        "name": org.name,
+        "description": org.description,
+        "role": org.role
     })
 }
 
-fn project_summary_value(project: zed_orm::models::ProjectSummary) -> JsonValue {
+fn project_summary_value(project: ProjectSummary) -> JsonValue {
     json!({
         "id": project.id,
         "org_id": project.org_id,
@@ -593,7 +755,7 @@ fn project_summary_value(project: zed_orm::models::ProjectSummary) -> JsonValue 
     })
 }
 
-fn package_summary_value(package: zed_orm::models::PackageSummary) -> JsonValue {
+fn package_summary_value(package: PackageSummary) -> JsonValue {
     json!({
         "id": package.id,
         "org_id": package.org_id,
@@ -604,11 +766,14 @@ fn package_summary_value(package: zed_orm::models::PackageSummary) -> JsonValue 
         "description": package.description,
         "visibility": package.visibility,
         "repo_url": package.repo_url,
-        "config": package.config
+        "config": package.config,
+        "latest_version": package.latest_version,
+        "download_count": package.download_count,
+        "version_count": package.version_count
     })
 }
 
-fn package_value(package: zed_orm::entities::package::Model) -> JsonValue {
+fn package_value(package: zed_orm_core::entities::package::Model) -> JsonValue {
     json!({
         "id": package.id,
         "org_id": package.org_id,
@@ -617,35 +782,91 @@ fn package_value(package: zed_orm::entities::package::Model) -> JsonValue {
         "description": package.description,
         "vcs": package.vcs,
         "repo_url": package.repo_url,
+        "homepage_url": package.homepage_url,
+        "keywords": package.keywords,
         "visibility": package.visibility,
         "config": package.config,
-        "default_archive_format": package.default_archive_format,
         "download_count": package.download_count,
-        "upload_count": package.upload_count,
-        "first_public_at": package.first_public_at,
+        "version_count": package.version_count,
+        "latest_version": package.latest_version,
+        "first_published_at": package.first_published_at,
         "created_at": package.created_at,
         "updated_at": package.updated_at
     })
+}
+
+fn strongest_role<'a>(org_role: Option<&'a str>, project_role: Option<&'a str>) -> Option<&'a str> {
+    [org_role, project_role]
+        .into_iter()
+        .flatten()
+        .max_by_key(|role| match *role {
+            "owner" => 4,
+            "admin" => 3,
+            "member" => 2,
+            "reader" => 1,
+            _ => 0,
+        })
+}
+
+fn contains_ci(value: &str, query: &str) -> bool {
+    value.to_ascii_lowercase().contains(&query.to_ascii_lowercase())
+}
+
+fn normalize_archive_format(value: &str) -> ApiResult<&'static str> {
+    match value {
+        "tar.gz" | "tar_gz" | "tgz" => Ok("tar.gz"),
+        "tar.zst" | "tar_zst" | "tzst" => Ok("tar.zst"),
+        "zip" => Ok("zip"),
+        _ => Err(ApiErr::bad_request(
+            "invalid_archive_format",
+            "archive format must be tar.gz, tar.zst, or zip",
+        )),
+    }
+}
+
+fn normalize_upload_status(value: &str) -> &'static str {
+    match value {
+        "complete" | "completed" | "published" => "verified",
+        "pending" => "pending",
+        "uploading" => "uploading",
+        "stored" => "stored",
+        "verified" => "verified",
+        "failed" => "failed",
+        "aborted" => "aborted",
+        _ => value,
+    }
+}
+
+fn is_empty_object(value: &JsonValue) -> bool {
+    value.as_object().is_some_and(serde_json::Map::is_empty)
 }
 
 fn empty_object() -> JsonValue {
     json!({})
 }
 
+fn empty_array() -> JsonValue {
+    json!([])
+}
+
 fn default_vcs() -> String {
-    "git".into()
+    "git".to_owned()
+}
+
+fn default_private() -> String {
+    "private".to_owned()
 }
 
 fn default_archive_format() -> String {
-    "tar_gz".into()
+    "tar.gz".to_owned()
 }
 
-fn default_upload_state() -> String {
-    "pending".into()
+fn default_upload_status() -> String {
+    "pending".to_owned()
 }
 
 fn default_storage_backend() -> String {
-    "s3".into()
+    "r2".to_owned()
 }
 
 #[cfg(test)]
@@ -665,11 +886,36 @@ mod tests {
     }
 
     #[test]
+    fn invitation_tokens_are_high_entropy_and_only_the_digest_is_persistable() {
+        let input = invitation_input(InvitationRequest {
+            email: "member@example.test".to_owned(),
+            role: "member".to_owned(),
+        });
+        assert!(input.token.starts_with("zpkg_inv_"));
+        assert!(input.token.len() >= 64);
+        assert_eq!(input.token_hash.len(), 64);
+        assert!(!input.token_hash.contains(&input.token));
+    }
+
+    #[test]
+    fn archive_aliases_canonicalize_to_stored_formats() {
+        assert_eq!(normalize_archive_format("tar_gz").unwrap(), "tar.gz");
+        assert_eq!(normalize_archive_format("tar.zst").unwrap(), "tar.zst");
+        assert!(normalize_archive_format("rar").is_err());
+    }
+
+    #[test]
     fn database_policy_errors_keep_their_public_semantics() {
-        let error = map_db_error(DbErr::Custom(
-            "package cannot become public after more than 50 downloads".into(),
+        let error = map_orm_error(OrmError::VisibilityDownloadLimitExceeded(
+            "package has 51 downloads".to_owned(),
         ));
-        assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(error.status, StatusCode::CONFLICT);
         assert_eq!(error.code, "visibility_window_closed");
+    }
+
+    #[test]
+    fn strongest_membership_scope_wins() {
+        assert_eq!(strongest_role(Some("reader"), Some("admin")), Some("admin"));
+        assert_eq!(strongest_role(Some("owner"), Some("member")), Some("owner"));
     }
 }
