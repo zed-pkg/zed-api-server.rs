@@ -1,0 +1,410 @@
+name: apply delegated Shared Auth contract repair
+
+on:
+  push:
+    branches:
+      - feat/den-2788-shared-auth-delegated-contract
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-den-2788-delegated-auth-contract
+  cancel-in-progress: false
+
+jobs:
+  patch-and-validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the exact dependent branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Reconcile API authentication with Shared Auth delegated claims
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: Path, old: str, new: str) -> None:
+              text = path.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one occurrence, found {count}: {old!r}")
+              path.write_text(text.replace(old, new, 1))
+
+          config = Path("src/config.rs")
+          replace_once(
+              config,
+              """    pub audience: String,
+              pub application_id: String,
+          }""".replace("          ", ""),
+              """    pub audience: String,
+              /// Exact delegated-token authorized party (`azp`) permitted to call
+              /// browser/account routes. `application_id` is retained as the Rust
+              /// field name for source compatibility; the canonical environment
+              /// variable is `SHARED_AUTH_AUTHORIZED_PARTY`.
+              pub application_id: String,
+              /// Whitespace-delimited delegated scope required by every account route.
+              pub required_scope: String,
+          }""".replace("          ", ""),
+          )
+          replace_once(
+              config,
+              """            .field("audience", &self.audience)
+                          .field("application_id", &self.application_id)
+                          .finish()""".replace("          ", ""),
+              """            .field("audience", &self.audience)
+                          .field("authorized_party", &self.application_id)
+                          .field("required_scope", &self.required_scope)
+                          .finish()""".replace("          ", ""),
+          )
+          replace_once(
+              config,
+              """                let application_id = nonempty(
+                              "SHARED_AUTH_APPLICATION_ID",
+                              env_or("SHARED_AUTH_APPLICATION_ID", "zed-pkg"),
+                          )?;
+                          Some(SharedAuthConfig {
+                              url,
+                              public_url,
+                              service_credential,
+                              audience,
+                              application_id,
+                          })""".replace("          ", ""),
+              """                let application_id = nonempty(
+                              "SHARED_AUTH_AUTHORIZED_PARTY",
+                              std::env::var("SHARED_AUTH_AUTHORIZED_PARTY")
+                                  .or_else(|_| std::env::var("SHARED_AUTH_APPLICATION_ID"))
+                                  .unwrap_or_else(|_| "zpkg-web".to_string()),
+                          )?;
+                          let required_scope = nonempty(
+                              "SHARED_AUTH_REQUIRED_SCOPE",
+                              env_or("SHARED_AUTH_REQUIRED_SCOPE", "zpkg:account"),
+                          )?;
+                          Some(SharedAuthConfig {
+                              url,
+                              public_url,
+                              service_credential,
+                              audience,
+                              application_id,
+                              required_scope,
+                          })""".replace("          ", ""),
+          )
+          replace_once(
+              config,
+              """            application_id: "zed-pkg".into(),
+                      };""".replace("          ", ""),
+              """            application_id: "zpkg-web".into(),
+                      required_scope: "zpkg:account".into(),
+                  };""".replace("          ", ""),
+          )
+          replace_once(
+              config,
+              """        assert!(debug.contains("<redacted>"));
+                  }""".replace("          ", ""),
+              """        assert!(debug.contains("<redacted>"));
+                      assert!(debug.contains("zpkg-web"));
+                      assert!(debug.contains("zpkg:account"));
+                  }""".replace("          ", ""),
+          )
+
+          state = Path("src/state.rs")
+          replace_once(
+              state,
+              """    pub shared_auth_application_id: String,
+              pub shared_auth_public_url: Option<String>,""".replace("          ", ""),
+              """    /// Legacy field name for the expected delegated-token `azp`.
+              pub shared_auth_application_id: String,
+              pub shared_auth_required_scope: String,
+              pub shared_auth_public_url: Option<String>,""".replace("          ", ""),
+          )
+
+          server = Path("src/server.rs")
+          replace_once(
+              server,
+              """        shared_auth_application_id: cfg
+                          .shared_auth
+                          .as_ref()
+                          .map(|configuration| configuration.application_id.clone())
+                          .unwrap_or_else(|| "zed-pkg".into()),
+                      shared_auth_public_url:""".replace("          ", ""),
+              """        shared_auth_application_id: cfg
+                          .shared_auth
+                          .as_ref()
+                          .map(|configuration| configuration.application_id.clone())
+                          .unwrap_or_else(|| "zpkg-web".into()),
+                      shared_auth_required_scope: cfg
+                          .shared_auth
+                          .as_ref()
+                          .map(|configuration| configuration.required_scope.clone())
+                          .unwrap_or_else(|| "zpkg:account".into()),
+                      shared_auth_public_url:""".replace("          ", ""),
+          )
+
+          # Every test AppState constructor must declare the newly explicit scope.
+          for path in Path("src").rglob("*.rs"):
+              if path in {state, server}:
+                  continue
+              text = path.read_text()
+              marker = "            shared_auth_application_id: \"zed-pkg\".to_string(),\n            shared_auth_public_url:"
+              if marker in text:
+                  text = text.replace(
+                      marker,
+                      "            shared_auth_application_id: \"zpkg-web\".to_string(),\n"
+                      "            shared_auth_required_scope: \"zpkg:account\".to_string(),\n"
+                      "            shared_auth_public_url:",
+                  )
+                  path.write_text(text)
+
+          auth = Path("src/auth.rs")
+          replace_once(
+              auth,
+              """    account_from_introspection(&introspection, &state.shared_auth_application_id)
+          }""".replace("          ", ""),
+              """    account_from_introspection(
+                      &introspection,
+                      &state.shared_auth_application_id,
+                      &state.shared_auth_required_scope,
+                  )
+              }""".replace("          ", ""),
+          )
+          text = auth.read_text()
+          start = text.index("fn account_from_introspection(")
+          end = text.index("pub(crate) fn map_shared_auth_error", start)
+          replacement = r'''fn account_from_introspection(
+              introspection: &Introspection,
+              expected_authorized_party: &str,
+              required_scope: &str,
+          ) -> ApiResult<AccountIdentity> {
+              if !introspection.active {
+                  return Err(ApiErr::unauthorized());
+              }
+              let subject = required_claim(introspection.sub.as_deref())?;
+              let issuer = required_claim(introspection.iss.as_deref())?;
+
+              // Shared Auth represents a browser user by a revocable session-backed
+              // base token, then mints a short-lived delegated product token. Its
+              // protected introspection surface exposes that provenance as `sid`,
+              // `azp`, and `parent_jti`; it does not emit the legacy synthetic
+              // `actor_kind` or `application_id` fields.
+              let session_id = optional_rest_string(introspection, "sid")?;
+              let authorized_party = optional_rest_string(introspection, "azp")?;
+              let parent_jti = optional_rest_string(introspection, "parent_jti")?;
+              if session_id.is_none() || authorized_party.is_none() || parent_jti.is_none() {
+                  return Err(ApiErr::forbidden(
+                      "delegated_user_token_required",
+                      "this endpoint requires a session-backed delegated user token",
+                  ));
+              }
+              if authorized_party.as_deref() != Some(expected_authorized_party) {
+                  return Err(ApiErr::forbidden(
+                      "wrong_authorized_party",
+                      "the delegated token was not issued to the zed-pkg web client",
+                  ));
+              }
+
+              let scope = optional_rest_string(introspection, "scope")?.ok_or_else(|| {
+                  ApiErr::forbidden(
+                      "insufficient_scope",
+                      "the delegated token is missing the zed-pkg account scope",
+                  )
+              })?;
+              if !scope
+                  .split_ascii_whitespace()
+                  .any(|candidate| candidate == required_scope)
+              {
+                  return Err(ApiErr::forbidden(
+                      "insufficient_scope",
+                      "the delegated token is missing the zed-pkg account scope",
+                  ));
+              }
+
+              let supabase_user_id = optional_rest_string(introspection, "supabase_user_id")?
+                  .map(|value| value.parse::<Uuid>().map_err(|_| ApiErr::unauthorized()))
+                  .transpose()?;
+              let display_name = optional_rest_string(introspection, "display_name")?;
+              let avatar_url = optional_rest_string(introspection, "avatar_url")?;
+
+              Ok(AccountIdentity {
+                  federated: FederatedIdentity {
+                      issuer,
+                      subject,
+                      supabase_user_id,
+                      email: introspection.email.clone(),
+                      display_name,
+                      avatar_url,
+                  },
+              })
+          }
+
+          '''
+          auth.write_text(text[:start] + replacement + text[end:])
+
+          text = auth.read_text()
+          test_start = text.index("    #[test]\n    fn verified_user_claims_become_a_federated_identity()")
+          test_end = text.index("    use chrono::{Duration, Utc};", test_start)
+          test_replacement = r'''    fn delegated_rest(authorized_party: &str, scope: &str) -> serde_json::Map<String, Value> {
+              let mut rest = serde_json::Map::new();
+              rest.insert("sid".into(), Value::String("session-1".into()));
+              rest.insert("azp".into(), Value::String(authorized_party.into()));
+              rest.insert("parent_jti".into(), Value::String("parent-token-1".into()));
+              rest.insert("scope".into(), Value::String(scope.into()));
+              rest
+          }
+
+          #[test]
+          fn verified_delegated_user_claims_become_a_federated_identity() {
+              let mut rest = delegated_rest("zpkg-web", "zpkg:account zpkg:packages:write");
+              rest.insert(
+                  "supabase_user_id".into(),
+                  Value::String("ad7c2010-c28a-4cad-a510-4c4020f93535".into()),
+              );
+              let introspection = Introspection {
+                  active: true,
+                  sub: Some("shared-user-1".into()),
+                  iss: Some("https://auth.example.test".into()),
+                  email: Some("user@example.test".into()),
+                  rest,
+              };
+              let identity = account_from_introspection(
+                  &introspection,
+                  "zpkg-web",
+                  "zpkg:account",
+              )
+              .unwrap();
+              assert_eq!(identity.subject(), "shared-user-1");
+              assert_eq!(
+                  identity.federated.supabase_user_id,
+                  Some("ad7c2010-c28a-4cad-a510-4c4020f93535".parse().unwrap())
+              );
+          }
+
+          #[test]
+          fn base_tokens_and_wrong_authorized_parties_are_forbidden() {
+              let base = Introspection {
+                  active: true,
+                  sub: Some("shared-user-1".into()),
+                  iss: Some("https://auth.example.test".into()),
+                  email: None,
+                  rest: serde_json::Map::new(),
+              };
+              assert_eq!(
+                  account_from_introspection(&base, "zpkg-web", "zpkg:account")
+                      .unwrap_err()
+                      .code,
+                  "delegated_user_token_required"
+              );
+
+              let wrong_party = Introspection {
+                  active: true,
+                  sub: Some("shared-user-1".into()),
+                  iss: Some("https://auth.example.test".into()),
+                  email: None,
+                  rest: delegated_rest("other-web", "zpkg:account"),
+              };
+              assert_eq!(
+                  account_from_introspection(&wrong_party, "zpkg-web", "zpkg:account")
+                      .unwrap_err()
+                      .code,
+                  "wrong_authorized_party"
+              );
+          }
+
+          #[test]
+          fn delegated_token_without_account_scope_is_forbidden() {
+              let introspection = Introspection {
+                  active: true,
+                  sub: Some("shared-user-1".into()),
+                  iss: Some("https://auth.example.test".into()),
+                  email: None,
+                  rest: delegated_rest("zpkg-web", "zpkg:packages:read"),
+              };
+              assert_eq!(
+                  account_from_introspection(&introspection, "zpkg-web", "zpkg:account")
+                      .unwrap_err()
+                      .code,
+                  "insufficient_scope"
+              );
+          }
+
+          '''
+          auth.write_text(text[:test_start] + test_replacement + text[test_end:])
+
+          readme = Path("README.md")
+          text = readme.read_text()
+          text = text.replace(
+              "| `AUTO_MIGRATE` | `true` | run `migration/` on boot |",
+              "| `AUTO_MIGRATE` | `false` | development-only compatibility; production uses the discrete `migrate` Job |",
+          )
+          anchor = "| `MAX_ARTIFACT_BYTES` | `104857600` | request body cap |\n"
+          if text.count(anchor) != 1:
+              raise SystemExit("README configuration table anchor changed")
+          rows = (
+              "| `SHARED_AUTH_URL` | unset | internal Shared Auth origin; account routes fail closed with 503 when absent |\n"
+              "| `SHARED_AUTH_PUBLIC_URL` | `SHARED_AUTH_URL` | browser-visible Shared Auth origin |\n"
+              "| `SHARED_AUTH_SERVICE_CREDENTIAL` | required with `SHARED_AUTH_URL` | independent protected-introspection credential |\n"
+              "| `SHARED_AUTH_AUDIENCE` | `zed-pkg` | exact delegated product audience |\n"
+              "| `SHARED_AUTH_AUTHORIZED_PARTY` | `zpkg-web` | exact delegated-token `azp`; legacy `SHARED_AUTH_APPLICATION_ID` remains a fallback |\n"
+              "| `SHARED_AUTH_REQUIRED_SCOPE` | `zpkg:account` | delegated scope required by every browser/account API route |\n"
+          )
+          readme.write_text(text.replace(anchor, anchor + rows, 1))
+
+          docs = Path("docs/shared-auth-delegated-contract.md")
+          docs.write_text('''# Shared Auth delegated account contract
+
+Browser/account API routes accept only a short-lived Shared Auth token that is:
+
+1. active under protected introspection;
+2. verified for the exact `SHARED_AUTH_AUDIENCE` (`zed-pkg` by default);
+3. backed by a revocable Shared Auth session (`sid`);
+4. delegated from a parent token (`parent_jti`);
+5. issued to the exact web backend client (`azp=zpkg-web` by default); and
+6. granted `zpkg:account` (configurable with `SHARED_AUTH_REQUIRED_SCOPE`).
+
+Shared Auth does not emit the older synthetic `actor_kind` or `application_id`
+claims. The API therefore derives user-token provenance from the canonical
+session and delegation claims that Shared Auth actually signs and introspects.
+A base session token, a service token, a token for another authorized party, or
+a correctly audience-bound token without the account scope fails with 403.
+Missing/invalid credentials fail with 401; an unavailable auth dependency fails
+with 503.
+
+The browser never posts a bearer token directly from an HTML form. The
+`app.zpkg.net` backend completes the exact-client PKCE handoff, stores an
+origin-scoped encrypted session, delegates to `aud=zed-pkg` with
+`azp=zpkg-web`, and proxies same-origin mutations to this API.
+''')
+
+          workflow = Path(".github/workflows/zz-apply-delegated-auth-contract.yml")
+          workflow.unlink()
+          PY
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Check all targets
+        run: cargo check --locked --all-targets
+
+      - name: Strict Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test all targets
+        run: cargo test --locked --all-targets
+
+      - name: Commit validated contract repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix(DEN-2788): enforce delegated Shared Auth claims"
+          git push origin HEAD:feat/den-2788-shared-auth-delegated-contract
