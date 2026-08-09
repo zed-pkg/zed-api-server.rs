@@ -211,17 +211,11 @@ mod tests {
         assert_eq!(bearer_token(&headers).as_deref(), Some("zpkg_abc"));
     }
 
-    fn delegated_rest(
-        authorized_party: &str,
-        scope: &str,
-    ) -> serde_json::Map<String, Value> {
+    fn delegated_rest(authorized_party: &str, scope: &str) -> serde_json::Map<String, Value> {
         let mut rest = serde_json::Map::new();
         rest.insert("sid".into(), Value::String("session-1".into()));
         rest.insert("azp".into(), Value::String(authorized_party.into()));
-        rest.insert(
-            "parent_jti".into(),
-            Value::String("parent-token-1".into()),
-        );
+        rest.insert("parent_jti".into(), Value::String("parent-token-1".into()));
         rest.insert("scope".into(), Value::String(scope.into()));
         rest
     }
