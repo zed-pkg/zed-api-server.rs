@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use fiducia_client::FiduciaClient;
 use sea_orm::DatabaseConnection;
-use shared_auth_service_client::SharedAuthClient;
 
+use crate::shared_auth::SharedAuthClient;
 use crate::storage::ArtifactStore;
 use crate::verify::TagVerifier;
 
