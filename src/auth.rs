@@ -1,12 +1,28 @@
 use axum::http::HeaderMap;
-use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
-};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
+use shared_auth_service_client::{ClientError, Introspection};
 use uuid::Uuid;
+use zed_orm::registry::FederatedIdentity;
 
 use crate::entities::token;
 use crate::error::{ApiErr, ApiResult};
+use crate::state::AppState;
+
+/// Verified browser/account identity. The Shared Auth token is intentionally
+/// not retained: handlers receive only the canonical identity facts needed to
+/// project a registry user and evaluate product memberships.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccountIdentity {
+    pub federated: FederatedIdentity,
+}
+
+impl AccountIdentity {
+    pub fn subject(&self) -> &str {
+        &self.federated.subject
+    }
+}
 
 /// Tokens are stored as sha256 hex; the plaintext is shown exactly once by
 /// the `create-token` subcommand.
@@ -20,16 +36,124 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<String> {
         .to_str()
         .ok()?
         .strip_prefix("Bearer ")
-        .map(|t| t.trim().to_string())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
 }
 
+/// Authenticate a browser/account request through protected, audience-bound
+/// Shared Auth introspection. Missing credentials are 401; an auth dependency
+/// outage or server misconfiguration is 503; a verified service/wrong product
+/// principal is 403. No branch synthesizes authority.
+pub async fn require_account(state: &AppState, headers: &HeaderMap) -> ApiResult<AccountIdentity> {
+    let token = bearer_token(headers).ok_or_else(ApiErr::unauthorized)?;
+    let client = state.shared_auth.as_ref().ok_or_else(|| {
+        ApiErr::service_unavailable(
+            "auth_unavailable",
+            "shared authentication is not configured",
+        )
+    })?;
+    let introspection = client
+        .introspect_for_audience(&token, &state.shared_auth_audience)
+        .await
+        .map_err(map_shared_auth_error)?;
+    account_from_introspection(&introspection, &state.shared_auth_application_id)
+}
+
+fn account_from_introspection(
+    introspection: &Introspection,
+    expected_application_id: &str,
+) -> ApiResult<AccountIdentity> {
+    if !introspection.active {
+        return Err(ApiErr::unauthorized());
+    }
+    let subject = required_claim(introspection.sub.as_deref())?;
+    let issuer = required_claim(introspection.iss.as_deref())?;
+    let actor_kind = required_rest_string(introspection, "actor_kind")?;
+    if actor_kind != "user" {
+        return Err(ApiErr::forbidden(
+            "user_actor_required",
+            "this endpoint requires an authenticated user",
+        ));
+    }
+    let application_id = required_rest_string(introspection, "application_id")?;
+    if application_id != expected_application_id {
+        return Err(ApiErr::forbidden(
+            "wrong_application",
+            "the authenticated token is not issued for zed-pkg",
+        ));
+    }
+
+    let supabase_user_id = optional_rest_string(introspection, "supabase_user_id")?
+        .map(|value| {
+            value
+                .parse::<Uuid>()
+                .map_err(|_| ApiErr::unauthorized())
+        })
+        .transpose()?;
+    let display_name = optional_rest_string(introspection, "display_name")?;
+    let avatar_url = optional_rest_string(introspection, "avatar_url")?;
+
+    Ok(AccountIdentity {
+        federated: FederatedIdentity {
+            issuer,
+            subject,
+            supabase_user_id,
+            email: introspection.email.clone(),
+            display_name,
+            avatar_url,
+        },
+    })
+}
+
+fn map_shared_auth_error(error: ClientError) -> ApiErr {
+    match error {
+        ClientError::Unauthorized | ClientError::Status(401) | ClientError::InvalidInput(_) => {
+            ApiErr::unauthorized()
+        }
+        other => {
+            tracing::warn!(error = %other, "shared-auth introspection failed");
+            ApiErr::service_unavailable(
+                "auth_unavailable",
+                "shared authentication is temporarily unavailable",
+            )
+        }
+    }
+}
+
+fn required_claim(value: Option<&str>) -> ApiResult<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 1024)
+        .map(str::to_owned)
+        .ok_or_else(ApiErr::unauthorized)
+}
+
+fn required_rest_string(introspection: &Introspection, key: &str) -> ApiResult<String> {
+    optional_rest_string(introspection, key)?.ok_or_else(ApiErr::unauthorized)
+}
+
+fn optional_rest_string(introspection: &Introspection, key: &str) -> ApiResult<Option<String>> {
+    match introspection.rest.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() || value.len() > 1024 {
+                Err(ApiErr::unauthorized())
+            } else {
+                Ok(Some(value.to_owned()))
+            }
+        }
+        Some(_) => Err(ApiErr::unauthorized()),
+    }
+}
+
+/// Authenticate a legacy scoped registry token used by CLI/package publishing.
+/// Browser sessions never enter this table, and there is no disabled-auth mode.
 pub async fn require_token(
     db: &DatabaseConnection,
     headers: &HeaderMap,
 ) -> ApiResult<token::Model> {
-    if auth_disabled() {
-        return insecure_operator_token(db).await;
-    }
     let plaintext = bearer_token(headers).ok_or_else(ApiErr::unauthorized)?;
     let row = token::Entity::find()
         .filter(token::Column::TokenHash.eq(hash_token(&plaintext)))
@@ -51,52 +175,16 @@ pub async fn require_token(
     Ok(row)
 }
 
-/// Explicit temporary bootstrap mode for a private/test registry. This is
-/// deliberately loud and opt-in; normal behavior remains bearer-token auth.
-pub fn auth_disabled() -> bool {
-    std::env::var("ZED_AUTH_DISABLED").as_deref() == Ok("1")
-}
-
-/// Return a durable synthetic admin token for auth-disabled mode. It is stored
-/// in the database (instead of returning an in-memory model) because org and
-/// audit rows have foreign keys to tokens.
-async fn insecure_operator_token(db: &DatabaseConnection) -> ApiResult<token::Model> {
-    let id = Uuid::from_u128(1);
-    if let Some(row) = token::Entity::find_by_id(id).one(db).await? {
-        return Ok(row);
-    }
-    let inserted = token::ActiveModel {
-        id: ActiveValue::Set(id),
-        name: ActiveValue::Set("auth-disabled-operator".to_string()),
-        token_hash: ActiveValue::Set(hash_token("zed-auth-disabled-operator")),
-        org_id: ActiveValue::Set(None),
-        role: ActiveValue::Set("admin".to_string()),
-        created_at: ActiveValue::Set(chrono::Utc::now()),
-        expires_at: ActiveValue::Set(None),
-        revoked_at: ActiveValue::Set(None),
-    }
-    .insert(db)
-    .await;
-    match inserted {
-        Ok(row) => Ok(row),
-        // Another first request may have inserted it concurrently.
-        Err(error) => token::Entity::find_by_id(id)
-            .one(db)
-            .await?
-            .ok_or_else(|| error.into()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn hashing_is_stable_and_hex() {
-        let h = hash_token("zpkg_example");
-        assert_eq!(h.len(), 64);
-        assert_eq!(h, hash_token("zpkg_example"));
-        assert_ne!(h, hash_token("zpkg_other"));
+        let hash = hash_token("zpkg_example");
+        assert_eq!(hash.len(), 64);
+        assert_eq!(hash, hash_token("zpkg_example"));
+        assert_ne!(hash, hash_token("zpkg_other"));
     }
 
     #[test]
@@ -110,7 +198,98 @@ mod tests {
         assert_eq!(bearer_token(&headers).as_deref(), Some("zpkg_abc"));
     }
 
-    // --- token lifecycle (M2) ------------------------------------------------
+    #[test]
+    fn verified_user_claims_become_a_federated_identity() {
+        let mut rest = serde_json::Map::new();
+        rest.insert("actor_kind".into(), Value::String("user".into()));
+        rest.insert("application_id".into(), Value::String("zed-pkg".into()));
+        rest.insert(
+            "supabase_user_id".into(),
+            Value::String("ad7c2010-c28a-4cad-a510-4c4020f93535".into()),
+        );
+        let introspection = Introspection {
+            active: true,
+            sub: Some("shared-user-1".into()),
+            iss: Some("https://auth.example.test".into()),
+            aud: Some("zed-pkg".into()),
+            iat: None,
+            nbf: None,
+            exp: None,
+            jti: None,
+            sid: None,
+            auth_time: None,
+            project: None,
+            provider: Some("supabase".into()),
+            provider_tenant: None,
+            provider_subject: None,
+            email: Some("user@example.test".into()),
+            email_verified: Some(true),
+            roles: Vec::new(),
+            aal: Some(1),
+            amr: vec!["magic_link".into()],
+            acr: None,
+            scope: None,
+            azp: None,
+            parent_jti: None,
+            rest,
+        };
+        let identity = account_from_introspection(&introspection, "zed-pkg").unwrap();
+        assert_eq!(identity.subject(), "shared-user-1");
+        assert_eq!(
+            identity.federated.supabase_user_id,
+            Some("ad7c2010-c28a-4cad-a510-4c4020f93535".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn service_and_wrong_application_principals_are_forbidden() {
+        let mut rest = serde_json::Map::new();
+        rest.insert("actor_kind".into(), Value::String("service".into()));
+        rest.insert("application_id".into(), Value::String("zed-pkg".into()));
+        let mut introspection = Introspection {
+            active: true,
+            sub: Some("service-1".into()),
+            iss: Some("https://auth.example.test".into()),
+            aud: Some("zed-pkg".into()),
+            iat: None,
+            nbf: None,
+            exp: None,
+            jti: None,
+            sid: None,
+            auth_time: None,
+            project: None,
+            provider: None,
+            provider_tenant: None,
+            provider_subject: None,
+            email: None,
+            email_verified: None,
+            roles: Vec::new(),
+            aal: None,
+            amr: Vec::new(),
+            acr: None,
+            scope: None,
+            azp: None,
+            parent_jti: None,
+            rest,
+        };
+        assert_eq!(
+            account_from_introspection(&introspection, "zed-pkg")
+                .unwrap_err()
+                .status,
+            axum::http::StatusCode::FORBIDDEN
+        );
+        introspection
+            .rest
+            .insert("actor_kind".into(), Value::String("user".into()));
+        assert_eq!(
+            account_from_introspection(&introspection, "other")
+                .unwrap_err()
+                .status,
+            axum::http::StatusCode::FORBIDDEN
+        );
+    }
+
+    // --- token lifecycle -----------------------------------------------------
 
     use chrono::{Duration, Utc};
     use sea_orm::{
@@ -131,15 +310,14 @@ mod tests {
         db
     }
 
-    /// Insert a token with the given lifecycle stamps; returns the plaintext.
     async fn seed(
         db: &DatabaseConnection,
         expires_at: Option<chrono::DateTime<Utc>>,
         revoked_at: Option<chrono::DateTime<Utc>>,
     ) -> String {
-        let plaintext = format!("zpkg_{}", uuid::Uuid::new_v4().simple());
+        let plaintext = format!("zpkg_{}", Uuid::new_v4().simple());
         token::ActiveModel {
-            id: ActiveValue::Set(uuid::Uuid::new_v4()),
+            id: ActiveValue::Set(Uuid::new_v4()),
             name: ActiveValue::Set("t".to_string()),
             token_hash: ActiveValue::Set(hash_token(&plaintext)),
             org_id: ActiveValue::Set(None),
@@ -163,7 +341,6 @@ mod tests {
         headers
     }
 
-    /// A token with both stamps NULL is the historical, always-valid token.
     #[tokio::test]
     async fn live_token_is_accepted() {
         let db = lifecycle_db().await;
@@ -171,45 +348,26 @@ mod tests {
         assert!(require_token(&db, &bearer(&plaintext)).await.is_ok());
     }
 
-    /// A revoked token is rejected — indistinguishable from an unknown one.
     #[tokio::test]
     async fn revoked_token_is_rejected() {
         let db = lifecycle_db().await;
-        // Revoked in the past, and never expiring: revocation alone must kill it.
         let plaintext = seed(&db, None, Some(Utc::now() - Duration::minutes(1))).await;
-        let err = require_token(&db, &bearer(&plaintext))
+        let error = require_token(&db, &bearer(&plaintext))
             .await
             .expect_err("a revoked token must not authenticate");
-        assert_eq!(err.code, "unauthorized");
+        assert_eq!(error.code, "unauthorized");
     }
 
-    /// Expiry is enforced at the boundary: past expiry fails, future is fine.
     #[tokio::test]
     async fn expired_token_is_rejected_but_future_expiry_is_accepted() {
         let db = lifecycle_db().await;
         let expired = seed(&db, Some(Utc::now() - Duration::seconds(1)), None).await;
-        let err = require_token(&db, &bearer(&expired))
-            .await
-            .expect_err("an expired token must not authenticate");
-        assert_eq!(err.code, "unauthorized");
+        assert!(require_token(&db, &bearer(&expired)).await.is_err());
 
         let live = seed(&db, Some(Utc::now() + Duration::days(1)), None).await;
         let row = require_token(&db, &bearer(&live))
             .await
             .expect("a token expiring tomorrow is still valid");
         assert!(row.expires_at.is_some());
-    }
-
-    /// Revocation wins even when the token has not expired yet.
-    #[tokio::test]
-    async fn revocation_beats_a_valid_expiry() {
-        let db = lifecycle_db().await;
-        let plaintext = seed(
-            &db,
-            Some(Utc::now() + Duration::days(30)),
-            Some(Utc::now() - Duration::seconds(1)),
-        )
-        .await;
-        assert!(require_token(&db, &bearer(&plaintext)).await.is_err());
     }
 }
