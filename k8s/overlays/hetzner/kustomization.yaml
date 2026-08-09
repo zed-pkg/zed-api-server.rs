@@ -25,4 +25,4 @@ patches:
               - name: zed-api-server
                 env:
                   - name: PUBLIC_BASE_URL
-                    value: https://registry.hetzner.zpkg.tech
+                    value: https://registry.hetzner.zpkg.net

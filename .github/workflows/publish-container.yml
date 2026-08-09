@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     paths:
+      - '.zpkg.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -14,6 +15,7 @@ on:
       - '.github/workflows/publish-container.yml'
   pull_request:
     paths:
+      - '.zpkg.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -181,12 +183,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p smoke-diagnostics
           immutable="ghcr.io/zed-pkg/zed-api-server:${GITHUB_SHA}"
-          push_output="$(docker push "$immutable")"
-          printf '%s\n' "$push_output"
-          digest="$(awk '/digest: sha256:/{print $2}' <<<"$push_output" | tail -n 1)"
-          [[ "$digest" == sha256:* ]] || { echo 'could not recover pushed image digest' >&2; exit 1; }
-          docker push ghcr.io/zed-pkg/zed-api-server:main
+          immutable_log="smoke-diagnostics/immutable-push.log"
+          compatibility_log="smoke-diagnostics/main-push.log"
+
+          # Docker may write progress and the final digest to stderr. Preserve
+          # the complete stream while retaining pipefail so a denied/failed push
+          # cannot be mistaken for successful evidence collection.
+          docker push "$immutable" 2>&1 | tee "$immutable_log"
+          digest="$(sed -nE 's/.*digest: (sha256:[0-9a-f]{64}).*/\1/p' "$immutable_log" | tail -n 1)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo 'could not recover a strict sha256 digest from the immutable push' >&2
+            exit 1
+          }
+
+          docker push ghcr.io/zed-pkg/zed-api-server:main 2>&1 | tee "$compatibility_log"
           printf 'image=%s@%s\napi_revision=%s\ninterfaces_revision=%s\n' \
             'ghcr.io/zed-pkg/zed-api-server' "$digest" "$GITHUB_SHA" "$ZED_INTERFACES_SHA" \
             > smoke-diagnostics/published-image.txt

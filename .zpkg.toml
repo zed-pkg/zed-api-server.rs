@@ -1,0 +1,43 @@
+[package]
+org = "zed-pkg"
+name = "zed-api-server"
+version = "0.1.1"
+description = "Zed registry and account API server with PostgreSQL metadata and S3/R2 artifact storage"
+license = "MIT"
+keywords = ["zed-pkg", "package-manager", "registry", "postgres", "r2"]
+language = "rust"
+
+[package.repository]
+vcs = "git"
+url = "https://github.com/zed-pkg/zed-api-server.rs"
+
+[publish]
+include_readme = true
+tag_format = "v{version}"
+smoke_test = "test -f \"$ZED_PKG_TEST_TARGET/src/main.rs\" && test -f \"$ZED_PKG_TEST_TARGET/src/routes/publish.rs\" && test -f \"$ZED_PKG_TEST_TARGET/schema/schema.sql\""
+exclude = [
+  ".env",
+  ".env.*",
+  ".direnv/**",
+  ".zed/**",
+  ".zed-pack/**",
+  ".vendor/.zed/**",
+  "env/enc/**",
+  "target/**",
+  "**/target/**",
+  "**/node_modules/**",
+  "tmp/**",
+  "artifacts/**",
+  "**/*.log",
+  ".DS_Store",
+]
+
+[install]
+dir = ".vendor/.zed"
+
+# This is the installable source envelope for the API service. The repository
+# keeps its `.rs` suffix, but Zed package coordinates intentionally use the
+# canonical grammar shared by every registry client.
+[targets.repository]
+dir = "."
+adapter = "none"

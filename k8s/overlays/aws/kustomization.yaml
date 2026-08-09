@@ -26,4 +26,4 @@ patches:
               - name: zed-api-server
                 env:
                   - name: PUBLIC_BASE_URL
-                    value: https://registry.aws.zpkg.tech
+                    value: https://registry.aws.zpkg.net

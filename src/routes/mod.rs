@@ -314,6 +314,8 @@ mod tests {
         let dir = std::env::temp_dir().join("zed-api-test-store");
         let state = Arc::new(AppState {
             db: sea_orm::DatabaseConnection::Disconnected,
+            registry_read: None,
+            registry_write: None,
             store: ArtifactStore::from_config(&crate::config::StorageConfig::Local {
                 dir: dir.to_string_lossy().to_string(),
             })
@@ -324,6 +326,10 @@ mod tests {
             max_orgs_per_token: 5,
             fiducia: None,
             rate_limiter: None,
+            shared_auth: None,
+            shared_auth_audience: "zed-pkg".to_string(),
+            shared_auth_application_id: "zed-pkg".to_string(),
+            shared_auth_public_url: None,
         });
         let app = router(state, 1024 * 1024);
         let response = app
@@ -342,6 +348,8 @@ mod tests {
         let dir = std::env::temp_dir().join("zed-api-rl-test-store");
         Arc::new(AppState {
             db: sea_orm::DatabaseConnection::Disconnected,
+            registry_read: None,
+            registry_write: None,
             store: ArtifactStore::from_config(&crate::config::StorageConfig::Local {
                 dir: dir.to_string_lossy().to_string(),
             })
@@ -352,6 +360,10 @@ mod tests {
             max_orgs_per_token: 5,
             fiducia: None,
             rate_limiter: Some(Arc::new(limiter)),
+            shared_auth: None,
+            shared_auth_audience: "zed-pkg".to_string(),
+            shared_auth_application_id: "zed-pkg".to_string(),
+            shared_auth_public_url: None,
         })
     }
 

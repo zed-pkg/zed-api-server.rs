@@ -1,0 +1,117 @@
+name: Immutable Zed package release
+
+on:
+  pull_request:
+    paths:
+      - .zpkg.toml
+      - .github/workflows/zed-package-release.yml
+  push:
+    branches: [main]
+    paths:
+      - .zpkg.toml
+      - .github/workflows/zed-package-release.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: zed-package-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.manifest.outputs.version }}
+      tag: ${{ steps.manifest.outputs.tag }}
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Validate canonical package identity and derive tag
+        id: manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY' >>"$GITHUB_OUTPUT"
+          import re
+          import tomllib
+          from pathlib import Path
+
+          document = tomllib.loads(Path('.zpkg.toml').read_text(encoding='utf-8'))
+          package = document['package']
+          repository = package['repository']
+          publish = document.get('publish', {})
+
+          assert package['org'] == 'zed-pkg'
+          assert package['name'] == 'zed-api-server'
+          assert repository['url'].removesuffix('.git').rstrip('/') == \
+              'https://github.com/zed-pkg/zed-api-server.rs'
+
+          version = package['version']
+          assert re.fullmatch(r'[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}', version)
+          tag_format = publish.get('tag_format', 'v{version}')
+          assert tag_format.count('{version}') == 1
+          tag = tag_format.replace('{version}', version)
+          assert re.fullmatch(r'v[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}', tag)
+
+          print(f'version={version}')
+          print(f'tag={tag}')
+          PY
+
+      - name: Verify released manifests are immutable
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          TAG: ${{ steps.manifest.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          if git rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null; then
+            tagged_manifest="$(git show "refs/tags/$TAG:.zpkg.toml")"
+            candidate_manifest="$(cat .zpkg.toml)"
+            test "$tagged_manifest" = "$candidate_manifest" || {
+              echo "tag $TAG already exists with a different immutable manifest; bump package.version" >&2
+              exit 1
+            }
+          fi
+
+  tag:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact merged release commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Create immutable package tag
+        shell: bash
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --force --tags origin
+
+          if existing="$(git rev-parse -q --verify "refs/tags/$TAG^{commit}")"; then
+            test "$existing" = "$GITHUB_SHA" || {
+              echo "tag $TAG already points to $existing, not merged release $GITHUB_SHA" >&2
+              exit 1
+            }
+            echo "tag $TAG already certifies this exact commit"
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$TAG" "$GITHUB_SHA" -m "zed-pkg/zed-api-server $VERSION"
+          git push origin "refs/tags/$TAG"

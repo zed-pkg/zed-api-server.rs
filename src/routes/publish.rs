@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Multipart, Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
@@ -32,6 +32,10 @@ pub async fn publish(
     mut multipart: Multipart,
 ) -> ApiResult<Json<PublishResponse>> {
     let token = require_token(&state.db, &headers).await?;
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
 
     // Authorize BEFORE buffering the body. The org comes from the URL, so the
     // role check needs nothing from the multipart payload — and reading first
@@ -100,20 +104,42 @@ pub async fn publish(
         TagCheck::Verified { .. } | TagCheck::Skipped => {}
     }
 
-    // Immutability is checked BEFORE any metadata mutation: if this exact
-    // version already exists the publish is a no-op conflict and must not
-    // rewrite the package's description/vcs/repo_url (M1). The package may not
-    // exist yet (first publish), in which case no version can exist either.
+    let key = artifact_key(&actual_sha, meta.format.extension());
+    let artifact_len = artifact.len() as i64;
+
+    // Immutability is checked BEFORE any metadata mutation. An identical retry
+    // also repairs a possible legacy-only partial commit before returning the
+    // stable conflict; a divergent retry never reaches the canonical plane.
     if let Some(pkg) = find_package_row(&state, &org_row, &name).await? {
-        let exists = version::Entity::find()
+        let existing = version::Entity::find()
             .filter(version::Column::PackageId.eq(pkg.id))
             .filter(version::Column::Version.eq(&ver))
             .one(&state.db)
             .await?;
-        if exists.is_some() {
+        if let Some(existing) = existing {
+            if !legacy_version_matches(&existing, &meta, &actual_sha, artifact_len, &key) {
+                return Err(ApiErr::conflict(
+                    "version_exists",
+                    format!(
+                        "{org_slug}/{name}@{ver} is already published with different immutable facts"
+                    ),
+                ));
+            }
+            adopt_canonical_publish(
+                &state,
+                &org_row,
+                &meta,
+                &actual_sha,
+                artifact_len,
+                &key,
+                user_agent.clone(),
+            )
+            .await?;
             return Err(ApiErr::conflict(
                 "version_exists",
-                format!("{org_slug}/{name}@{ver} is already published; versions are immutable"),
+                format!(
+                    "{org_slug}/{name}@{ver} is already published; canonical projection reconciled"
+                ),
             ));
         }
     }
@@ -121,8 +147,6 @@ pub async fn publish(
     // Store the blob before recording the row that references it. `Bytes` is
     // moved (not re-copied) into the store; the length is captured first since
     // the version row records it after the put.
-    let key = artifact_key(&actual_sha, meta.format.extension());
-    let artifact_len = artifact.len() as i64;
     state
         .store
         .put(&key, artifact, meta.format.content_type())
@@ -172,6 +196,25 @@ pub async fn publish(
             // index between the check above and this insert; that is the same
             // immutability conflict, not an internal error.
             if matches!(err.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) {
+                let existing = version::Entity::find()
+                    .filter(version::Column::PackageId.eq(pkg.id))
+                    .filter(version::Column::Version.eq(&ver))
+                    .one(&state.db)
+                    .await?;
+                if let Some(existing) = existing
+                    && legacy_version_matches(&existing, &meta, &actual_sha, artifact_len, &key)
+                {
+                    adopt_canonical_publish(
+                        &state,
+                        &org_row,
+                        &meta,
+                        &actual_sha,
+                        artifact_len,
+                        &key,
+                        user_agent.clone(),
+                    )
+                    .await?;
+                }
                 return Err(ApiErr::conflict(
                     "version_exists",
                     format!("{org_slug}/{name}@{ver} is already published; versions are immutable"),
@@ -180,6 +223,17 @@ pub async fn publish(
             return Err(err.into());
         }
     }
+
+    adopt_canonical_publish(
+        &state,
+        &org_row,
+        &meta,
+        &actual_sha,
+        artifact_len,
+        &key,
+        user_agent,
+    )
+    .await?;
 
     tracing::info!(org = %org_slug, name = %name, version = %ver, sha256 = %actual_sha, "published");
     // Best-effort: the version is already committed, so an audit failure must
@@ -199,6 +253,79 @@ pub async fn publish(
         version: ver,
         sha256: actual_sha,
     }))
+}
+
+fn legacy_version_matches(
+    existing: &version::Model,
+    meta: &PublishMeta,
+    actual_sha: &str,
+    artifact_len: i64,
+    artifact_key: &str,
+) -> bool {
+    existing.sha256 == actual_sha
+        && existing.size == artifact_len
+        && existing.format == meta.format.extension()
+        && existing.vcs_tag == meta.vcs_tag
+        && existing.vcs_commit == meta.vcs_commit
+        && existing.artifact_key == artifact_key
+}
+
+async fn adopt_canonical_publish(
+    state: &AppState,
+    org_row: &org::Model,
+    meta: &PublishMeta,
+    actual_sha: &str,
+    artifact_len: i64,
+    artifact_key: &str,
+    user_agent: Option<String>,
+) -> ApiResult<()> {
+    let Some(context) = state.registry_write.as_ref() else {
+        if cfg!(test) {
+            // Legacy unit tests intentionally use SQLite and exercise the
+            // compatibility transaction in isolation. Full-stack PostgreSQL
+            // tests supply the canonical context and prove the mirror.
+            return Ok(());
+        }
+        return Err(ApiErr::service_unavailable(
+            "registry_data_plane_unavailable",
+            "canonical registry write context is not configured",
+        ));
+    };
+    let package = &meta.manifest.package;
+    zed_orm_core::publication::adopt_machine_publish(
+        context,
+        zed_orm_core::publication::MachinePublishInput {
+            org_slug: package.org.clone(),
+            org_name: Some(org_row.slug.clone()),
+            package_name: package.name.clone(),
+            description: package.description.clone(),
+            vcs: package.repository.vcs.to_string(),
+            repo_url: package.repository.url.clone(),
+            homepage_url: None,
+            keywords: serde_json::json!(package.keywords),
+            version: package.version.clone(),
+            version_scheme: package.version_scheme.as_str().to_owned(),
+            sha256: actual_sha.to_owned(),
+            size_bytes: artifact_len,
+            format: meta.format.extension().to_owned(),
+            vcs_tag: Some(meta.vcs_tag.clone()),
+            vcs_commit: meta.vcs_commit.clone(),
+            artifact_key: artifact_key.to_owned(),
+            manifest: serde_json::to_value(&meta.manifest).map_err(|error| {
+                ApiErr::bad_request(
+                    "invalid_manifest",
+                    format!("manifest serialization failed: {error}"),
+                )
+            })?,
+            published_by_user_id: None,
+            api_token_id: None,
+            client_ip_hash: None,
+            user_agent,
+        },
+    )
+    .await
+    .map_err(crate::account::map_orm_error)?;
+    Ok(())
 }
 
 async fn read_multipart(multipart: &mut Multipart) -> ApiResult<(PublishMeta, Bytes)> {
@@ -368,6 +495,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("zed-api-pub-test-{}", Uuid::new_v4()));
         Arc::new(AppState {
             db,
+            registry_read: None,
+            registry_write: None,
             store: ArtifactStore::from_config(&StorageConfig::Local {
                 dir: dir.to_string_lossy().to_string(),
             })
@@ -378,6 +507,10 @@ mod tests {
             max_orgs_per_token: 5,
             fiducia: None,
             rate_limiter: None,
+            shared_auth: None,
+            shared_auth_audience: "zed-pkg-tests".to_string(),
+            shared_auth_application_id: "zed-pkg".to_string(),
+            shared_auth_public_url: None,
         })
     }
 

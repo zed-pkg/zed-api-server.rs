@@ -173,6 +173,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("zed-api-audit-test-{}", Uuid::new_v4()));
         Arc::new(AppState {
             db,
+            registry_read: None,
+            registry_write: None,
             store: ArtifactStore::from_config(&StorageConfig::Local {
                 dir: dir.to_string_lossy().to_string(),
             })
@@ -184,6 +186,10 @@ mod tests {
             fiducia: None,
             // Unit tests call handlers directly and must not be throttled.
             rate_limiter: None,
+            shared_auth: None,
+            shared_auth_audience: "zed-pkg-tests".to_string(),
+            shared_auth_application_id: "zed-pkg".to_string(),
+            shared_auth_public_url: None,
         })
     }
 
