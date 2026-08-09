@@ -1,0 +1,74 @@
+name: normalize account console implementation
+
+on:
+  push:
+    branches:
+      - feat/den-2955-account-console-api
+    paths:
+      - .github/workflows/fix-account-console-format.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: normalize-account-console-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  normalize:
+    if: github.repository == 'zed-pkg/zed-api-server.rs'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: true
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Apply the Clippy repair and rustfmt output
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('src/routes/account.rs')
+          text = path.read_text()
+          pattern = re.compile(
+              r"fn validate_optional_url\(value: Option<&str>, field: &'static str\) -> ApiResult<\(\)> \{.*?\n\}\n\nfn user_response",
+              re.S,
+          )
+          replacement = '''fn validate_optional_url(value: Option<&str>, field: &'static str) -> ApiResult<()> {
+              if value.is_some_and(|value| {
+                  value.len() > 2_048
+                      || !(value.starts_with("https://") || value.starts_with("http://"))
+              }) {
+                  return Err(ApiErr::bad_request(
+                      "invalid_url",
+                      format!("{field} must be an http(s) URL"),
+                  ));
+              }
+              Ok(())
+          }
+
+          fn user_response'''
+          updated, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit(f'expected one validate_optional_url function, found {count}')
+          path.write_text(updated)
+          PY
+          cargo fmt --all
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src
+          git commit -m 'style: normalize account-console API sources'
+          git push origin HEAD:${GITHUB_REF_NAME}
