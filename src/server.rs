@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::state::AppState;
 use crate::storage::ArtifactStore;
 use crate::verify::TagVerifier;
-use crate::{ratelimit, routes, tokens};
+use crate::{account_router, ratelimit, routes, tokens};
 
 #[derive(Debug, PartialEq, Eq)]
 enum ProcessCommand<'a> {
@@ -106,7 +106,8 @@ pub(crate) async fn run() -> Result<()> {
             .map(|configuration| configuration.public_url.clone()),
     });
 
-    let app = routes::router(state, cfg.max_artifact_bytes);
+    let app = routes::router(state.clone(), cfg.max_artifact_bytes)
+        .merge(account_router::router(state));
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     tracing::info!("zed-api-server listening on {}", cfg.bind_addr);
     axum::serve(listener, app).await?;
