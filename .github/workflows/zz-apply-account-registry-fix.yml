@@ -1,0 +1,111 @@
+name: apply account registry integration fixes
+
+on:
+  push:
+    branches:
+      - feat/shared-auth-account-registry-api
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-account-registry-integration-fixes
+  cancel-in-progress: false
+
+jobs:
+  patch-and-validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the exact feature head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Apply assertion-checked semantic patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          test_files = [
+              Path("src/routes/audit.rs"),
+              Path("src/routes/orgs.rs"),
+              Path("src/routes/publish.rs"),
+              Path("src/routes/yank.rs"),
+          ]
+          needle = "            rate_limiter: None,\n        })"
+          replacement = """            rate_limiter: None,
+                      shared_auth: None,
+                      shared_auth_audience: "zed-pkg-tests".to_string(),
+                      shared_auth_application_id: "zed-pkg".to_string(),
+                      shared_auth_public_url: None,
+                  })"""
+          # Normalize the replacement indentation to the source constructor.
+          replacement = "\n".join(line[10:] if line.startswith("          ") else line for line in replacement.splitlines())
+          for path in test_files:
+              text = path.read_text()
+              count = text.count(needle)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one stale AppState constructor, found {count}")
+              path.write_text(text.replace(needle, replacement, 1))
+
+          server = Path("src/server.rs")
+          text = server.read_text()
+          old = """    let app =
+                  routes::router(state.clone(), cfg.max_artifact_bytes).merge(account_router::router(state));"""
+          old = "\n".join(line[8:] if line.startswith("        ") else line for line in old.splitlines())
+          new = """    let registry = routes::router(state.clone(), cfg.max_artifact_bytes);
+              let account = account_router::router(state);
+              let app = axum::Router::new()
+                  // Canonical public API: product/account routes live under `/api`,
+                  // while registry protocol routes are an explicit API subset.
+                  .nest("/api/registry", registry.clone())
+                  .nest("/api", account.clone())
+                  // Compatibility aliases preserve existing CLI and web clients.
+                  .merge(registry)
+                  .merge(account);"""
+          new = "\n".join(line[4:] if line.startswith("    ") else line for line in new.splitlines())
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f"src/server.rs: expected one legacy router assembly, found {count}")
+          server.write_text(text.replace(old, new, 1))
+
+          for obsolete in (
+              Path(".github/workflows/diagnose-feature.yml"),
+              Path("ci-diagnostics.txt"),
+          ):
+              if obsolete.exists():
+                  obsolete.unlink()
+          PY
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Check all targets
+        run: cargo check --locked --all-targets
+
+      - name: Strict Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --all-targets
+
+      - name: Commit the validated patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo "No patch was required."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix(DEN-2955): stabilize auth state and API namespaces"
+          git push origin HEAD:feat/shared-auth-account-registry-api
