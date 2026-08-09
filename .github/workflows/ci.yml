@@ -17,7 +17,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   ZED_INTERFACES_SHA: f141e4cfae31a74c679b46d1d4bb0146b20555f6
-  ZED_ORM_SHA: c924cc61689c62d5df8f4cb190fa09f7f513f644
+  ZED_ORM_SHA: 430aafe24b6c3ab1263f1351ab4941545f592f19
 
 jobs:
   test:
@@ -42,7 +42,7 @@ jobs:
           interfaces = manifest["dependencies"]["zed-interfaces"]
           orm = manifest["dependencies"]["zed-orm"]
           expected_interfaces = "f141e4cfae31a74c679b46d1d4bb0146b20555f6"
-          expected_orm = "c924cc61689c62d5df8f4cb190fa09f7f513f644"
+          expected_orm = "430aafe24b6c3ab1263f1351ab4941545f592f19"
           assert "path" not in interfaces, interfaces
           assert interfaces["rev"] == expected_interfaces, interfaces
           assert "path" not in orm, orm
