@@ -1,0 +1,45 @@
+name: Diagnose account API feature branch
+
+on:
+  push:
+    branches:
+      - feat/shared-auth-account-registry-api
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Capture diagnostics without truncation
+        shell: bash
+        run: |
+          set +e
+          : > ci-diagnostics.txt
+          run_step() {
+            local name="$1"
+            shift
+            printf '\n===== %s =====\n' "$name" >> ci-diagnostics.txt
+            "$@" >> ci-diagnostics.txt 2>&1
+            local code=$?
+            printf '\nexit=%s\n' "$code" >> ci-diagnostics.txt
+          }
+          run_step fmt cargo fmt --all -- --check
+          run_step check cargo check --workspace --all-targets --locked
+          run_step clippy cargo clippy --workspace --all-targets --locked -- -D warnings
+          run_step test cargo test --workspace --locked
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ci-diagnostics.txt
+          git commit -m 'chore: capture account API CI diagnostics'
+          git push origin HEAD:${GITHUB_REF_NAME}
