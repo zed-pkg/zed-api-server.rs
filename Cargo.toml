@@ -13,7 +13,12 @@ members = [".", "migration"]
 # Keep every cross-repository boundary immutable and independently reviewable.
 zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "f141e4cfae31a74c679b46d1d4bb0146b20555f6" }
 zed-orm = { git = "https://github.com/zed-pkg/zed-lib.git", rev = "f6f240a72eb100b858ae74f2c633d09528b61805", package = "zed-orm" }
-shared-auth-service-client = { git = "https://github.com/shared-auth/shared-auth-clients.git", rev = "1b1089123394ac4006901cdac477d63bfba48943", package = "shared-auth-service-client" }
+# The private shared-auth-clients repository cannot be cloned by this
+# repository's scoped GITHUB_TOKEN. `src/shared_auth.rs` implements the small,
+# reviewed exchange/introspection HTTP contract using the existing reqwest
+# dependency; it is pinned in comments/tests to shared-auth-clients commit
+# 1b1089123394ac4006901cdac477d63bfba48943.
+#
 # Legacy registry tables still use this crate during the expand migration. The
 # account, membership, artifact-fact, search-vector, and visibility migrations
 # are owned by zed-orm. Production invokes the explicit `migrate` command; API
