@@ -14,6 +14,12 @@ pub struct Config {
     pub max_orgs_per_token: u64,
     pub db_max_connections: u32,
     pub fiducia: Option<FiduciaConfig>,
+    /// Internal customer-realm Shared Auth origin used to verify browser and
+    /// human CLI access tokens. Product authorization remains in this service.
+    pub shared_auth_url: String,
+    /// First-party access-token cookie issued through the product's
+    /// `/shared-auth/auth/browser/*` proxy.
+    pub shared_auth_cookie_name: String,
 }
 
 /// Optional fiducia lock service for distributed locks (see routes/orgs.rs).
@@ -108,6 +114,10 @@ impl Config {
                 internal_secret: std::env::var("FIDUCIA_INTERNAL_SECRET").ok(),
                 org_id: env_or("FIDUCIA_ORG_ID", "zed-registry"),
             }),
+            shared_auth_url: env_or("SHARED_AUTH_URL", "http://127.0.0.1:8081")
+                .trim_end_matches('/')
+                .to_owned(),
+            shared_auth_cookie_name: env_or("AUTH_SESSION_COOKIE_NAME", "__Host-ore-session"),
         })
     }
 }
