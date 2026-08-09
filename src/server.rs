@@ -10,12 +10,13 @@ use crate::config::Config;
 use crate::state::AppState;
 use crate::storage::ArtifactStore;
 use crate::verify::TagVerifier;
-use crate::{auth, ratelimit, routes, tokens};
+use crate::{account_router, auth, ratelimit, routes, tokens};
 
 #[derive(Debug, PartialEq, Eq)]
 enum ProcessCommand<'a> {
     CreateToken(&'a [String]),
     Healthcheck,
+    Migrate,
     RevokeToken(&'a [String]),
     Serve,
 }
@@ -32,6 +33,7 @@ pub(crate) async fn run() -> Result<()> {
         ProcessCommand::CreateToken(arguments) => return tokens::create_token(arguments).await,
         ProcessCommand::RevokeToken(arguments) => return tokens::revoke_token(arguments).await,
         ProcessCommand::Healthcheck => return healthcheck().await,
+        ProcessCommand::Migrate => return migrate_database().await,
         ProcessCommand::Serve => {}
     }
 
@@ -43,9 +45,7 @@ pub(crate) async fn run() -> Result<()> {
     }
     let db = connect_with_retry(&cfg).await?;
     if cfg.auto_migrate {
-        migration::Migrator::up(&db, None)
-            .await
-            .context("migrations failed")?;
+        apply_migrations(&db).await?;
     }
     let store = ArtifactStore::from_config(&cfg.storage).await?;
     let fiducia = cfg.fiducia.as_ref().map(|configuration| {
@@ -77,7 +77,8 @@ pub(crate) async fn run() -> Result<()> {
         rate_limiter,
     });
 
-    let app = routes::router(state, cfg.max_artifact_bytes);
+    let account_app = account_router::router(state.clone());
+    let app = routes::router(state, cfg.max_artifact_bytes).merge(account_app);
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     tracing::info!("zed-api-server listening on {}", cfg.bind_addr);
     axum::serve(listener, app).await?;
@@ -89,8 +90,32 @@ fn process_command(args: &[String]) -> ProcessCommand<'_> {
         Some("create-token") => ProcessCommand::CreateToken(&args[2..]),
         Some("revoke-token") => ProcessCommand::RevokeToken(&args[2..]),
         Some("healthcheck") => ProcessCommand::Healthcheck,
+        Some("migrate") => ProcessCommand::Migrate,
         _ => ProcessCommand::Serve,
     }
+}
+
+async fn migrate_database() -> Result<()> {
+    let cfg = Config::from_env()?;
+    let db = connect_with_retry(&cfg).await?;
+    apply_migrations(&db).await
+}
+
+async fn apply_migrations(db: &sea_orm::DatabaseConnection) -> Result<()> {
+    // Preserve the existing package/version migration history, then let the
+    // canonical zed-lib migration owner expand the account and project graph.
+    migration::Migrator::up(db, None)
+        .await
+        .context("legacy registry migrations failed")?;
+    let report = zed_orm::migrate(db)
+        .await
+        .context("zed-lib account-console migrations failed")?;
+    tracing::info!(
+        migration = report.version,
+        applied = report.applied,
+        "registry migrations complete"
+    );
+    Ok(())
 }
 
 /// Connect to Postgres, retrying until it is reachable or a bounded deadline
@@ -185,6 +210,10 @@ mod tests {
         assert_eq!(
             process_command(&arguments(&["zed-api-server", "healthcheck"])),
             ProcessCommand::Healthcheck
+        );
+        assert_eq!(
+            process_command(&arguments(&["zed-api-server", "migrate"])),
+            ProcessCommand::Migrate
         );
         assert_eq!(
             process_command(&arguments(&["zed-api-server", "unknown"])),
