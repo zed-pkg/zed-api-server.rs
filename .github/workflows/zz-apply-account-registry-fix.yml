@@ -38,15 +38,18 @@ jobs:
               Path("src/routes/publish.rs"),
               Path("src/routes/yank.rs"),
           ]
-          needle = "            rate_limiter: None,\n        })"
-          replacement = """            rate_limiter: None,
-                      shared_auth: None,
-                      shared_auth_audience: "zed-pkg-tests".to_string(),
-                      shared_auth_application_id: "zed-pkg".to_string(),
-                      shared_auth_public_url: None,
-                  })"""
-          # Normalize the replacement indentation to the source constructor.
-          replacement = "\n".join(line[10:] if line.startswith("          ") else line for line in replacement.splitlines())
+          needle = (
+              "            rate_limiter: None,\n"
+              "        })"
+          )
+          replacement = (
+              "            rate_limiter: None,\n"
+              "            shared_auth: None,\n"
+              "            shared_auth_audience: \"zed-pkg-tests\".to_string(),\n"
+              "            shared_auth_application_id: \"zed-pkg\".to_string(),\n"
+              "            shared_auth_public_url: None,\n"
+              "        })"
+          )
           for path in test_files:
               text = path.read_text()
               count = text.count(needle)
@@ -56,20 +59,22 @@ jobs:
 
           server = Path("src/server.rs")
           text = server.read_text()
-          old = """    let app =
-                  routes::router(state.clone(), cfg.max_artifact_bytes).merge(account_router::router(state));"""
-          old = "\n".join(line[8:] if line.startswith("        ") else line for line in old.splitlines())
-          new = """    let registry = routes::router(state.clone(), cfg.max_artifact_bytes);
-              let account = account_router::router(state);
-              let app = axum::Router::new()
-                  // Canonical public API: product/account routes live under `/api`,
-                  // while registry protocol routes are an explicit API subset.
-                  .nest("/api/registry", registry.clone())
-                  .nest("/api", account.clone())
-                  // Compatibility aliases preserve existing CLI and web clients.
-                  .merge(registry)
-                  .merge(account);"""
-          new = "\n".join(line[4:] if line.startswith("    ") else line for line in new.splitlines())
+          old = (
+              "    let app =\n"
+              "        routes::router(state.clone(), cfg.max_artifact_bytes).merge(account_router::router(state));"
+          )
+          new = (
+              "    let registry = routes::router(state.clone(), cfg.max_artifact_bytes);\n"
+              "    let account = account_router::router(state);\n"
+              "    let app = axum::Router::new()\n"
+              "        // Canonical public API: product/account routes live under `/api`,\n"
+              "        // while registry protocol routes are an explicit API subset.\n"
+              "        .nest(\"/api/registry\", registry.clone())\n"
+              "        .nest(\"/api\", account.clone())\n"
+              "        // Compatibility aliases preserve existing CLI and web clients.\n"
+              "        .merge(registry)\n"
+              "        .merge(account);"
+          )
           count = text.count(old)
           if count != 1:
               raise SystemExit(f"src/server.rs: expected one legacy router assembly, found {count}")
