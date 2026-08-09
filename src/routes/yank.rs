@@ -113,6 +113,10 @@ mod tests {
             max_orgs_per_token: 5,
             fiducia: None,
             rate_limiter: None,
+            shared_auth: None,
+            shared_auth_audience: "zed-pkg-tests".to_string(),
+            shared_auth_application_id: "zed-pkg".to_string(),
+            shared_auth_public_url: None,
         })
     }
 

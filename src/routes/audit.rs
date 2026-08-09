@@ -184,6 +184,10 @@ mod tests {
             fiducia: None,
             // Unit tests call handlers directly and must not be throttled.
             rate_limiter: None,
+            shared_auth: None,
+            shared_auth_audience: "zed-pkg-tests".to_string(),
+            shared_auth_application_id: "zed-pkg".to_string(),
+            shared_auth_public_url: None,
         })
     }
 
