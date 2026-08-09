@@ -25,8 +25,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           components: rustfmt, clippy
-      - name: Apply the reviewed source patch
-        run: python3 scripts/apply_canonical_api_r2.py
+      - name: Apply and format the reviewed source patch
+        run: |
+          set -euo pipefail
+          python3 scripts/apply_canonical_api_r2.py
+          cargo fmt --all
       - name: Verify the complete exact-head Rust contract
         run: |
           set -euo pipefail
