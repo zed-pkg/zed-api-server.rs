@@ -38,11 +38,11 @@ jobs:
               Path("src/routes/publish.rs"),
               Path("src/routes/yank.rs"),
           ]
-          needle = (
+          stale = (
               "            rate_limiter: None,\n"
               "        })"
           )
-          replacement = (
+          current = (
               "            rate_limiter: None,\n"
               "            shared_auth: None,\n"
               "            shared_auth_audience: \"zed-pkg-tests\".to_string(),\n"
@@ -52,33 +52,17 @@ jobs:
           )
           for path in test_files:
               text = path.read_text()
-              count = text.count(needle)
-              if count != 1:
-                  raise SystemExit(f"{path}: expected exactly one stale AppState constructor, found {count}")
-              path.write_text(text.replace(needle, replacement, 1))
-
-          server = Path("src/server.rs")
-          text = server.read_text()
-          old = (
-              "    let app =\n"
-              "        routes::router(state.clone(), cfg.max_artifact_bytes).merge(account_router::router(state));"
-          )
-          new = (
-              "    let registry = routes::router(state.clone(), cfg.max_artifact_bytes);\n"
-              "    let account = account_router::router(state);\n"
-              "    let app = axum::Router::new()\n"
-              "        // Canonical public API: product/account routes live under `/api`,\n"
-              "        // while registry protocol routes are an explicit API subset.\n"
-              "        .nest(\"/api/registry\", registry.clone())\n"
-              "        .nest(\"/api\", account.clone())\n"
-              "        // Compatibility aliases preserve existing CLI and web clients.\n"
-              "        .merge(registry)\n"
-              "        .merge(account);"
-          )
-          count = text.count(old)
-          if count != 1:
-              raise SystemExit(f"src/server.rs: expected one legacy router assembly, found {count}")
-          server.write_text(text.replace(old, new, 1))
+              stale_count = text.count(stale)
+              current_count = text.count(current)
+              if stale_count == 1 and current_count == 0:
+                  path.write_text(text.replace(stale, current, 1))
+              elif stale_count == 0 and current_count == 1:
+                  pass
+              else:
+                  raise SystemExit(
+                      f"{path}: ambiguous AppState constructor state "
+                      f"(stale={stale_count}, current={current_count})"
+                  )
 
           for obsolete in (
               Path(".github/workflows/diagnose-feature.yml"),
@@ -112,5 +96,5 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "fix(DEN-2955): stabilize auth state and API namespaces"
+          git commit -m "fix(DEN-2955): stabilize Shared Auth test state"
           git push origin HEAD:feat/shared-auth-account-registry-api
