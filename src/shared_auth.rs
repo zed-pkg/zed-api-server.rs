@@ -11,7 +11,6 @@ use axum::http::{HeaderMap, header};
 use reqwest::StatusCode;
 use zed_orm::models::SessionIdentity;
 
-use crate::config::Config;
 use crate::error::ApiErr;
 
 #[derive(Clone, Debug)]
@@ -20,20 +19,22 @@ pub struct AuthenticatedSession {
     pub aal: u8,
 }
 
-pub async fn authenticate(
-    config: &Config,
-    request_headers: &HeaderMap,
-) -> Result<AuthenticatedSession, ApiErr> {
+pub async fn authenticate(request_headers: &HeaderMap) -> Result<AuthenticatedSession, ApiErr> {
+    let cookie_name = env_or("AUTH_SESSION_COOKIE_NAME", "__Host-ore-session");
     let token = bearer(request_headers)
-        .or_else(|| cookie_value(request_headers, &config.shared_auth_cookie_name))
+        .or_else(|| cookie_value(request_headers, &cookie_name))
         .ok_or_else(ApiErr::unauthorized)?;
 
     if token.len() > 16 * 1024 {
         return Err(ApiErr::unauthorized());
     }
 
+    let base_url = env_or("SHARED_AUTH_URL", "http://127.0.0.1:8081");
     let response = client()
-        .get(format!("{}/auth/verify", config.shared_auth_url))
+        .get(format!(
+            "{}/auth/verify",
+            base_url.trim_end_matches('/')
+        ))
         .bearer_auth(&token)
         .timeout(Duration::from_secs(5))
         .send()
@@ -61,6 +62,10 @@ pub async fn authenticate(
             ))
         }
     }
+}
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_owned())
 }
 
 fn client() -> &'static reqwest::Client {
@@ -133,7 +138,10 @@ mod tests {
     #[test]
     fn bearer_wins_over_the_browser_cookie() {
         let mut headers = HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer cli-token"));
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer cli-token"),
+        );
         headers.insert(
             header::COOKIE,
             HeaderValue::from_static("__Host-ore-session=browser-token"),
