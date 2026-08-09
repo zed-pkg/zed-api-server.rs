@@ -9,6 +9,7 @@ mod ratelimit;
 mod rbac;
 mod routes;
 mod server;
+mod shared_auth;
 mod state;
 mod storage;
 mod tokens;
