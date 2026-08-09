@@ -66,6 +66,7 @@ jobs:
 
           for obsolete in (
               Path(".github/workflows/diagnose-feature.yml"),
+              Path(".github/workflows/zz-apply-account-registry-fix.yml"),
               Path("ci-diagnostics.txt"),
           ):
               if obsolete.exists():
@@ -84,10 +85,17 @@ jobs:
       - name: Test
         run: cargo test --locked --all-targets
 
-      - name: Commit the validated patch
+      - name: Commit the validated patch without overwriting concurrent work
         shell: bash
         run: |
           set -euo pipefail
+          tested_head="$(git rev-parse HEAD)"
+          git fetch origin feat/shared-auth-account-registry-api
+          remote_head="$(git rev-parse origin/feat/shared-auth-account-registry-api)"
+          if test "$tested_head" != "$remote_head"; then
+            echo "The feature branch advanced during validation; refusing an untested overwrite." >&2
+            exit 1
+          fi
           git add -A
           git diff --cached --check
           if git diff --cached --quiet; then
