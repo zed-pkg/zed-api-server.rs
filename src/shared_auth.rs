@@ -31,10 +31,7 @@ pub async fn authenticate(request_headers: &HeaderMap) -> Result<AuthenticatedSe
 
     let base_url = env_or("SHARED_AUTH_URL", "http://127.0.0.1:8081");
     let response = client()
-        .get(format!(
-            "{}/auth/verify",
-            base_url.trim_end_matches('/')
-        ))
+        .get(format!("{}/auth/verify", base_url.trim_end_matches('/')))
         .bearer_auth(&token)
         .timeout(Duration::from_secs(5))
         .send()
@@ -93,7 +90,10 @@ fn session_from_headers(headers: &HeaderMap) -> Result<AuthenticatedSession, Api
 
 fn required_header(headers: &HeaderMap, name: &'static str) -> Result<String, ApiErr> {
     optional_header(headers, name).ok_or_else(|| {
-        tracing::warn!(header = name, "Shared Auth response omitted required identity header");
+        tracing::warn!(
+            header = name,
+            "Shared Auth response omitted required identity header"
+        );
         ApiErr::service_unavailable(
             "shared_auth_contract",
             "authentication service returned an incomplete identity",

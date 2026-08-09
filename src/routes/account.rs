@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, header};
-use axum::Json;
 use sea_orm::DbErr;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -383,8 +383,8 @@ fn require_mutation_origin(headers: &HeaderMap) -> ApiResult<()> {
     if headers.contains_key(header::AUTHORIZATION) {
         return Ok(());
     }
-    let expected = std::env::var("PUBLIC_WEB_ORIGIN")
-        .unwrap_or_else(|_| "http://localhost:3000".to_owned());
+    let expected =
+        std::env::var("PUBLIC_WEB_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_owned());
     let origin = headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
@@ -427,11 +427,7 @@ fn validate_required_text(value: &str, max: usize, field: &'static str) -> ApiRe
     Ok(())
 }
 
-fn validate_optional_text(
-    value: Option<&str>,
-    max: usize,
-    field: &'static str,
-) -> ApiResult<()> {
+fn validate_optional_text(value: Option<&str>, max: usize, field: &'static str) -> ApiResult<()> {
     if value.is_some_and(|value| value.len() > max) {
         return Err(ApiErr::bad_request(
             "invalid_text",
@@ -442,15 +438,13 @@ fn validate_optional_text(
 }
 
 fn validate_optional_url(value: Option<&str>, field: &'static str) -> ApiResult<()> {
-    if let Some(value) = value {
-        if value.len() > 2_048
-            || !(value.starts_with("https://") || value.starts_with("http://"))
-        {
-            return Err(ApiErr::bad_request(
-                "invalid_url",
-                format!("{field} must be an http(s) URL"),
-            ));
-        }
+    if value.is_some_and(|value| {
+        value.len() > 2_048 || !(value.starts_with("https://") || value.starts_with("http://"))
+    }) {
+        return Err(ApiErr::bad_request(
+            "invalid_url",
+            format!("{field} must be an http(s) URL"),
+        ));
     }
     Ok(())
 }
