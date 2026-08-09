@@ -1,7 +1,7 @@
 [package]
 org = "zed-pkg"
 name = "zed-api-server"
-version = "0.1.0"
+version = "0.1.1"
 description = "Zed registry and account API server with PostgreSQL metadata and S3/R2 artifact storage"
 license = "MIT"
 keywords = ["zed-pkg", "package-manager", "registry", "postgres", "r2"]
