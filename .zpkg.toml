@@ -1,0 +1,49 @@
+[package]
+org = "zed-pkg"
+name = "zed-api-server"
+version = "0.1.0"
+description = "Zed registry and account API server with canonical PostgreSQL metadata and S3/R2 artifact storage"
+license = "MIT"
+keywords = ["zed", "registry", "api", "postgres", "r2"]
+language = "rust"
+
+[package.repository]
+vcs = "git"
+url = "https://github.com/zed-pkg/zed-api-server.rs"
+
+[dependencies]
+"zed-pkg/zed-interfaces" = "^0.1.0"
+"zed-pkg/zed-lib-core" = "^0.1.0"
+
+[install]
+adapter = "none"
+dir = ".vendor/.zed"
+
+[targets.repository]
+dir = "."
+
+[publish]
+include_readme = true
+tag_format = "v{version}"
+smoke_test = "test -f \"$ZED_PKG_TEST_TARGET/src/routes/publish.rs\" && test -f \"$ZED_PKG_TEST_TARGET/schema/schema.sql\""
+exclude = [
+  ".env",
+  ".env.*",
+  ".direnv/**",
+  ".zed/**",
+  ".zed-pack/**",
+  ".vendor/.zed/**",
+  "env/enc/**",
+  "target/**",
+  "**/target/**",
+  "tmp/**",
+  "artifacts/**",
+  "**/*.log",
+  ".DS_Store",
+]
+
+[scripts]
+test = "cargo test --workspace --all-targets --locked"
+lint = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+format = "cargo fmt --all -- --check"
+migrate-check = "cargo run --locked -- migrate --help"
