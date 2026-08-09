@@ -17,6 +17,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   ZED_INTERFACES_SHA: f141e4cfae31a74c679b46d1d4bb0146b20555f6
+  ZED_ORM_SHA: c924cc61689c62d5df8f4cb190fa09f7f513f644
 
 jobs:
   test:
@@ -32,18 +33,32 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test ! -e ../zed-interfaces
+          test ! -e ../zed-lib
           python3 - <<'PY'
           from pathlib import Path
           import tomllib
 
           manifest = tomllib.loads(Path("Cargo.toml").read_text())
-          spec = manifest["dependencies"]["zed-interfaces"]
-          expected = "f141e4cfae31a74c679b46d1d4bb0146b20555f6"
-          assert "path" not in spec, spec
-          assert spec["rev"] == expected, spec
+          interfaces = manifest["dependencies"]["zed-interfaces"]
+          orm = manifest["dependencies"]["zed-orm"]
+          expected_interfaces = "f141e4cfae31a74c679b46d1d4bb0146b20555f6"
+          expected_orm = "c924cc61689c62d5df8f4cb190fa09f7f513f644"
+          assert "path" not in interfaces, interfaces
+          assert interfaces["rev"] == expected_interfaces, interfaces
+          assert "path" not in orm, orm
+          assert orm["rev"] == expected_orm, orm
+          assert orm["package"] == "zed-orm", orm
           lock = Path("Cargo.lock").read_text()
-          source = f"git+https://github.com/zed-pkg/zed-interfaces.git?rev={expected}#{expected}"
-          assert source in lock, "Cargo.lock does not pin the reviewed zed-interfaces source"
+          interface_source = (
+              "git+https://github.com/zed-pkg/zed-interfaces.git?"
+              f"rev={expected_interfaces}#{expected_interfaces}"
+          )
+          orm_source = (
+              "git+https://github.com/zed-pkg/zed-lib.git?"
+              f"rev={expected_orm}#{expected_orm}"
+          )
+          assert interface_source in lock, "Cargo.lock does not pin zed-interfaces"
+          assert orm_source in lock, "Cargo.lock does not pin zed-orm"
           PY
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
