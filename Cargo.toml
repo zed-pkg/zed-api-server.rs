@@ -11,7 +11,11 @@ members = [".", "migration"]
 
 [dependencies]
 # Keep every cross-repository boundary immutable and independently reviewable.
-zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "f141e4cfae31a74c679b46d1d4bb0146b20555f6" }
+# This revision includes both the account/audit contracts already consumed by
+# the service and the audited dependency-graph v1 contract (DEN-2864,
+# zed-interfaces#52). It intentionally predates the later polyglot layout move,
+# which changes the Rust crate path and must be adopted atomically by consumers.
+zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "30d739167036f54b7919c5776c453123f206ca3c" }
 # Canonical account, registry projection, and migration data plane. The API is
 # the only long-running service that opts into write symbols; the discrete
 # `migrate` command is the only runtime path that invokes DDL.
@@ -60,6 +64,14 @@ zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# Independent parsers for the YAML/TOML representations this service emits.
+# Test-only on purpose: the emitters are hand-written because the contract
+# constrains the output past what a general serializer guarantees (safe YAML
+# subset, normalized TOML, absent optionals omitted), so round-trip tests have
+# to be judged by a third-party parser rather than by the same code that wrote
+# the bytes.
+serde_yaml = "0.9"
+toml = "0.9"
 # SQLite is pulled in only for tests (dev-dependencies are excluded from
 # `cargo build --release`), giving publish/claim handlers a real in-memory
 # database to exercise transaction/immutability behavior against.
