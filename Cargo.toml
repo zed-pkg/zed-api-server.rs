@@ -12,7 +12,7 @@ members = [".", "migration"]
 [dependencies]
 # Keep every cross-repository boundary immutable and independently reviewable.
 zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "f141e4cfae31a74c679b46d1d4bb0146b20555f6" }
-zed-orm = { git = "https://github.com/zed-pkg/zed-lib.git", rev = "f6f240a72eb100b858ae74f2c633d09528b61805", package = "zed-orm" }
+zed-orm = { git = "https://github.com/zed-pkg/zed-lib.git", rev = "3f96becea62efb452d1630e7e67711404e8131f2", package = "zed-orm" }
 # The private shared-auth-clients repository cannot be cloned by this
 # repository's scoped GITHUB_TOKEN. `src/shared_auth.rs` implements the small,
 # reviewed exchange/introspection HTTP contract using the existing reqwest
