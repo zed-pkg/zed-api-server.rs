@@ -10,6 +10,8 @@ use crate::error::{ApiErr, ApiResult};
 use crate::shared_auth::{ClientError, Introspection};
 use crate::state::AppState;
 
+const REQUIRED_ACCOUNT_SCOPE: &str = "zpkg:account";
+
 /// Verified browser/account identity. The Shared Auth token is intentionally
 /// not retained: handlers receive only the canonical identity facts needed to
 /// project a registry user and evaluate product memberships.
@@ -43,8 +45,8 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<String> {
 
 /// Authenticate a browser/account request through protected, audience-bound
 /// Shared Auth introspection. Missing credentials are 401; an auth dependency
-/// outage or server misconfiguration is 503; a verified service/wrong product
-/// principal is 403. No branch synthesizes authority.
+/// outage or server misconfiguration is 503; a base/service/wrong-client token
+/// is 403. No branch synthesizes authority.
 pub async fn require_account(state: &AppState, headers: &HeaderMap) -> ApiResult<AccountIdentity> {
     let token = bearer_token(headers).ok_or_else(ApiErr::unauthorized)?;
     let client = state.shared_auth.as_ref().ok_or_else(|| {
@@ -62,25 +64,48 @@ pub async fn require_account(state: &AppState, headers: &HeaderMap) -> ApiResult
 
 fn account_from_introspection(
     introspection: &Introspection,
-    expected_application_id: &str,
+    expected_authorized_party: &str,
 ) -> ApiResult<AccountIdentity> {
     if !introspection.active {
         return Err(ApiErr::unauthorized());
     }
     let subject = required_claim(introspection.sub.as_deref())?;
     let issuer = required_claim(introspection.iss.as_deref())?;
-    let actor_kind = required_rest_string(introspection, "actor_kind")?;
-    if actor_kind != "user" {
+
+    // Shared Auth represents a browser user with a revocable session-backed
+    // base token and then mints a short-lived delegated product token. Its
+    // protected introspection response exposes that provenance as `sid`, `azp`,
+    // and `parent_jti`; it does not emit the previous synthetic `actor_kind` or
+    // `application_id` fields.
+    let session_id = optional_rest_string(introspection, "sid")?;
+    let authorized_party = optional_rest_string(introspection, "azp")?;
+    let parent_jti = optional_rest_string(introspection, "parent_jti")?;
+    if session_id.is_none() || authorized_party.is_none() || parent_jti.is_none() {
         return Err(ApiErr::forbidden(
-            "user_actor_required",
-            "this endpoint requires an authenticated user",
+            "delegated_user_token_required",
+            "this endpoint requires a session-backed delegated user token",
         ));
     }
-    let application_id = required_rest_string(introspection, "application_id")?;
-    if application_id != expected_application_id {
+    if authorized_party.as_deref() != Some(expected_authorized_party) {
         return Err(ApiErr::forbidden(
-            "wrong_application",
-            "the authenticated token is not issued for zed-pkg",
+            "wrong_authorized_party",
+            "the delegated token was not issued to the zed-pkg web client",
+        ));
+    }
+
+    let scope = optional_rest_string(introspection, "scope")?.ok_or_else(|| {
+        ApiErr::forbidden(
+            "insufficient_scope",
+            "the delegated token is missing the zed-pkg account scope",
+        )
+    })?;
+    if !scope
+        .split_ascii_whitespace()
+        .any(|candidate| candidate == REQUIRED_ACCOUNT_SCOPE)
+    {
+        return Err(ApiErr::forbidden(
+            "insufficient_scope",
+            "the delegated token is missing the zed-pkg account scope",
         ));
     }
 
@@ -123,10 +148,6 @@ fn required_claim(value: Option<&str>) -> ApiResult<String> {
         .filter(|value| !value.is_empty() && value.len() <= 1024)
         .map(str::to_owned)
         .ok_or_else(ApiErr::unauthorized)
-}
-
-fn required_rest_string(introspection: &Introspection, key: &str) -> ApiResult<String> {
-    optional_rest_string(introspection, key)?.ok_or_else(ApiErr::unauthorized)
 }
 
 fn optional_rest_string(introspection: &Introspection, key: &str) -> ApiResult<Option<String>> {
@@ -190,11 +211,18 @@ mod tests {
         assert_eq!(bearer_token(&headers).as_deref(), Some("zpkg_abc"));
     }
 
-    #[test]
-    fn verified_user_claims_become_a_federated_identity() {
+    fn delegated_rest(authorized_party: &str, scope: &str) -> serde_json::Map<String, Value> {
         let mut rest = serde_json::Map::new();
-        rest.insert("actor_kind".into(), Value::String("user".into()));
-        rest.insert("application_id".into(), Value::String("zed-pkg".into()));
+        rest.insert("sid".into(), Value::String("session-1".into()));
+        rest.insert("azp".into(), Value::String(authorized_party.into()));
+        rest.insert("parent_jti".into(), Value::String("parent-token-1".into()));
+        rest.insert("scope".into(), Value::String(scope.into()));
+        rest
+    }
+
+    #[test]
+    fn verified_delegated_user_claims_become_a_federated_identity() {
+        let mut rest = delegated_rest("zpkg-web", "zpkg:account zpkg:packages:write");
         rest.insert(
             "supabase_user_id".into(),
             Value::String("ad7c2010-c28a-4cad-a510-4c4020f93535".into()),
@@ -206,7 +234,7 @@ mod tests {
             email: Some("user@example.test".into()),
             rest,
         };
-        let identity = account_from_introspection(&introspection, "zed-pkg").unwrap();
+        let identity = account_from_introspection(&introspection, "zpkg-web").unwrap();
         assert_eq!(identity.subject(), "shared-user-1");
         assert_eq!(
             identity.federated.supabase_user_id,
@@ -215,31 +243,50 @@ mod tests {
     }
 
     #[test]
-    fn service_and_wrong_application_principals_are_forbidden() {
-        let mut rest = serde_json::Map::new();
-        rest.insert("actor_kind".into(), Value::String("service".into()));
-        rest.insert("application_id".into(), Value::String("zed-pkg".into()));
-        let mut introspection = Introspection {
+    fn base_tokens_and_wrong_authorized_parties_are_forbidden() {
+        let base = Introspection {
             active: true,
-            sub: Some("service-1".into()),
+            sub: Some("shared-user-1".into()),
             iss: Some("https://auth.example.test".into()),
             email: None,
-            rest,
+            rest: serde_json::Map::new(),
         };
         assert_eq!(
-            account_from_introspection(&introspection, "zed-pkg")
+            account_from_introspection(&base, "zpkg-web")
                 .unwrap_err()
-                .status,
-            axum::http::StatusCode::FORBIDDEN
+                .code,
+            "delegated_user_token_required"
         );
-        introspection
-            .rest
-            .insert("actor_kind".into(), Value::String("user".into()));
+
+        let wrong_party = Introspection {
+            active: true,
+            sub: Some("shared-user-1".into()),
+            iss: Some("https://auth.example.test".into()),
+            email: None,
+            rest: delegated_rest("other-web", "zpkg:account"),
+        };
         assert_eq!(
-            account_from_introspection(&introspection, "other")
+            account_from_introspection(&wrong_party, "zpkg-web")
                 .unwrap_err()
-                .status,
-            axum::http::StatusCode::FORBIDDEN
+                .code,
+            "wrong_authorized_party"
+        );
+    }
+
+    #[test]
+    fn delegated_token_without_account_scope_is_forbidden() {
+        let introspection = Introspection {
+            active: true,
+            sub: Some("shared-user-1".into()),
+            iss: Some("https://auth.example.test".into()),
+            email: None,
+            rest: delegated_rest("zpkg-web", "zpkg:packages:read"),
+        };
+        assert_eq!(
+            account_from_introspection(&introspection, "zpkg-web")
+                .unwrap_err()
+                .code,
+            "insufficient_scope"
         );
     }
 

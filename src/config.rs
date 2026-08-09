@@ -29,6 +29,9 @@ pub struct SharedAuthConfig {
     pub public_url: String,
     pub service_credential: String,
     pub audience: String,
+    /// Exact OAuth authorized party (`azp`) permitted to call browser/account
+    /// routes. The Rust field retains its legacy name for source compatibility;
+    /// `SHARED_AUTH_AUTHORIZED_PARTY` is the canonical environment variable.
     pub application_id: String,
 }
 
@@ -40,7 +43,7 @@ impl fmt::Debug for SharedAuthConfig {
             .field("public_url", &self.public_url)
             .field("service_credential", &"<redacted>")
             .field("audience", &self.audience)
-            .field("application_id", &self.application_id)
+            .field("authorized_party", &self.application_id)
             .finish()
     }
 }
@@ -133,10 +136,17 @@ impl Config {
                     "SHARED_AUTH_AUDIENCE",
                     env_or("SHARED_AUTH_AUDIENCE", "zed-pkg"),
                 )?;
-                let application_id = nonempty(
-                    "SHARED_AUTH_APPLICATION_ID",
-                    env_or("SHARED_AUTH_APPLICATION_ID", "zed-pkg"),
-                )?;
+                let application_id = match std::env::var("SHARED_AUTH_AUTHORIZED_PARTY") {
+                    Ok(value) => nonempty("SHARED_AUTH_AUTHORIZED_PARTY", value)?,
+                    Err(std::env::VarError::NotPresent) => nonempty(
+                        "SHARED_AUTH_APPLICATION_ID",
+                        env_or("SHARED_AUTH_APPLICATION_ID", "zpkg-web"),
+                    )?,
+                    Err(error) => {
+                        return Err(error)
+                            .context("SHARED_AUTH_AUTHORIZED_PARTY is not valid Unicode");
+                    }
+                };
                 Some(SharedAuthConfig {
                     url,
                     public_url,
@@ -193,10 +203,11 @@ mod tests {
             public_url: "https://auth.example.test".into(),
             service_credential: "secret-value".into(),
             audience: "zed-pkg".into(),
-            application_id: "zed-pkg".into(),
+            application_id: "zpkg-web".into(),
         };
         let debug = format!("{config:?}");
         assert!(!debug.contains("secret-value"));
         assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("zpkg-web"));
     }
 }
