@@ -62,7 +62,9 @@ pub enum StorageConfig {
     /// Process-local, bounded artifact storage for disposable publish and
     /// install certification. Every restart starts empty; never use this as a
     /// durable production registry.
-    Memory { max_bytes: u64 },
+    Memory {
+        max_bytes: u64,
+    },
     Local {
         dir: String,
     },

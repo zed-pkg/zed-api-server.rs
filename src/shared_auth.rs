@@ -180,7 +180,10 @@ impl SharedAuthClient {
         let url = base
             .join(relative_path)
             .map_err(|_| ClientError::InvalidBaseUrl)?;
-        Ok(self.http.request(method, url).header(ACCEPT, "application/json"))
+        Ok(self
+            .http
+            .request(method, url)
+            .header(ACCEPT, "application/json"))
     }
 
     async fn send_json<T>(&self, request: RequestBuilder) -> Result<T, ClientError>
@@ -226,10 +229,7 @@ fn normalize_base(raw: &str) -> Option<Url> {
     Some(url)
 }
 
-fn required_credential<'a>(
-    value: &'a str,
-    field: &'static str,
-) -> Result<&'a str, ClientError> {
+fn required_credential<'a>(value: &'a str, field: &'static str) -> Result<&'a str, ClientError> {
     if value.is_empty()
         || value.len() > MAX_CREDENTIAL_BYTES
         || value.trim() != value
@@ -241,10 +241,7 @@ fn required_credential<'a>(
     }
 }
 
-fn required_identifier<'a>(
-    value: &'a str,
-    field: &'static str,
-) -> Result<&'a str, ClientError> {
+fn required_identifier<'a>(value: &'a str, field: &'static str) -> Result<&'a str, ClientError> {
     if value.is_empty()
         || value.len() > MAX_IDENTIFIER_BYTES
         || value.trim() != value

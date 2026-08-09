@@ -106,8 +106,8 @@ pub(crate) async fn run() -> Result<()> {
             .map(|configuration| configuration.public_url.clone()),
     });
 
-    let app = routes::router(state.clone(), cfg.max_artifact_bytes)
-        .merge(account_router::router(state));
+    let app =
+        routes::router(state.clone(), cfg.max_artifact_bytes).merge(account_router::router(state));
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     tracing::info!("zed-api-server listening on {}", cfg.bind_addr);
     axum::serve(listener, app).await?;

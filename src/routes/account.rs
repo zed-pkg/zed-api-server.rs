@@ -6,21 +6,17 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
-use axum::Json;
 use sea_orm::DbErr;
 use serde::Deserialize;
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 use zed_orm::models::{PackageSettingsInput, UserSettingsInput};
-use zed_orm::registry::{
-    CreatePackageInput, PackageLicenseInput, PackageUploadInput,
-};
+use zed_orm::registry::{CreatePackageInput, PackageLicenseInput, PackageUploadInput};
 
-use crate::auth::{
-    bearer_token, map_shared_auth_error, require_account, AccountIdentity,
-};
+use crate::auth::{AccountIdentity, bearer_token, map_shared_auth_error, require_account};
 use crate::error::{ApiErr, ApiResult};
 use crate::state::AppState;
 
@@ -189,14 +185,10 @@ pub async fn search(
     Query(query): Query<HomeQuery>,
 ) -> ApiResult<Json<JsonValue>> {
     let account = authenticated_and_projected(&state, &headers).await?;
-    let hits = zed_orm::registry::search_registry(
-        &state.db,
-        Some(&account.federated),
-        &query.q,
-        50,
-    )
-    .await
-    .map_err(map_db_error)?;
+    let hits =
+        zed_orm::registry::search_registry(&state.db, Some(&account.federated), &query.q, 50)
+            .await
+            .map_err(map_db_error)?;
     Ok(Json(json!({
         "query": query.q,
         "hits": hits.into_iter().map(|hit| json!({
@@ -238,14 +230,11 @@ pub async fn org_dashboard(
     Path(org_slug): Path<String>,
 ) -> ApiResult<Json<JsonValue>> {
     let account = authenticated_and_projected(&state, &headers).await?;
-    let dashboard = zed_orm::queries::read::org_dashboard_for_user(
-        &state.db,
-        account.subject(),
-        &org_slug,
-    )
-    .await
-    .map_err(map_db_error)?
-    .ok_or_else(|| ApiErr::not_found("organization"))?;
+    let dashboard =
+        zed_orm::queries::read::org_dashboard_for_user(&state.db, account.subject(), &org_slug)
+            .await
+            .map_err(map_db_error)?
+            .ok_or_else(|| ApiErr::not_found("organization"))?;
     Ok(Json(org_dashboard_value(dashboard)))
 }
 
@@ -498,10 +487,7 @@ pub async fn update_user_settings(
     })))
 }
 
-async fn authenticated(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> ApiResult<AccountIdentity> {
+async fn authenticated(state: &AppState, headers: &HeaderMap) -> ApiResult<AccountIdentity> {
     require_account(state, headers).await
 }
 

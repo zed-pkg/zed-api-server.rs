@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::DefaultBodyLimit;
-use axum::http::{header, HeaderValue};
-use axum::routing::{get, post, put};
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
+use axum::http::{HeaderValue, header};
+use axum::routing::{get, post, put};
 
 use crate::account;
 use crate::state::AppState;
@@ -27,10 +27,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/account/home", get(account::home))
         .route("/v1/account/search", get(account::search))
         .route("/v1/account/orgs", post(account::create_org))
-        .route(
-            "/v1/account/orgs/{org}",
-            get(account::org_dashboard),
-        )
+        .route("/v1/account/orgs/{org}", get(account::org_dashboard))
         .route(
             "/v1/account/orgs/{org}/invitations",
             post(account::invite_org_member),
