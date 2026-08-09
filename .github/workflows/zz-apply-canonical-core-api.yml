@@ -37,6 +37,8 @@ jobs:
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           components: rustfmt,clippy
+      - name: Declare canonical contexts in legacy SQLite fixtures
+        run: python3 scripts/ci/prepare-canonical-core-api.py
       - name: Apply assertion-checked source repairs
         run: python3 scripts/ci/apply-canonical-core-api.py
       - name: Resolve only the new immutable dependency and format
@@ -89,6 +91,7 @@ jobs:
           set -euo pipefail
           git rm .github/workflows/zz-apply-canonical-core-api.yml
           git rm scripts/ci/apply-canonical-core-api.py
+          git rm scripts/ci/prepare-canonical-core-api.py
           git add Cargo.toml Cargo.lock src
           git diff --cached --check
           git config user.name 'github-actions[bot]'
