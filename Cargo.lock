@@ -5183,7 +5183,7 @@ dependencies = [
 [[package]]
 name = "zed-orm"
 version = "0.1.0"
-source = "git+https://github.com/zed-pkg/zed-lib.git?rev=c924cc61689c62d5df8f4cb190fa09f7f513f644#c924cc61689c62d5df8f4cb190fa09f7f513f644"
+source = "git+https://github.com/zed-pkg/zed-lib.git?rev=430aafe24b6c3ab1263f1351ab4941545f592f19#430aafe24b6c3ab1263f1351ab4941545f592f19"
 dependencies = [
  "sea-orm",
 ]
