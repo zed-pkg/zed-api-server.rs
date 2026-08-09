@@ -10,9 +10,21 @@ repository = "https://github.com/zed-pkg/zed-api-server.rs"
 members = [".", "migration"]
 
 [dependencies]
-# Keep the service standalone-cloneable. This immutable revision is the same
-# compatibility boundary already exercised by the repository CI.
+# Keep every cross-repository boundary immutable and independently reviewable.
 zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "f141e4cfae31a74c679b46d1d4bb0146b20555f6" }
+# Canonical account, registry projection, and migration data plane. The API is
+# the only long-running service that opts into write symbols; the discrete
+# `migrate` command is the only runtime path that invokes DDL.
+zed-orm-core = { git = "https://github.com/zed-pkg/zed-lib-core.git", rev = "700f1f9578c6633a20693a5b1f52970ab845a740", features = ["read-write", "migrate"] }
+# The private shared-auth-clients repository cannot be cloned by this
+# repository's scoped GITHUB_TOKEN. `src/shared_auth.rs` implements the small,
+# reviewed exchange/introspection HTTP contract using the existing reqwest
+# dependency; it is pinned in comments/tests to shared-auth-clients commit
+# 1b1089123394ac4006901cdac477d63bfba48943.
+#
+# The local migration crate remains only for the legacy `/v1` compatibility
+# tables. The canonical `zed_*` contract and migrations are owned exclusively by
+# zed-orm-core and the pinned shared-definitions SQL segment.
 migration = { path = "migration" }
 anyhow = "1"
 # Distributed locks/leases (fiducia.cloud). Blocking (ureq) client — call it
