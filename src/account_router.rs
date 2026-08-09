@@ -4,7 +4,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, header};
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 
 use crate::account;
 use crate::state::AppState;
@@ -34,6 +34,10 @@ fn account_routes() -> Router<Arc<AppState>> {
             post(account::create_project),
         )
         .route(
+            "/account/orgs/{org}/projects/{project}",
+            get(account::project_settings),
+        )
+        .route(
             "/account/orgs/{org}/projects/{project}/invitations",
             post(account::invite_project_member),
         )
@@ -43,7 +47,9 @@ fn account_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/account/orgs/{org}/packages/{package}/settings",
-            put(account::update_package_settings),
+            get(account::package_settings)
+                .put(account::update_package_settings)
+                .patch(account::update_package_settings),
         )
         .route(
             "/account/orgs/{org}/packages/{package}/public",
@@ -67,6 +73,20 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .nest("/api/v1", routes.clone())
         .nest("/v1", routes)
+        // PR #27 shipped these flat paths before the canonical `/api/v1`
+        // hierarchy landed. Keep read/bootstrap aliases so its clients do not
+        // fail abruptly while still requiring the newer delegated token.
+        .route("/v1/session/bootstrap", post(account::me))
+        .route("/v1/me", get(account::me))
+        .route("/v1/me/home", get(account::home))
+        .route(
+            "/v1/account/orgs/{org}/dashboard",
+            get(account::org_dashboard),
+        )
+        .route(
+            "/v1/account/orgs/{org}/packages/{package}",
+            get(account::package_settings),
+        )
         .layer(DefaultBodyLimit::max(ACCOUNT_BODY_LIMIT))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -95,6 +115,8 @@ mod tests {
             "/api/v1/account/me",
             "/api/v1/account/home",
             "/api/v1/account/orgs/{org}",
+            "/api/v1/account/orgs/{org}/projects/{project}",
+            "/api/v1/account/orgs/{org}/packages/{package}/settings",
             "/api/v1/account/orgs/{org}/packages/{package}/public",
         ] {
             assert!(route.starts_with("/api/v1/account/"));

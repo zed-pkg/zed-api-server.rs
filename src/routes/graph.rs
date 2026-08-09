@@ -1083,12 +1083,18 @@ url = "https://github.com/acme/http-kit"
         super::super::router(
             Arc::new(AppState {
                 db,
+                registry_read: None,
+                registry_write: None,
                 store,
                 verifier: TagVerifier::new(TagPolicy::Off),
                 public_base_url: "https://registry.zpkg.net".to_string(),
                 max_orgs_per_token: 5,
                 fiducia: None,
                 rate_limiter: None,
+                shared_auth: None,
+                shared_auth_audience: "zpkg-api".to_owned(),
+                shared_auth_application_id: "zpkg-web".to_owned(),
+                shared_auth_public_url: None,
             }),
             8 * 1024 * 1024,
         )

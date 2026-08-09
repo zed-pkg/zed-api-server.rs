@@ -398,6 +398,45 @@ pub async fn create_project(
     })))
 }
 
+/// Return the project settings view retained from PR #27, authorized through
+/// the canonical data plane. Organization membership and direct project
+/// membership are combined exactly as they are for the account home view.
+pub async fn project_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((org_slug, project_slug)): Path<(String, String)>,
+) -> ApiResult<Json<JsonValue>> {
+    let (_, user) = authenticated_and_projected(&state, &headers).await?;
+    let read = registry_read(&state)?;
+    let org = zed_orm_core::read::org_by_slug(read, &org_slug)
+        .await
+        .map_err(map_orm_error)?
+        .ok_or_else(|| ApiErr::not_found("project"))?;
+    let project = zed_orm_core::account::project_by_org_and_slug(read, org.id, &project_slug)
+        .await
+        .map_err(map_orm_error)?
+        .ok_or_else(|| ApiErr::not_found("project"))?;
+    let org_role = zed_orm_core::read::org_role_for_user(read, org.id, user.id)
+        .await
+        .map_err(map_orm_error)?;
+    let project_role = zed_orm_core::account::project_role_for_user(read, project.id, user.id)
+        .await
+        .map_err(map_orm_error)?;
+    let role = strongest_role(org_role.as_deref(), project_role.as_deref())
+        .ok_or_else(|| ApiErr::not_found("project"))?;
+    Ok(Json(json!({
+        "id": project.id,
+        "org_id": project.org_id,
+        "org_slug": org.slug,
+        "slug": project.slug,
+        "name": project.name,
+        "description": project.description,
+        "visibility": project.visibility,
+        "settings": project.settings,
+        "role": role
+    })))
+}
+
 pub async fn invite_project_member(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -449,6 +488,35 @@ pub async fn create_package(
     )
     .await
     .map_err(map_orm_error)?;
+    Ok(Json(package_value(package)))
+}
+
+/// Return package settings only to an organization or owning-project member.
+/// Public package visibility is deliberately insufficient for this management
+/// endpoint because the response includes registry configuration.
+pub async fn package_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((org_slug, package_name)): Path<(String, String)>,
+) -> ApiResult<Json<JsonValue>> {
+    let (_, user) = authenticated_and_projected(&state, &headers).await?;
+    let read = registry_read(&state)?;
+    let (package, org) =
+        zed_orm_core::read::package_by_org_and_name(read, &org_slug, &package_name)
+            .await
+            .map_err(map_orm_error)?
+            .ok_or_else(|| ApiErr::not_found("package"))?;
+    let org_role = zed_orm_core::read::org_role_for_user(read, org.id, user.id)
+        .await
+        .map_err(map_orm_error)?;
+    let project_role = match package.project_id {
+        Some(project_id) => zed_orm_core::account::project_role_for_user(read, project_id, user.id)
+            .await
+            .map_err(map_orm_error)?,
+        None => None,
+    };
+    strongest_role(org_role.as_deref(), project_role.as_deref())
+        .ok_or_else(|| ApiErr::not_found("package"))?;
     Ok(Json(package_value(package)))
 }
 
