@@ -133,7 +133,7 @@ impl ArtifactStore {
                 Ok(())
             }
             Self::S3 { client, bucket } => {
-                client
+                let put = client
                     .put_object()
                     .bucket(bucket)
                     .key(key)
@@ -141,9 +141,34 @@ impl ArtifactStore {
                     .cache_control(IMMUTABLE_CACHE_CONTROL)
                     .body(bytes.into())
                     .send()
-                    .await
-                    .context("s3 put_object failed")?;
-                Ok(())
+                    .await;
+                match put {
+                    Ok(_) => Ok(()),
+                    Err(err) => {
+                        // Keys are content-addressed (`artifacts/<sha256>.<ext>`),
+                        // so a concurrent publish of the same artifact races on the
+                        // identical key with byte-identical content. R2 rate-limits
+                        // per-key writes, so the losing racer's put_object can fail
+                        // even though the winner already stored the exact bytes. If
+                        // the object is present afterwards, the write is effectively
+                        // done — treat it as success and let the caller's version
+                        // insert surface the immutability conflict as a clean 409
+                        // instead of a 500. Any other failure (auth, network, a
+                        // genuinely absent object) still propagates.
+                        if client
+                            .head_object()
+                            .bucket(bucket)
+                            .key(key)
+                            .send()
+                            .await
+                            .is_ok()
+                        {
+                            Ok(())
+                        } else {
+                            Err(err).context("s3 put_object failed")
+                        }
+                    }
+                }
             }
         }
     }

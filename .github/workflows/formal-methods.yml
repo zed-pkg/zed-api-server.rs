@@ -65,9 +65,12 @@ jobs:
             --manifest-path "$RUNNER_TEMP/fmctl-source/Cargo.toml"
           echo "FMCTL=$RUNNER_TEMP/fmctl-source/target/release/fmctl" >> "$GITHUB_ENV"
 
-      - name: Validate both formal-methods manifests
+      - name: Validate all formal-methods manifests
         run: |
-          mkdir -p .formal-artifacts/fmctl .formal-artifacts/latest-selection
+          mkdir -p \
+            .formal-artifacts/fmctl \
+            .formal-artifacts/latest-selection \
+            .formal-artifacts/dependency-resolution
           "$FMCTL" --format json validate \
             | tee .formal-artifacts/fmctl/validate.json
           "$FMCTL" \
@@ -75,26 +78,34 @@ jobs:
             --format json \
             validate \
             | tee .formal-artifacts/latest-selection/validate.json
+          "$FMCTL" \
+            --manifest formal/dependency_resolution.fm.toml \
+            --format json \
+            validate \
+            | tee .formal-artifacts/dependency-resolution/validate.json
 
       - name: Record and validate the formal toolchain
         run: |
           "$FMCTL" --format json doctor \
             | tee .formal-artifacts/fmctl/doctor.json
 
-      - name: Type-check both registry models
+      - name: Type-check all registry models
         run: |
           "$FMCTL" check
           "$FMCTL" --manifest formal/latest_selection.fm.toml check
+          "$FMCTL" --manifest formal/dependency_resolution.fm.toml check
 
       - name: Reach every configured registry witness
         run: |
           "$FMCTL" simulate
           "$FMCTL" --manifest formal/latest_selection.fm.toml simulate
+          "$FMCTL" --manifest formal/dependency_resolution.fm.toml simulate
 
-      - name: Exhaust both finite registry state graphs
+      - name: Exhaust all finite registry state graphs
         run: |
           "$FMCTL" verify
           "$FMCTL" --manifest formal/latest_selection.fm.toml verify
+          "$FMCTL" --manifest formal/dependency_resolution.fm.toml verify
 
       - name: Upload model-checker evidence
         if: always()
@@ -105,6 +116,8 @@ jobs:
             .formal-artifacts/
             formal/fm.toml
             formal/latest_selection.fm.toml
+            formal/dependency_resolution.fm.toml
+            formal/dependency_resolution.qnt
             formal/latest_selection.qnt
             formal/package_publication.qnt
           include-hidden-files: true

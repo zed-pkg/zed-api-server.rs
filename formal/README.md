@@ -65,6 +65,29 @@ and the all-versions-yanked state. The integer identities abstract the shared
 Rust version comparator into a finite total order; Rust regression tests check
 the concrete semantic-version and timestamp-independent selection behavior.
 
+## Dependency-resolution and lockfile model
+
+`dependency_resolution.qnt`, configured by `dependency_resolution.fm.toml`,
+models a root package and one transitive dependency over two totally ordered
+immutable versions. It explores publication, yank/restore, mirror visibility,
+missing transitive artifacts, dependency cycles, resolution, and idempotent
+replay before one immutable result is emitted.
+
+The composed `resolution_safety` invariant checks that:
+
+1. only published, mirrored, non-yanked versions enter a successful lock;
+2. the transitive version requirement is closed;
+3. dependency cycles fail closed;
+4. a failed resolution never emits a partial lock; and
+5. the same finite registry snapshot always produces the same maximal solution
+   or the same structured failure.
+
+Simulation must reach highest-version selection, yank fallback, mirror-lag
+failure, a missing transitive dependency, a cycle failure, and idempotent replay.
+The model intentionally freezes registry state once resolution returns. Concrete
+Rust/SeaORM/Postgres and `zed-cli` replay remains a separate implementation-
+refinement obligation.
+
 ## Concurrency finding: retain before safe garbage collection
 
 The model makes artifact availability a safety property. Immediate blob
@@ -98,34 +121,44 @@ fmctl --manifest formal/latest_selection.fm.toml validate
 fmctl --manifest formal/latest_selection.fm.toml check
 fmctl --manifest formal/latest_selection.fm.toml simulate
 fmctl --manifest formal/latest_selection.fm.toml verify
+
+fmctl --manifest formal/dependency_resolution.fm.toml validate
+fmctl --manifest formal/dependency_resolution.fm.toml check
+fmctl --manifest formal/dependency_resolution.fm.toml simulate
+fmctl --manifest formal/dependency_resolution.fm.toml verify
 ```
 
-Both manifests pin Quint `0.32.0`, bound simulation to 5,000 samples (16 steps
-for publication and 12 for latest selection), bound retained child output to 8
-MiB, and give each operation a 10-minute wall-clock budget. `verify` uses TLC
+All three manifests pin Quint `0.32.0`. Publication and latest selection use
+5,000 simulation samples; dependency resolution uses 10,000. Their step bounds
+are 16, 12, and 14 respectively. Every manifest bounds retained child output to
+8 MiB and gives each operation a 10-minute wall-clock budget. `verify` uses TLC
 to exhaust each complete finite state graph.
 
 Normalized stdout, stderr, and result records are written beneath
 `.formal-artifacts/fmctl/` for publication and
-`.formal-artifacts/latest-selection/fmctl/` for selection. CI uploads both even
-when verification fails, so counterexamples and exact command provenance
-remain inspectable.
+`.formal-artifacts/latest-selection/fmctl/` for selection, and
+`.formal-artifacts/dependency-resolution/fmctl/` for dependency resolution. CI
+uploads all three even when verification fails, so counterexamples and exact
+command provenance remain inspectable.
 
 ## What this proves—and what it does not
 
 A green `fmctl verify` proves `publication_safety` for every reachable state in
 the publication model and `selection_safety` for every reachable state in the
-latest-selection model. It does not by itself prove:
+latest-selection model. It also proves `resolution_safety` for every reachable
+state in the finite dependency-resolution model. It does not by itself prove:
 
 - that every Rust/SeaORM/S3 execution refines the Quint transition system;
 - Postgres, object-store, filesystem, or network durability;
 - fairness or eventual successful publication;
 - safe age/lease-aware orphan garbage collection;
-- dependency-graph resolution, mirror fan-out, or provenance verification;
+- arbitrary-size dependency graphs, range semantics outside the finite model,
+  or Rust/SeaORM/Postgres/`zed-cli` implementation refinement;
+- target fan-out or provenance verification;
 - ordering correctness outside the concrete comparator behavior covered by
   Rust tests; or
 - correctness outside the tool versions, assumptions, and bounds recorded in
-  the two manifests.
+  the three manifests.
 
 Rust handler tests cover the matching immutability and transaction regressions.
 Later work can add an ITF adapter that drives the real in-memory HTTP/SQLite
