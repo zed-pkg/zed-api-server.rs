@@ -85,11 +85,7 @@ fn account_from_introspection(
     }
 
     let supabase_user_id = optional_rest_string(introspection, "supabase_user_id")?
-        .map(|value| {
-            value
-                .parse::<Uuid>()
-                .map_err(|_| ApiErr::unauthorized())
-        })
+        .map(|value| value.parse::<Uuid>().map_err(|_| ApiErr::unauthorized()))
         .transpose()?;
     let display_name = optional_rest_string(introspection, "display_name")?;
     let avatar_url = optional_rest_string(introspection, "avatar_url")?;
@@ -106,13 +102,13 @@ fn account_from_introspection(
     })
 }
 
-fn map_shared_auth_error(error: ClientError) -> ApiErr {
+pub(crate) fn map_shared_auth_error(error: ClientError) -> ApiErr {
     match error {
         ClientError::Unauthorized | ClientError::Status(401) | ClientError::InvalidInput(_) => {
             ApiErr::unauthorized()
         }
         other => {
-            tracing::warn!(error = %other, "shared-auth introspection failed");
+            tracing::warn!(error = %other, "shared-auth request failed");
             ApiErr::service_unavailable(
                 "auth_unavailable",
                 "shared authentication is temporarily unavailable",
@@ -160,10 +156,6 @@ pub async fn require_token(
         .one(db)
         .await?
         .ok_or_else(ApiErr::unauthorized)?;
-    // A revoked or expired token is indistinguishable from an unknown one to
-    // the caller (same 401), so a leaked token can be killed by setting either
-    // column. Expiry is compared in Rust against `now()` so the check is
-    // identical on Postgres and the SQLite used in tests.
     if row.revoked_at.is_some() {
         return Err(ApiErr::unauthorized());
     }
@@ -288,8 +280,6 @@ mod tests {
             axum::http::StatusCode::FORBIDDEN
         );
     }
-
-    // --- token lifecycle -----------------------------------------------------
 
     use chrono::{Duration, Utc};
     use sea_orm::{
