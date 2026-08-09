@@ -35,7 +35,7 @@ impl ApiErr {
         Self {
             status: StatusCode::UNAUTHORIZED,
             code: "unauthorized",
-            message: "missing or invalid bearer token".to_string(),
+            message: "missing or invalid Shared Auth session".to_string(),
         }
     }
 
@@ -50,6 +50,14 @@ impl ApiErr {
     pub fn conflict(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn service_unavailable(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
             code,
             message: message.into(),
         }
