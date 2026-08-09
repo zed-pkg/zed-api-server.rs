@@ -24,7 +24,9 @@ use zed_orm_core::models::{
 };
 use zed_orm_core::{OrmError, ReadContext, WriteContext};
 
-use crate::auth::{AccountIdentity, bearer_token, hash_token, map_shared_auth_error, require_account};
+use crate::auth::{
+    AccountIdentity, bearer_token, hash_token, map_shared_auth_error, require_account,
+};
 use crate::error::{ApiErr, ApiResult};
 use crate::state::AppState;
 
@@ -555,16 +557,31 @@ pub async fn register_package_upload(
     Json(request): Json<PackageUploadRequest>,
 ) -> ApiResult<Json<JsonValue>> {
     let (_, user) = authenticated_and_projected(&state, &headers).await?;
-    let status = normalize_upload_status(&request.status).to_owned();
+    let status = normalize_upload_status(&request.status);
     let completed_at = matches!(status.as_str(), "verified" | "failed" | "aborted")
         .then(|| Utc::now().fixed_offset());
+    let read = registry_read(&state)?;
+    let package = zed_orm_core::read::package_by_org_and_name(read, &org_slug, &package_name)
+        .await
+        .map_err(map_orm_error)?
+        .map(|(package, _)| package)
+        .ok_or_else(|| ApiErr::not_found("package"))?;
+    let package_version_id = match request.package_version_id {
+        Some(version_id) => Some(version_id),
+        None => zed_orm_core::read::versions_for_package(read, package.id)
+            .await
+            .map_err(map_orm_error)?
+            .into_iter()
+            .find(|version| version.version == request.requested_version)
+            .map(|version| version.id),
+    };
     let upload = zed_orm_core::account::register_package_upload_for_user(
         registry_write(&state)?,
         user.id,
         &org_slug,
         &package_name,
         PackageUploadInput {
-            package_version_id: request.package_version_id,
+            package_version_id,
             requested_version: request.requested_version,
             status,
             storage_backend: request.storage_backend,
@@ -630,12 +647,10 @@ async fn authenticated_and_projected(
     headers: &HeaderMap,
 ) -> ApiResult<(AccountIdentity, UserSummary)> {
     let account = authenticated(state, headers).await?;
-    let user = zed_orm_core::write::upsert_user_from_session(
-        registry_write(state)?,
-        &account.session,
-    )
-    .await
-    .map_err(map_orm_error)?;
+    let user =
+        zed_orm_core::write::upsert_user_from_session(registry_write(state)?, &account.session)
+            .await
+            .map_err(map_orm_error)?;
     Ok((account, user))
 }
 
@@ -809,7 +824,9 @@ fn strongest_role<'a>(org_role: Option<&'a str>, project_role: Option<&'a str>) 
 }
 
 fn contains_ci(value: &str, query: &str) -> bool {
-    value.to_ascii_lowercase().contains(&query.to_ascii_lowercase())
+    value
+        .to_ascii_lowercase()
+        .contains(&query.to_ascii_lowercase())
 }
 
 fn normalize_archive_format(value: &str) -> ApiResult<&'static str> {
@@ -824,16 +841,13 @@ fn normalize_archive_format(value: &str) -> ApiResult<&'static str> {
     }
 }
 
-fn normalize_upload_status(value: &str) -> &'static str {
+fn normalize_upload_status(value: &str) -> String {
     match value {
-        "complete" | "completed" | "published" => "verified",
-        "pending" => "pending",
-        "uploading" => "uploading",
-        "stored" => "stored",
-        "verified" => "verified",
-        "failed" => "failed",
-        "aborted" => "aborted",
-        _ => value,
+        "complete" | "completed" | "published" => "verified".to_owned(),
+        known @ ("pending" | "uploading" | "stored" | "verified" | "failed" | "aborted") => {
+            known.to_owned()
+        }
+        unknown => unknown.to_owned(),
     }
 }
 

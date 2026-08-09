@@ -98,7 +98,11 @@ mod tests {
             "/api/v1/account/orgs/{org}/packages/{package}/public",
         ] {
             assert!(route.starts_with("/api/v1/account/"));
-            assert!(route.replacen("/api/v1", "/v1", 1).starts_with("/v1/account/"));
+            assert!(
+                route
+                    .replacen("/api/v1", "/v1", 1)
+                    .starts_with("/v1/account/")
+            );
         }
     }
 }

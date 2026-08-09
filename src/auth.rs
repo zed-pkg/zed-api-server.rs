@@ -21,12 +21,6 @@ pub struct AccountIdentity {
     pub session: SessionIdentity,
 }
 
-impl AccountIdentity {
-    pub fn subject(&self) -> Uuid {
-        self.session.subject
-    }
-}
-
 /// Tokens are stored as sha256 hex; the plaintext is shown exactly once by
 /// the `create-token` subcommand.
 pub fn hash_token(plaintext: &str) -> String {
@@ -243,9 +237,12 @@ mod tests {
             rest,
         };
         let identity = account_from_introspection(&introspection, "zpkg-web").unwrap();
-        assert_eq!(identity.subject(), SUBJECT.parse::<Uuid>().unwrap());
+        assert_eq!(identity.session.subject, SUBJECT.parse::<Uuid>().unwrap());
         assert_eq!(identity.session.realm, "customer");
-        assert_eq!(identity.session.display_name.as_deref(), Some("Registry User"));
+        assert_eq!(
+            identity.session.display_name.as_deref(),
+            Some("Registry User")
+        );
     }
 
     #[test]
