@@ -25,243 +25,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           components: rustfmt, clippy
-      - name: Apply the reviewed compatibility-preserving contract patch
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          def replace(path: str, old: str, new: str) -> None:
-              p = Path(path)
-              text = p.read_text()
-              if text.count(old) != 1:
-                  raise SystemExit(f"{path}: expected exactly one reviewed match, found {text.count(old)}")
-              p.write_text(text.replace(old, new, 1))
-
-          replace(
-              "src/storage.rs",
-              'pub fn artifact_key(sha256: &str, extension: &str) -> String {\n    format!("artifacts/{sha256}.{extension}")\n}',
-              'pub fn artifact_key(\n    org: &str,\n    name: &str,\n    version: &str,\n    sha256: &str,\n    extension: &str,\n) -> String {\n    format!("zed/v1/packages/{org}/{name}/{version}/{sha256}.{extension}")\n}',
-          )
-          replace(
-              "src/storage.rs",
-              'assert_eq!(artifact_key("abc123", "tar.gz"), "artifacts/abc123.tar.gz");',
-              'assert_eq!(\n            artifact_key("acme", "http-kit", "1.2.0", "abc123", "tar.gz"),\n            "zed/v1/packages/acme/http-kit/1.2.0/abc123.tar.gz"\n        );',
-          )
-          replace(
-              "src/storage.rs",
-              '// Keys are server-generated (`artifacts/<sha>.<ext>`), never user input.',
-              '// Keys are server-generated from validated package coordinates and the digest, never raw paths.',
-          )
-          replace(
-              "src/routes/publish.rs",
-              'let key = artifact_key(&actual_sha, meta.format.extension());',
-              'let key = artifact_key(\n        &org_slug,\n        &name,\n        &ver,\n        &actual_sha,\n        meta.format.extension(),\n    );',
-          )
-
-          constants_old = '''pub const ROUTE_FILES: &str = "/v1/files/{org}/{name}/{version}/{*path}";'''
-          constants_new = '''pub const ROUTE_FILES: &str = "/v1/files/{org}/{name}/{version}/{*path}";
-
-// Canonical product API. The package-manager registry is a bounded subset of
-// `/api/v1`; legacy `/v1` routes remain as temporary compatibility aliases.
-pub const CANONICAL_ROUTE_PACKAGE: &str = "/api/v1/registry/packages/{org}/{name}";
-pub const CANONICAL_ROUTE_VERSION: &str =
-    "/api/v1/registry/packages/{org}/{name}/versions/{version}";
-pub const CANONICAL_ROUTE_YANK: &str =
-    "/api/v1/registry/packages/{org}/{name}/versions/{version}/yank";
-pub const CANONICAL_ROUTE_ARTIFACT: &str = "/api/v1/registry/artifacts/{sha256}";
-pub const CANONICAL_ROUTE_SEARCH: &str = "/api/v1/registry/search";
-pub const CANONICAL_ROUTE_PACKAGES_LIST: &str = "/api/v1/registry/packages";
-pub const CANONICAL_ROUTE_SEMANTIC: &str = "/api/v1/registry/search/semantic";
-pub const CANONICAL_ROUTE_EMBEDDING: &str =
-    "/api/v1/registry/packages/{org}/{name}/embedding";
-pub const CANONICAL_ROUTE_ORGS: &str = "/api/v1/registry/orgs";
-pub const CANONICAL_ROUTE_AUDIT: &str = "/api/v1/registry/orgs/{org}/audit";
-pub const CANONICAL_ROUTE_AUDIT_VERIFY: &str =
-    "/api/v1/registry/orgs/{org}/audit/verify";
-pub const CANONICAL_ROUTE_FILES: &str =
-    "/api/v1/registry/files/{org}/{name}/{version}/{*path}";'''
-          replace("src/routes/mod.rs", constants_old, constants_new)
-
-          artifact_old = '''    let artifact_routes = Router::new()
-        .route(ROUTE_ARTIFACT, get(artifacts::get_artifact))
-        .route(ROUTE_FILES, get(artifacts::get_file))
-        .layer(tower::limit::ConcurrencyLimitLayer::new(
-            artifact_serve_concurrency(max_artifact_bytes),
-        ));'''
-          artifact_new = '''    let artifact_routes = Router::new()
-        .route(ROUTE_ARTIFACT, get(artifacts::get_artifact))
-        .route(ROUTE_FILES, get(artifacts::get_file))
-        .route(CANONICAL_ROUTE_ARTIFACT, get(artifacts::get_artifact))
-        .route(CANONICAL_ROUTE_FILES, get(artifacts::get_file))
-        .layer(tower::limit::ConcurrencyLimitLayer::new(
-            artifact_serve_concurrency(max_artifact_bytes),
-        ));'''
-          replace("src/routes/mod.rs", artifact_old, artifact_new)
-
-          publish_old = '''    let publish_route = Router::new()
-        .route(
-            ROUTE_VERSION,
-            get(packages::get_version).put(publish::publish),
-        )
-        .layer(DefaultBodyLimit::max(max_artifact_bytes));'''
-          publish_new = '''    let publish_route = Router::new()
-        .route(
-            ROUTE_VERSION,
-            get(packages::get_version).put(publish::publish),
-        )
-        .route(
-            CANONICAL_ROUTE_VERSION,
-            get(packages::get_version).put(publish::publish),
-        )
-        .layer(DefaultBodyLimit::max(max_artifact_bytes));'''
-          replace("src/routes/mod.rs", publish_old, publish_new)
-
-          route_old = '''        .route(ROUTE_PACKAGES_LIST, get(list::list_packages))
-        .route(ROUTE_PACKAGE, get(packages::get_package))
-        .route(
-            ROUTE_EMBEDDING,
-            axum::routing::put(semantic::upsert_embedding),
-        )
-        .route(ROUTE_YANK, post(yank::yank))
-        .route(ROUTE_SEARCH, get(search::search))
-        .route(ROUTE_SEMANTIC, post(semantic::semantic_search))
-        .route(ROUTE_ORGS, post(orgs::claim_org))
-        .route(ROUTE_AUDIT, get(audit::get_audit_log))
-        .route(ROUTE_AUDIT_VERIFY, get(audit::verify_audit_log))'''
-          route_new = '''        .route(ROUTE_PACKAGES_LIST, get(list::list_packages))
-        .route(ROUTE_PACKAGE, get(packages::get_package))
-        .route(
-            ROUTE_EMBEDDING,
-            axum::routing::put(semantic::upsert_embedding),
-        )
-        .route(ROUTE_YANK, post(yank::yank))
-        .route(ROUTE_SEARCH, get(search::search))
-        .route(ROUTE_SEMANTIC, post(semantic::semantic_search))
-        .route(ROUTE_ORGS, post(orgs::claim_org))
-        .route(ROUTE_AUDIT, get(audit::get_audit_log))
-        .route(ROUTE_AUDIT_VERIFY, get(audit::verify_audit_log))
-        .route(CANONICAL_ROUTE_PACKAGES_LIST, get(list::list_packages))
-        .route(CANONICAL_ROUTE_PACKAGE, get(packages::get_package))
-        .route(
-            CANONICAL_ROUTE_EMBEDDING,
-            axum::routing::put(semantic::upsert_embedding),
-        )
-        .route(CANONICAL_ROUTE_YANK, post(yank::yank))
-        .route(CANONICAL_ROUTE_SEARCH, get(search::search))
-        .route(CANONICAL_ROUTE_SEMANTIC, post(semantic::semantic_search))
-        .route(CANONICAL_ROUTE_ORGS, post(orgs::claim_org))
-        .route(CANONICAL_ROUTE_AUDIT, get(audit::get_audit_log))
-        .route(
-            CANONICAL_ROUTE_AUDIT_VERIFY,
-            get(audit::verify_audit_log),
-        )'''
-          replace("src/routes/mod.rs", route_old, route_new)
-
-          marker = '''    #[tokio::test]
-    async fn healthz_works_without_a_database() {'''
-          canonical_test = '''    #[test]
-    fn canonical_registry_routes_are_nested_under_the_product_api() {
-        for route in [
-            CANONICAL_ROUTE_PACKAGE,
-            CANONICAL_ROUTE_VERSION,
-            CANONICAL_ROUTE_ARTIFACT,
-            CANONICAL_ROUTE_SEARCH,
-            CANONICAL_ROUTE_ORGS,
-            CANONICAL_ROUTE_FILES,
-        ] {
-            assert!(route.starts_with("/api/v1/registry/"), "{route}");
-        }
-    }
-
-    #[tokio::test]
-    async fn healthz_works_without_a_database() {'''
-          replace("src/routes/mod.rs", marker, canonical_test)
-
-          account_marker = '''        .layer(DefaultBodyLimit::max(ACCOUNT_BODY_LIMIT))'''
-          account_aliases = '''        .route("/api/v1/auth/config", get(account::auth_config))
-        .route("/api/v1/auth/exchange", post(account::exchange_supabase))
-        .route(
-            "/api/v1/users/me",
-            get(account::me).put(account::update_user_settings),
-        )
-        .route("/api/v1/home", get(account::home))
-        .route("/api/v1/search", get(account::search))
-        .route("/api/v1/orgs", post(account::create_org))
-        .route("/api/v1/orgs/{org}", get(account::org_dashboard))
-        .route(
-            "/api/v1/orgs/{org}/invitations",
-            post(account::invite_org_member),
-        )
-        .route(
-            "/api/v1/orgs/{org}/projects",
-            post(account::create_project),
-        )
-        .route(
-            "/api/v1/orgs/{org}/projects/{project}/invitations",
-            post(account::invite_project_member),
-        )
-        .route(
-            "/api/v1/orgs/{org}/packages",
-            post(account::create_package),
-        )
-        .route(
-            "/api/v1/orgs/{org}/packages/{package}/settings",
-            put(account::update_package_settings),
-        )
-        .route(
-            "/api/v1/orgs/{org}/packages/{package}/public",
-            post(account::make_package_public),
-        )
-        .route(
-            "/api/v1/orgs/{org}/packages/{package}/licenses",
-            post(account::add_package_license),
-        )
-        .route(
-            "/api/v1/orgs/{org}/packages/{package}/uploads",
-            post(account::register_package_upload),
-        )
-        .layer(DefaultBodyLimit::max(ACCOUNT_BODY_LIMIT))'''
-          replace("src/account_router.rs", account_marker, account_aliases)
-
-          account_test_old = '''    fn account_routes_are_namespaced_away_from_legacy_tokens() {
-        for route in [
-            "/v1/account/me",
-            "/v1/account/home",
-            "/v1/account/orgs/{org}",
-            "/v1/account/orgs/{org}/packages/{package}/public",
-        ] {
-            assert!(route.starts_with("/v1/account/"));
-        }
-    }'''
-          account_test_new = '''    fn account_routes_keep_legacy_aliases_and_use_the_product_api_canonically() {
-        for route in [
-            "/v1/account/me",
-            "/v1/account/home",
-            "/v1/account/orgs/{org}",
-            "/v1/account/orgs/{org}/packages/{package}/public",
-        ] {
-            assert!(route.starts_with("/v1/account/"));
-        }
-        for route in [
-            "/api/v1/users/me",
-            "/api/v1/home",
-            "/api/v1/orgs/{org}",
-            "/api/v1/orgs/{org}/packages/{package}/public",
-        ] {
-            assert!(route.starts_with("/api/v1/"));
-            assert!(!route.contains("/account/"));
-        }
-    }'''
-          replace("src/account_router.rs", account_test_old, account_test_new)
-
-          replace(
-              ".github/workflows/registry-publish-e2e.yml",
-              'http://127.0.0.1:8080/v1/packages/e2e/registry-smoke/versions/0.1.0',
-              'http://127.0.0.1:8080/api/v1/registry/packages/e2e/registry-smoke/versions/0.1.0',
-          )
-          PY
+      - name: Apply the reviewed source patch
+        run: python3 scripts/apply_canonical_api_r2.py
       - name: Verify the complete exact-head Rust contract
         run: |
           set -euo pipefail
@@ -269,10 +34,11 @@ pub const CANONICAL_ROUTE_FILES: &str =
           cargo check --workspace --all-targets --locked
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo test --workspace --all-targets --locked
-      - name: Remove this one-shot carrier and constrain its output
+      - name: Remove the one-shot carrier and patch script
         run: |
           set -euo pipefail
           rm .github/workflows/zz-canonical-api-r2-contract.yml
+          rm scripts/apply_canonical_api_r2.py
           python3 - <<'PY'
           import subprocess
           allowed = {
@@ -282,15 +48,17 @@ pub const CANONICAL_ROUTE_FILES: &str =
               "src/account_router.rs",
               ".github/workflows/registry-publish-e2e.yml",
               ".github/workflows/zz-canonical-api-r2-contract.yml",
+              "scripts/apply_canonical_api_r2.py",
           }
-          changed = {line[3:] for line in subprocess.check_output(["git", "status", "--short"], text=True).splitlines() if line.strip()}
-          unexpected = changed - allowed
-          if unexpected:
-              raise SystemExit(f"unexpected files changed: {sorted(unexpected)}")
+          changed = {
+              line[3:]
+              for line in subprocess.check_output(["git", "status", "--short"], text=True).splitlines()
+              if line.strip()
+          }
           if changed != allowed:
-              raise SystemExit(f"missing expected files: {sorted(allowed - changed)}")
+              raise SystemExit(f"unexpected delta: {sorted(changed ^ allowed)}")
           PY
-      - name: Commit only the exact tested patch without overwriting concurrent work
+      - name: Commit only the exact tested patch
         run: |
           set -euo pipefail
           tested_head="$(git rev-parse HEAD)"
@@ -299,7 +67,8 @@ pub const CANONICAL_ROUTE_FILES: &str =
           test "$tested_head" = "$remote_head" || { echo "branch advanced; refusing untested overwrite" >&2; exit 1; }
           git add src/storage.rs src/routes/publish.rs src/routes/mod.rs src/account_router.rs \
             .github/workflows/registry-publish-e2e.yml \
-            .github/workflows/zz-canonical-api-r2-contract.yml
+            .github/workflows/zz-canonical-api-r2-contract.yml \
+            scripts/apply_canonical_api_r2.py
           git diff --cached --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
