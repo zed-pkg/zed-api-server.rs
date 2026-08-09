@@ -1,0 +1,100 @@
+name: one-shot zed-lib-core repin
+
+on:
+  push:
+    branches:
+      - feat/shared-auth-account-registry-api
+
+permissions:
+  contents: write
+
+concurrency:
+  group: one-shot-zed-lib-core-repin
+  cancel-in-progress: false
+
+jobs:
+  repin-and-certify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out the exact feature head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install the pinned stable Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          components: rustfmt, clippy
+
+      - name: Replace only the reviewed ORM boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("Cargo.toml")
+          text = path.read_text()
+          old = 'zed-orm = { git = "https://github.com/zed-pkg/zed-lib.git", rev = "f6f240a72eb100b858ae74f2c633d09528b61805", package = "zed-orm" }'
+          new = 'zed-orm = { git = "https://github.com/zed-pkg/zed-lib-core.git", rev = "171ee6a3ba82a492409ef86e27af793574942447", package = "zed-orm-core", features = ["read-write", "migrate"] }'
+          if text.count(old) != 1 or new in text:
+              raise SystemExit("Cargo.toml is not at the single expected predecessor pin")
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Resolve the minimal lockfile delta
+        run: cargo check --workspace --all-targets
+
+      - name: Verify formatting
+        run: cargo fmt --all -- --check
+
+      - name: Verify the immutable dependency graph
+        run: cargo check --workspace --all-targets --locked
+
+      - name: Deny every Rust warning
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run the complete Rust test suite
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Remove the one-shot carrier and constrain the commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/zz-repin-zed-lib-core.yml
+          python3 - <<'PY'
+          import subprocess
+
+          allowed = {"Cargo.toml", "Cargo.lock", ".github/workflows/zz-repin-zed-lib-core.yml"}
+          changed = {
+              line[3:]
+              for line in subprocess.check_output(["git", "status", "--short"], text=True).splitlines()
+              if line.strip()
+          }
+          unexpected = changed - allowed
+          if unexpected:
+              raise SystemExit(f"unexpected files changed: {sorted(unexpected)}")
+          if "Cargo.toml" not in changed or "Cargo.lock" not in changed:
+              raise SystemExit(f"expected Cargo.toml and Cargo.lock changes, got {sorted(changed)}")
+          PY
+
+      - name: Commit only the tested graph without overwriting concurrent work
+        shell: bash
+        run: |
+          set -euo pipefail
+          tested_head="$(git rev-parse HEAD)"
+          git fetch origin feat/shared-auth-account-registry-api
+          remote_head="$(git rev-parse origin/feat/shared-auth-account-registry-api)"
+          if test "$tested_head" != "$remote_head"; then
+            echo "The feature branch advanced during validation; refusing an untested overwrite." >&2
+            exit 1
+          fi
+          git add Cargo.toml Cargo.lock .github/workflows/zz-repin-zed-lib-core.yml
+          git diff --cached --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "refactor(DEN-2788): consume merged zed-lib-core"
+          git push origin HEAD:feat/shared-auth-account-registry-api
