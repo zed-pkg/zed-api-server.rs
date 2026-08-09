@@ -1,0 +1,34 @@
+name: Refresh feature branch Cargo.lock
+
+on:
+  push:
+    branches:
+      - feat/shared-auth-account-registry-api
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Resolve immutable dependency pins
+        run: cargo generate-lockfile
+      - name: Commit the generated lockfile
+        run: |
+          if git diff --quiet -- Cargo.lock; then
+            echo 'Cargo.lock is already current.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Cargo.lock
+          git commit -m 'chore: refresh Cargo.lock for shared registry/auth pins'
+          git push origin HEAD:${GITHUB_REF_NAME}
