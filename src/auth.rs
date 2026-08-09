@@ -2,12 +2,12 @@ use axum::http::HeaderMap;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use shared_auth_service_client::{ClientError, Introspection};
 use uuid::Uuid;
 use zed_orm::registry::FederatedIdentity;
 
 use crate::entities::token;
 use crate::error::{ApiErr, ApiResult};
+use crate::shared_auth::{ClientError, Introspection};
 use crate::state::AppState;
 
 /// Verified browser/account identity. The Shared Auth token is intentionally
@@ -203,26 +203,7 @@ mod tests {
             active: true,
             sub: Some("shared-user-1".into()),
             iss: Some("https://auth.example.test".into()),
-            aud: Some("zed-pkg".into()),
-            iat: None,
-            nbf: None,
-            exp: None,
-            jti: None,
-            sid: None,
-            auth_time: None,
-            project: None,
-            provider: Some("supabase".into()),
-            provider_tenant: None,
-            provider_subject: None,
             email: Some("user@example.test".into()),
-            email_verified: Some(true),
-            roles: Vec::new(),
-            aal: Some(1),
-            amr: vec!["magic_link".into()],
-            acr: None,
-            scope: None,
-            azp: None,
-            parent_jti: None,
             rest,
         };
         let identity = account_from_introspection(&introspection, "zed-pkg").unwrap();
@@ -242,26 +223,7 @@ mod tests {
             active: true,
             sub: Some("service-1".into()),
             iss: Some("https://auth.example.test".into()),
-            aud: Some("zed-pkg".into()),
-            iat: None,
-            nbf: None,
-            exp: None,
-            jti: None,
-            sid: None,
-            auth_time: None,
-            project: None,
-            provider: None,
-            provider_tenant: None,
-            provider_subject: None,
             email: None,
-            email_verified: None,
-            roles: Vec::new(),
-            aal: None,
-            amr: Vec::new(),
-            acr: None,
-            scope: None,
-            azp: None,
-            parent_jti: None,
             rest,
         };
         assert_eq!(
