@@ -4,10 +4,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use migration::MigratorTrait;
 use sea_orm::{ConnectOptions, Database};
-use shared_auth_service_client::SharedAuthClient;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
+use crate::shared_auth::SharedAuthClient;
 use crate::state::AppState;
 use crate::storage::ArtifactStore;
 use crate::verify::TagVerifier;
@@ -72,7 +72,7 @@ pub(crate) async fn run() -> Result<()> {
     };
     let shared_auth = cfg.shared_auth.as_ref().map(|configuration| {
         Arc::new(
-            SharedAuthClient::new(configuration.url.clone())
+            SharedAuthClient::new(&configuration.url)
                 .with_service_credential(configuration.service_credential.clone()),
         )
     });
