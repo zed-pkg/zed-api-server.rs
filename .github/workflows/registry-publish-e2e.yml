@@ -28,7 +28,6 @@ env:
   CARGO_TERM_COLOR: always
   ZED_CLI_SHA: 8929a58c6591c7a964d7f91412665d7c8a4afdf3
   ZED_PKG_REGISTRY: http://127.0.0.1:8080
-  ZED_PKG_TOKEN: ci-admin-token
   ZED_PKG_ALLOW_NO_MANIFEST: "1"
   ZED_PKG_INSTALL_MODE: copy
 
@@ -99,6 +98,26 @@ jobs:
           done
           cat "$RUNNER_TEMP/zed-api.log"
           exit 1
+      - name: Mint a real short-lived admin token through the server command
+        shell: bash
+        env:
+          DATABASE_URL: postgres://zed:zed@127.0.0.1:5432/zed
+          PUBLIC_BASE_URL: http://127.0.0.1:8080
+          STORAGE_BACKEND: local
+          STORAGE_LOCAL_DIR: ${{ runner.temp }}/artifacts
+          ZED_VERIFY_TAGS: "off"
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/zed-api-server create-token \
+            --name registry-publish-e2e \
+            --expires-in-days 1)
+          token=$(printf '%s\n' "$output" | tail -n 1)
+          case "$token" in
+            zpkg_*) ;;
+            *) printf '%s\n' "$output" >&2; exit 1 ;;
+          esac
+          echo "::add-mask::$token"
+          printf 'ZED_PKG_TOKEN=%s\n' "$token" >>"$GITHUB_ENV"
       - name: Prepare a tagged package and manifestless consumer
         shell: bash
         run: |

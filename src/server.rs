@@ -5,17 +5,20 @@ use anyhow::{Context, Result};
 use migration::MigratorTrait;
 use sea_orm::{ConnectOptions, Database};
 use tracing_subscriber::EnvFilter;
+use zed_orm_core::{ConnectPolicy, ReadContext, WriteContext};
 
 use crate::config::Config;
+use crate::shared_auth::SharedAuthClient;
 use crate::state::AppState;
 use crate::storage::ArtifactStore;
 use crate::verify::TagVerifier;
-use crate::{auth, ratelimit, routes, tokens};
+use crate::{account_router, ratelimit, routes, tokens};
 
 #[derive(Debug, PartialEq, Eq)]
 enum ProcessCommand<'a> {
     CreateToken(&'a [String]),
     Healthcheck,
+    Migrate,
     RevokeToken(&'a [String]),
     Serve,
 }
@@ -28,25 +31,28 @@ pub(crate) async fn run() -> Result<()> {
         .init();
 
     let args = std::env::args().collect::<Vec<_>>();
-    match process_command(&args) {
+    let command = process_command(&args);
+    match command {
         ProcessCommand::CreateToken(arguments) => return tokens::create_token(arguments).await,
         ProcessCommand::RevokeToken(arguments) => return tokens::revoke_token(arguments).await,
         ProcessCommand::Healthcheck => return healthcheck().await,
-        ProcessCommand::Serve => {}
+        ProcessCommand::Migrate | ProcessCommand::Serve => {}
     }
 
     let cfg = Config::from_env()?;
-    if auth::auth_disabled() {
-        tracing::warn!(
-            "AUTHENTICATION IS DISABLED (ZED_AUTH_DISABLED=1); every caller has admin authority"
-        );
-    }
     let db = connect_with_retry(&cfg).await?;
-    if cfg.auto_migrate {
-        migration::Migrator::up(&db, None)
-            .await
-            .context("migrations failed")?;
+    let registry_write = connect_registry_write_with_retry(&cfg).await?;
+    if command == ProcessCommand::Migrate {
+        migrate_database(&db, &registry_write).await?;
+        return Ok(());
     }
+    if cfg.auto_migrate {
+        tracing::warn!(
+            "AUTO_MIGRATE=true is development-only; production must run `zed-api-server migrate` as a one-shot Job"
+        );
+        migrate_database(&db, &registry_write).await?;
+    }
+    let registry_read = connect_registry_read_with_retry(&cfg).await?;
     let store = ArtifactStore::from_config(&cfg.storage).await?;
     let fiducia = cfg.fiducia.as_ref().map(|configuration| {
         tracing::info!("fiducia locks enabled at {}", configuration.url);
@@ -67,17 +73,46 @@ pub(crate) async fn run() -> Result<()> {
         ratelimit::spawn_sweeper(limiter.clone());
         Some(limiter)
     };
+    let shared_auth = cfg.shared_auth.as_ref().map(|configuration| {
+        Arc::new(
+            SharedAuthClient::new(&configuration.url)
+                .with_service_credential(configuration.service_credential.clone()),
+        )
+    });
+    if shared_auth.is_none() {
+        tracing::warn!(
+            "SHARED_AUTH_URL is not configured; browser/account routes will fail closed with 503"
+        );
+    }
     let state = Arc::new(AppState {
         db,
+        registry_read: Some(registry_read),
+        registry_write: Some(registry_write),
         store,
         verifier: TagVerifier::new(cfg.verify_tags),
         public_base_url: cfg.public_base_url.trim_end_matches('/').to_string(),
         max_orgs_per_token: cfg.max_orgs_per_token,
         fiducia,
         rate_limiter,
+        shared_auth,
+        shared_auth_audience: cfg
+            .shared_auth
+            .as_ref()
+            .map(|configuration| configuration.audience.clone())
+            .unwrap_or_else(|| "zed-pkg".into()),
+        shared_auth_application_id: cfg
+            .shared_auth
+            .as_ref()
+            .map(|configuration| configuration.application_id.clone())
+            .unwrap_or_else(|| "zpkg-web".into()),
+        shared_auth_public_url: cfg
+            .shared_auth
+            .as_ref()
+            .map(|configuration| configuration.public_url.clone()),
     });
 
-    let app = routes::router(state, cfg.max_artifact_bytes);
+    let app =
+        routes::router(state.clone(), cfg.max_artifact_bytes).merge(account_router::router(state));
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     tracing::info!("zed-api-server listening on {}", cfg.bind_addr);
     axum::serve(listener, app).await?;
@@ -89,24 +124,35 @@ fn process_command(args: &[String]) -> ProcessCommand<'_> {
         Some("create-token") => ProcessCommand::CreateToken(&args[2..]),
         Some("revoke-token") => ProcessCommand::RevokeToken(&args[2..]),
         Some("healthcheck") => ProcessCommand::Healthcheck,
+        Some("migrate") => ProcessCommand::Migrate,
         _ => ProcessCommand::Serve,
     }
 }
 
-/// Connect to Postgres, retrying until it is reachable or a bounded deadline
-/// passes.
-///
-/// Unlike the read-only web server — which degrades to offline mode — the API
-/// server genuinely requires a database, so this still fails hard once the
-/// deadline is up. The retry covers the ordinary cold-start race against
-/// Postgres and DNS; the established pool handles later reconnects.
-async fn connect_with_retry(cfg: &Config) -> Result<sea_orm::DatabaseConnection> {
-    let max_wait = Duration::from_secs(
-        std::env::var("DB_CONNECT_MAX_WAIT_SECS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(30),
+/// Apply the legacy machine-registry compatibility schema first, then the
+/// canonical `zed_*` contract under zed-orm-core's own advisory lock.
+async fn migrate_database(
+    db: &sea_orm::DatabaseConnection,
+    registry_write: &WriteContext,
+) -> Result<()> {
+    migration::Migrator::up(db, None)
+        .await
+        .context("legacy registry migrations failed")?;
+    let report = zed_orm_core::migrations::migrate(registry_write)
+        .await
+        .context("canonical registry migrations failed")?;
+    tracing::info!(
+        migration = report.version,
+        applied = report.applied,
+        "canonical registry migration batch complete"
     );
+    Ok(())
+}
+
+/// Connect to the legacy compatibility schema, retrying until it is reachable
+/// or the bounded deadline passes.
+async fn connect_with_retry(cfg: &Config) -> Result<sea_orm::DatabaseConnection> {
+    let max_wait = database_connect_max_wait();
     let started = std::time::Instant::now();
     let mut attempt = 0u32;
     loop {
@@ -126,8 +172,7 @@ async fn connect_with_retry(cfg: &Config) -> Result<sea_orm::DatabaseConnection>
             }
             Err(error) if started.elapsed() >= max_wait => {
                 return Err(anyhow::Error::new(error).context(format!(
-                    "failed to connect to DATABASE_URL after {attempt} attempts \
-                     over {}s (DB_CONNECT_MAX_WAIT_SECS)",
+                    "failed to connect to DATABASE_URL after {attempt} attempts over {}s",
                     started.elapsed().as_secs()
                 )));
             }
@@ -137,6 +182,71 @@ async fn connect_with_retry(cfg: &Config) -> Result<sea_orm::DatabaseConnection>
             }
         }
     }
+}
+
+async fn connect_registry_write_with_retry(cfg: &Config) -> Result<WriteContext> {
+    let max_wait = database_connect_max_wait();
+    let started = std::time::Instant::now();
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let policy = ConnectPolicy::default().with_max_connections(cfg.db_max_connections);
+        match zed_orm_core::connect_read_write_with_policy(&cfg.database_url, policy).await {
+            Ok(context) => {
+                if attempt > 1 {
+                    tracing::info!(attempt, "connected canonical write context after retry");
+                }
+                return Ok(context);
+            }
+            Err(error) if started.elapsed() >= max_wait => {
+                return Err(anyhow::Error::new(error).context(format!(
+                    "failed to connect canonical registry write context after {attempt} attempts over {}s",
+                    started.elapsed().as_secs()
+                )));
+            }
+            Err(error) => {
+                tracing::warn!(%error, attempt, "canonical write context not ready; retrying in 2s");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+}
+
+async fn connect_registry_read_with_retry(cfg: &Config) -> Result<ReadContext> {
+    let max_wait = database_connect_max_wait();
+    let started = std::time::Instant::now();
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let policy = ConnectPolicy::default().with_max_connections(cfg.db_max_connections);
+        match zed_orm_core::connect_read_only_with_policy(&cfg.database_url, policy).await {
+            Ok(context) => {
+                if attempt > 1 {
+                    tracing::info!(attempt, "connected canonical read context after retry");
+                }
+                return Ok(context);
+            }
+            Err(error) if started.elapsed() >= max_wait => {
+                return Err(anyhow::Error::new(error).context(format!(
+                    "failed to connect canonical registry read context after {attempt} attempts over {}s",
+                    started.elapsed().as_secs()
+                )));
+            }
+            Err(error) => {
+                tracing::warn!(%error, attempt, "canonical read context not ready; retrying in 2s");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+}
+
+fn database_connect_max_wait() -> Duration {
+    Duration::from_secs(
+        std::env::var("DB_CONNECT_MAX_WAIT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(30),
+    )
 }
 
 /// Probe the local `/healthz` endpoint for the container HEALTHCHECK.
@@ -185,6 +295,10 @@ mod tests {
         assert_eq!(
             process_command(&arguments(&["zed-api-server", "healthcheck"])),
             ProcessCommand::Healthcheck
+        );
+        assert_eq!(
+            process_command(&arguments(&["zed-api-server", "migrate"])),
+            ProcessCommand::Migrate
         );
         assert_eq!(
             process_command(&arguments(&["zed-api-server", "unknown"])),

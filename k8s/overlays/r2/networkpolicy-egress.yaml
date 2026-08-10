@@ -1,0 +1,23 @@
+# Additive HTTPS egress for the R2 storage backend. NetworkPolicies are
+# unioned, so this ORs a TCP/443 allow onto the base's default-deny-plus-
+# DNS+postgres policy without modifying it. Without 443 the s3 backend cannot
+# reach Cloudflare R2 and every publish times out in put_object (~10s) and
+# surfaces as a bare 500 — verified live on dd-ec2-runtime 2026-08-08.
+#
+# This is scoped to the overlay on purpose: the base bootstrap posture keeps
+# Internet egress absent, and only a durable-storage deployment needs it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dd-zed-api-server-r2-egress
+  namespace: zed
+  labels:
+    app.kubernetes.io/part-of: zed
+spec:
+  podSelector:
+    matchLabels:
+      app: dd-zed-api-server
+  policyTypes: [Egress]
+  egress:
+    - ports:
+        - { protocol: TCP, port: 443 }

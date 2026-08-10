@@ -1,9 +1,26 @@
 /target
 /.data
-/.env
 /.formal-artifacts
 /.formal-tools
 /_apalache-out
+
+# Local secrets. Provider credentials enter this repo only as sops ciphertext
+# under env/enc/*.env.enc. Plaintext never gets committed.
+# The repo-root .env is a symlink into env/dec/ created by `just use <name>`.
+.env
+.env.*
+*.env
+**/*.env
+env/dec
+env/dec/*
+!env/enc/
+!env/enc/*.env.enc
+!env/template.env.example
+
+# nix devShell artifacts
+.direnv/
+result
+result-*
 tmp
 temp
 tmp/worktrees

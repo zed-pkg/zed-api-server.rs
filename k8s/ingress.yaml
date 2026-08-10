@@ -1,0 +1,49 @@
+# STAGED, NOT APPLIED: deliberately absent from every kustomization (see
+# k8s/base/kustomization.yaml — bootstrap runs with auth/rate-limit/tag
+# verification disabled, so a public Ingress is gated on the DEN-534/DEN-535
+# promotion). Kept here so the public shape is reviewed ahead of time.
+#
+# api.zpkg.net and registry.zpkg.net both serve the API root today. When the
+# registry moves to a sub-path of the API server, the registry.zpkg.net rule
+# gains the path prefix (or an edge rewrite) — DNS stays the same. DNS lives
+# in zed-infra/terraform/cloudflare; records stay DNS-only until cert-manager
+# issues this certificate (ACME HTTP-01 ordering).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dd-zed-api-server
+  namespace: zed
+  labels:
+    app: dd-zed-api-server
+    app.kubernetes.io/part-of: zed
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/limit-rps: "50"
+    nginx.ingress.kubernetes.io/proxy-body-size: 110m
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [api.zpkg.net, registry.zpkg.net]
+      secretName: zed-api-server-tls
+  rules:
+    - host: api.zpkg.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dd-zed-api-server
+                port:
+                  number: 8080
+    - host: registry.zpkg.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dd-zed-api-server
+                port:
+                  number: 8080
