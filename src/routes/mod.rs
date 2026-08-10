@@ -5,6 +5,7 @@
 
 mod artifacts;
 mod audit;
+mod graph;
 mod list;
 mod orgs;
 mod packages;
@@ -38,6 +39,9 @@ pub const ROUTE_ORGS: &str = "/v1/orgs";
 pub const ROUTE_AUDIT: &str = "/v1/orgs/{org}/audit";
 pub const ROUTE_AUDIT_VERIFY: &str = "/v1/orgs/{org}/audit/verify";
 pub const ROUTE_FILES: &str = "/v1/files/{org}/{name}/{version}/{*path}";
+pub const ROUTE_DECLARED_GRAPH: &str =
+    "/v1/packages/{org}/{name}/versions/{version}/dependency-graph";
+pub const ROUTE_RESOLUTION_GRAPH: &str = "/v1/resolutions/{resolution_digest}/dependency-graph";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_IN_FLIGHT_REQUESTS: usize = 512;
@@ -68,9 +72,13 @@ pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
     // The two endpoints that buffer a whole artifact in memory get their own,
     // tighter concurrency limit so they can't exhaust pod memory even while
     // the global limit still admits cheap JSON requests.
+    //
+    // The declared dependency graph reads its manifest out of the stored
+    // artifact, so it buffers one too and belongs under the same budget.
     let artifact_routes = Router::new()
         .route(ROUTE_ARTIFACT, get(artifacts::get_artifact))
         .route(ROUTE_FILES, get(artifacts::get_file))
+        .route(ROUTE_DECLARED_GRAPH, get(graph::get_declared_graph))
         .layer(tower::limit::ConcurrencyLimitLayer::new(
             artifact_serve_concurrency(max_artifact_bytes),
         ));
@@ -100,6 +108,7 @@ pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
         .route(ROUTE_ORGS, post(orgs::claim_org))
         .route(ROUTE_AUDIT, get(audit::get_audit_log))
         .route(ROUTE_AUDIT_VERIFY, get(audit::verify_audit_log))
+        .route(ROUTE_RESOLUTION_GRAPH, get(graph::get_resolution_graph))
         .merge(artifact_routes)
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
         .merge(publish_route)
@@ -307,6 +316,16 @@ mod tests {
             fill(ROUTE_FILES),
             r::file_path("acme", "http-kit", "1.2.0", "dist/style.css")
         );
+        // The declared helper carries the mandatory `?view=declared` selector;
+        // the route pattern is the path half of it.
+        assert_eq!(
+            format!("{}?view=declared", fill(ROUTE_DECLARED_GRAPH)),
+            zed_interfaces::declared_dependency_graph_path("acme", "http-kit", "1.2.0")
+        );
+        assert_eq!(
+            ROUTE_RESOLUTION_GRAPH.replace("{resolution_digest}", "sha256:abc"),
+            zed_interfaces::resolution_dependency_graph_path("sha256:abc")
+        );
     }
 
     #[tokio::test]
@@ -314,6 +333,8 @@ mod tests {
         let dir = std::env::temp_dir().join("zed-api-test-store");
         let state = Arc::new(AppState {
             db: sea_orm::DatabaseConnection::Disconnected,
+            registry_read: None,
+            registry_write: None,
             store: ArtifactStore::from_config(&crate::config::StorageConfig::Local {
                 dir: dir.to_string_lossy().to_string(),
             })
@@ -324,6 +345,10 @@ mod tests {
             max_orgs_per_token: 5,
             fiducia: None,
             rate_limiter: None,
+            shared_auth: None,
+            shared_auth_audience: "zed-pkg".to_string(),
+            shared_auth_application_id: "zed-pkg".to_string(),
+            shared_auth_public_url: None,
         });
         let app = router(state, 1024 * 1024);
         let response = app
@@ -342,6 +367,8 @@ mod tests {
         let dir = std::env::temp_dir().join("zed-api-rl-test-store");
         Arc::new(AppState {
             db: sea_orm::DatabaseConnection::Disconnected,
+            registry_read: None,
+            registry_write: None,
             store: ArtifactStore::from_config(&crate::config::StorageConfig::Local {
                 dir: dir.to_string_lossy().to_string(),
             })
@@ -352,6 +379,10 @@ mod tests {
             max_orgs_per_token: 5,
             fiducia: None,
             rate_limiter: Some(Arc::new(limiter)),
+            shared_auth: None,
+            shared_auth_audience: "zed-pkg".to_string(),
+            shared_auth_application_id: "zed-pkg".to_string(),
+            shared_auth_public_url: None,
         })
     }
 

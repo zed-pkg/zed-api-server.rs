@@ -1,3 +1,5 @@
+use std::fmt;
+
 use anyhow::{Context, Result, bail};
 
 /// All configuration comes from the environment (flags-2-env style); see the
@@ -6,6 +8,8 @@ use anyhow::{Context, Result, bail};
 pub struct Config {
     pub bind_addr: String,
     pub database_url: String,
+    /// Development-only compatibility switch. Production deploys must keep
+    /// this false and run the explicit `migrate` command as a Kubernetes Job.
     pub auto_migrate: bool,
     pub storage: StorageConfig,
     pub public_base_url: String,
@@ -14,6 +18,34 @@ pub struct Config {
     pub max_orgs_per_token: u64,
     pub db_max_connections: u32,
     pub fiducia: Option<FiduciaConfig>,
+    pub shared_auth: Option<SharedAuthConfig>,
+}
+
+/// Shared Auth is a separate data plane. The service credential is used only
+/// for protected introspection and is intentionally redacted from Debug output.
+#[derive(Clone)]
+pub struct SharedAuthConfig {
+    pub url: String,
+    pub public_url: String,
+    pub service_credential: String,
+    pub audience: String,
+    /// Exact OAuth authorized party (`azp`) permitted to call browser/account
+    /// routes. The Rust field retains its legacy name for source compatibility;
+    /// `SHARED_AUTH_AUTHORIZED_PARTY` is the canonical environment variable.
+    pub application_id: String,
+}
+
+impl fmt::Debug for SharedAuthConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SharedAuthConfig")
+            .field("url", &self.url)
+            .field("public_url", &self.public_url)
+            .field("service_credential", &"<redacted>")
+            .field("audience", &self.audience)
+            .field("authorized_party", &self.application_id)
+            .finish()
+    }
 }
 
 /// Optional fiducia lock service for distributed locks (see routes/orgs.rs).
@@ -87,10 +119,49 @@ impl Config {
             "github" => TagPolicy::Github,
             other => bail!("ZED_VERIFY_TAGS must be off or github, got `{other}`"),
         };
+        let shared_auth = match std::env::var("SHARED_AUTH_URL") {
+            Ok(url) => {
+                let url = nonempty("SHARED_AUTH_URL", url)?;
+                let public_url = nonempty(
+                    "SHARED_AUTH_PUBLIC_URL",
+                    std::env::var("SHARED_AUTH_PUBLIC_URL").unwrap_or_else(|_| url.clone()),
+                )?;
+                let service_credential = nonempty(
+                    "SHARED_AUTH_SERVICE_CREDENTIAL",
+                    std::env::var("SHARED_AUTH_SERVICE_CREDENTIAL").context(
+                        "SHARED_AUTH_SERVICE_CREDENTIAL is required when SHARED_AUTH_URL is set",
+                    )?,
+                )?;
+                let audience = nonempty(
+                    "SHARED_AUTH_AUDIENCE",
+                    env_or("SHARED_AUTH_AUDIENCE", "zed-pkg"),
+                )?;
+                let application_id = match std::env::var("SHARED_AUTH_AUTHORIZED_PARTY") {
+                    Ok(value) => nonempty("SHARED_AUTH_AUTHORIZED_PARTY", value)?,
+                    Err(std::env::VarError::NotPresent) => nonempty(
+                        "SHARED_AUTH_APPLICATION_ID",
+                        env_or("SHARED_AUTH_APPLICATION_ID", "zpkg-web"),
+                    )?,
+                    Err(error) => {
+                        return Err(error)
+                            .context("SHARED_AUTH_AUTHORIZED_PARTY is not valid Unicode");
+                    }
+                };
+                Some(SharedAuthConfig {
+                    url,
+                    public_url,
+                    service_credential,
+                    audience,
+                    application_id,
+                })
+            }
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => return Err(error).context("SHARED_AUTH_URL is not valid Unicode"),
+        };
         Ok(Self {
             bind_addr: env_or("BIND_ADDR", "0.0.0.0:8080"),
             database_url: std::env::var("DATABASE_URL").context("DATABASE_URL is required")?,
-            auto_migrate: env_or("AUTO_MIGRATE", "true") == "true",
+            auto_migrate: env_or("AUTO_MIGRATE", "false") == "true",
             storage,
             public_base_url: env_or("PUBLIC_BASE_URL", "http://localhost:8080"),
             verify_tags,
@@ -108,6 +179,35 @@ impl Config {
                 internal_secret: std::env::var("FIDUCIA_INTERNAL_SECRET").ok(),
                 org_id: env_or("FIDUCIA_ORG_ID", "zed-registry"),
             }),
+            shared_auth,
         })
+    }
+}
+
+fn nonempty(key: &str, value: String) -> Result<String> {
+    let value = value.trim().trim_end_matches('/').to_owned();
+    if value.is_empty() {
+        bail!("{key} cannot be empty");
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_auth_debug_redacts_the_service_credential() {
+        let config = SharedAuthConfig {
+            url: "https://shared-auth.example.test".into(),
+            public_url: "https://auth.example.test".into(),
+            service_credential: "secret-value".into(),
+            audience: "zed-pkg".into(),
+            application_id: "zpkg-web".into(),
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("secret-value"));
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("zpkg-web"));
     }
 }

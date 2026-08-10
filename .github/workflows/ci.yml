@@ -16,7 +16,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  ZED_INTERFACES_SHA: f141e4cfae31a74c679b46d1d4bb0146b20555f6
+  ZED_INTERFACES_SHA: 30d739167036f54b7919c5776c453123f206ca3c
 
 jobs:
   test:
@@ -38,7 +38,7 @@ jobs:
 
           manifest = tomllib.loads(Path("Cargo.toml").read_text())
           spec = manifest["dependencies"]["zed-interfaces"]
-          expected = "f141e4cfae31a74c679b46d1d4bb0146b20555f6"
+          expected = "30d739167036f54b7919c5776c453123f206ca3c"
           assert "path" not in spec, spec
           assert spec["rev"] == expected, spec
           lock = Path("Cargo.lock").read_text()
