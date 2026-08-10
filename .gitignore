@@ -2,6 +2,7 @@
 /.data
 /.formal-artifacts
 /.formal-tools
+/.vendor/.zed/
 /_apalache-out
 
 # Local secrets. Provider credentials enter this repo only as sops ciphertext

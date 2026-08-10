@@ -8,8 +8,9 @@ use anyhow::{Context, Result, bail};
 pub struct Config {
     pub bind_addr: String,
     pub database_url: String,
-    /// Development-only compatibility switch. Production deploys must keep
-    /// this false and run the explicit `migrate` command as a Kubernetes Job.
+    /// Transitional local-development compatibility switch. Production
+    /// deployments must leave this false and run the explicit `migrate`
+    /// command as a discrete release job before rolling the API.
     pub auto_migrate: bool,
     pub storage: StorageConfig,
     pub public_base_url: String,
