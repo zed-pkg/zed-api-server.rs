@@ -25,9 +25,9 @@ LABEL org.opencontainers.image.title="Zed registry API" \
       org.opencontainers.image.revision="$ZED_API_REVISION" \
       org.opencontainers.image.licenses="MIT" \
       io.zpkg.interfaces.revision="$ZED_INTERFACES_REVISION"
-# The AWS SDK and reqwest both need a system trust store for HTTPS S3-compatible
-# endpoints. Debian slim does not include one, so Cloudflare R2 and AWS S3 fail
-# during TLS setup even though plaintext local MinIO remains healthy.
+# The AWS SDK and reqwest require a system trust store for HTTPS S3-compatible
+# endpoints. Debian slim omits one, so production AWS S3 and Cloudflare R2
+# handshakes would fail even though plaintext local MinIO remains healthy.
 RUN apt-get update \
     && apt-get install --no-install-recommends -y ca-certificates \
     && rm -rf /var/lib/apt/lists/*
