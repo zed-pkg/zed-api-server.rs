@@ -32,7 +32,10 @@ fn package_and_cargo_manifests_preserve_one_canonical_orm_owner() {
         "https://github.com/zed-pkg/zed-lib-core.git",
         "features = [\"read-write\", \"migrate\"]",
     ] {
-        assert!(cargo.contains(contract), "Cargo ORM contract lost {contract}");
+        assert!(
+            cargo.contains(contract),
+            "Cargo ORM contract lost {contract}"
+        );
     }
     assert!(
         !cargo.contains("https://github.com/zed-pkg/zed-orm-core.git"),

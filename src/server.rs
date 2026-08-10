@@ -12,7 +12,7 @@ use crate::shared_auth::SharedAuthClient;
 use crate::state::AppState;
 use crate::storage::ArtifactStore;
 use crate::verify::TagVerifier;
-use crate::{account_router, ratelimit, routes, tokens};
+use crate::{account_router, api_docs, ratelimit, routes, tokens};
 
 #[derive(Debug, PartialEq, Eq)]
 enum ProcessCommand<'a> {
@@ -111,8 +111,12 @@ pub(crate) async fn run() -> Result<()> {
             .map(|configuration| configuration.public_url.clone()),
     });
 
-    let app =
-        routes::router(state.clone(), cfg.max_artifact_bytes).merge(account_router::router(state));
+    // Keep the state-free public documentation surface outside the registry
+    // router so it cannot inherit token auth or per-token rate limiting.
+    let app = axum::Router::new()
+        .merge(api_docs::router())
+        .merge(routes::router(state.clone(), cfg.max_artifact_bytes))
+        .merge(account_router::router(state));
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     tracing::info!("zed-api-server listening on {}", cfg.bind_addr);
     axum::serve(listener, app).await?;

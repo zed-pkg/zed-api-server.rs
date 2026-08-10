@@ -1,6 +1,7 @@
 #[path = "routes/account.rs"]
 mod account;
 mod account_router;
+mod api_docs;
 mod audit;
 mod auth;
 mod config;
