@@ -1,5 +1,5 @@
-# Build context must be the PARENT directory (side-by-side checkout) because
-# of the ../zed-interfaces path dependency:
+# Build context must be the PARENT directory because the release workflow
+# supplies side-by-side, commit-verified cross-repository sources:
 #
 #   docker build -f zed-api-server.rs/Dockerfile -t ghcr.io/zed-pkg/zed-api-server:dev .
 #
@@ -12,6 +12,7 @@ FROM rust:1.97-slim-bookworm AS build
 ENV RUSTUP_TOOLCHAIN=1.97.1
 WORKDIR /work
 COPY zed-interfaces ./zed-interfaces
+COPY zed-lib-core ./zed-lib-core
 COPY zed-api-server.rs ./zed-api-server.rs
 WORKDIR /work/zed-api-server.rs
 RUN cargo build --release --locked
@@ -19,12 +20,14 @@ RUN cargo build --release --locked
 FROM debian:12-slim
 ARG ZED_API_REVISION=unknown
 ARG ZED_INTERFACES_REVISION=unknown
+ARG ZED_LIB_CORE_REVISION=unknown
 LABEL org.opencontainers.image.title="Zed registry API" \
       org.opencontainers.image.description="Zed package registry API server" \
       org.opencontainers.image.source="https://github.com/zed-pkg/zed-api-server.rs" \
       org.opencontainers.image.revision="$ZED_API_REVISION" \
       org.opencontainers.image.licenses="MIT" \
-      io.zpkg.interfaces.revision="$ZED_INTERFACES_REVISION"
+      io.zpkg.interfaces.revision="$ZED_INTERFACES_REVISION" \
+      io.zpkg.lib-core.revision="$ZED_LIB_CORE_REVISION"
 # The AWS SDK and reqwest both need a system trust store for HTTPS S3-compatible
 # endpoints. Debian slim does not include one, so Cloudflare R2 and AWS S3 fail
 # during TLS setup even though plaintext local MinIO remains healthy.

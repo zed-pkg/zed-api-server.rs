@@ -43,7 +43,7 @@ pub const ROUTE_FILES: &str = "/v1/files/{org}/{name}/{version}/{*path}";
 pub const ROUTE_DECLARED_GRAPH: &str =
     "/v1/packages/{org}/{name}/versions/{version}/dependency-graph";
 pub const ROUTE_DECLARED_GRAPH_EXPORT: &str =
-    "/v1/packages/{org}/{name}/versions/{version}/dependency-graph/export/{format}";
+    zed_interfaces::DEPENDENCY_GRAPH_EXPORT_ROUTE_TEMPLATE;
 pub const ROUTE_RESOLUTION_GRAPH: &str = "/v1/resolutions/{resolution_digest}/dependency-graph";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);

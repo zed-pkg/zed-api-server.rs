@@ -190,6 +190,12 @@ mod tests {
     use super::super::sample_document;
     use super::*;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum WireValue<'a> {
+        Varint(u64),
+        Bytes(&'a [u8]),
+    }
+
     #[test]
     fn uses_the_committed_typed_schema_field_numbers() {
         let document = sample_document();
@@ -198,29 +204,111 @@ mod tests {
         assert_eq!(fields[0].0, 1, "schema is field 1");
         assert_eq!(fields[1].0, 2, "graph digest is field 2");
         assert_eq!(fields[2].0, 10, "declared graph is oneof field 10");
-        assert_eq!(fields[0].1, document.schema.as_bytes());
+        assert_eq!(fields[0].1, WireValue::Bytes(document.schema.as_bytes()));
         assert_eq!(
             fields[1].1,
-            document.graph_digest.as_deref().unwrap().as_bytes()
+            WireValue::Bytes(document.graph_digest.as_deref().unwrap().as_bytes())
         );
-        let declared = protobuf_fields(fields[2].1);
+        let WireValue::Bytes(declared_bytes) = fields[2].1 else {
+            panic!("declared graph is a message");
+        };
+        let declared = protobuf_fields(declared_bytes);
         assert_eq!(declared[0].0, 1, "package identity is field 1");
         assert_eq!(declared[1].0, 2, "dependency is field 2");
     }
 
-    fn protobuf_fields(mut bytes: &[u8]) -> Vec<(u32, &[u8])> {
+    #[test]
+    fn resolved_projection_covers_the_typed_schema() {
+        let document = zed_interfaces::golden_fixture_documents()
+            .into_iter()
+            .find(|(name, _)| *name == "projected")
+            .unwrap()
+            .1;
+        let encoded = encode(&document);
+        let fields = protobuf_fields(&encoded);
+        let WireValue::Bytes(resolved_bytes) = fields
+            .iter()
+            .find(|(field, _)| *field == 11)
+            .expect("resolved oneof arm")
+            .1
+        else {
+            panic!("resolved graph is a message");
+        };
+        let resolved = protobuf_fields(resolved_bytes);
+        assert_eq!(field_varints(&resolved, 1), vec![2]);
+        assert_eq!(field_count(&resolved, 2), 1, "root");
+        assert_eq!(field_count(&resolved, 3), 3, "nodes");
+        assert_eq!(field_count(&resolved, 4), 2, "edges");
+        assert_eq!(field_count(&resolved, 5), 1, "provenance");
+        assert_eq!(field_count(&resolved, 6), 1, "parent graph digest");
+
+        let projection = resolved
+            .iter()
+            .find_map(|(field, value)| match (*field == 7, value) {
+                (true, WireValue::Bytes(value)) => Some(*value),
+                _ => None,
+            })
+            .unwrap();
+        let projection = protobuf_fields(projection);
+        assert_eq!(field_varints(&projection, 3), vec![1], "runtime kind");
+        assert_eq!(field_varints(&projection, 4), vec![1], "max depth");
+    }
+
+    #[test]
+    fn committed_schema_declares_every_field_the_encoder_uses() {
+        let schema = include_str!("../../../proto/zpkg_dependency_graph_v1.proto");
+        for declaration in [
+            "string schema = 1;",
+            "string graph_digest = 2;",
+            "DeclaredGraph declared = 10;",
+            "ResolvedGraph resolved = 11;",
+            "DeclaredDependency dependencies = 2;",
+            "ResolutionProvenance provenance = 5;",
+            "optional DependencyGraphProjection projection = 7;",
+        ] {
+            assert!(
+                schema.contains(declaration),
+                "protobuf contract lost declaration {declaration:?}"
+            );
+        }
+    }
+
+    fn field_count(fields: &[(u32, WireValue<'_>)], number: u32) -> usize {
+        fields.iter().filter(|(field, _)| *field == number).count()
+    }
+
+    fn field_varints(fields: &[(u32, WireValue<'_>)], number: u32) -> Vec<u64> {
+        fields
+            .iter()
+            .filter_map(|(field, value)| match (*field == number, value) {
+                (true, WireValue::Varint(value)) => Some(*value),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn protobuf_fields(mut bytes: &[u8]) -> Vec<(u32, WireValue<'_>)> {
         let mut fields = Vec::new();
         while !bytes.is_empty() {
             let (key, used) = read_varint(bytes);
             bytes = &bytes[used..];
             let field = (key >> 3) as u32;
             let wire = key & 7;
-            assert_eq!(wire, 2, "test fixture expects length-delimited fields");
-            let (length, used) = read_varint(bytes);
-            bytes = &bytes[used..];
-            let length = length as usize;
-            fields.push((field, &bytes[..length]));
-            bytes = &bytes[length..];
+            match wire {
+                0 => {
+                    let (value, used) = read_varint(bytes);
+                    bytes = &bytes[used..];
+                    fields.push((field, WireValue::Varint(value)));
+                }
+                2 => {
+                    let (length, used) = read_varint(bytes);
+                    bytes = &bytes[used..];
+                    let length = usize::try_from(length).unwrap();
+                    fields.push((field, WireValue::Bytes(&bytes[..length])));
+                    bytes = &bytes[length..];
+                }
+                _ => panic!("unsupported wire type {wire}"),
+            }
         }
         fields
     }
