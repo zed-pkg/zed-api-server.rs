@@ -1,0 +1,40 @@
+name: clean graph release metadata
+
+on:
+  push:
+    branches:
+      - ci/graph-response-metadata-release
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+jobs:
+  clean-and-document:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Remove accidental placeholder metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS=$'\t' read -r number title; do
+            [[ "$title" == "[do not create]" ]] || continue
+            gh issue close "$number" --repo "$GITHUB_REPOSITORY" --comment "Closed immediately: connector-schema probe created this placeholder accidentally; it contains no product work."
+          done < <(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title --jq '.[] | [.number,.title] | @tsv')
+
+          gh issue edit 39 --repo "$GITHUB_REPOSITORY" --remove-assignee "app/copilot-swe-agent" >/dev/null 2>&1 || true
+
+      - name: Record focused compatibility extraction on API persistence PR
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker='<!-- graph-response-metadata-extraction -->'
+          existing="$(gh pr view 39 --repo "$GITHUB_REPOSITORY" --json comments --jq '[.comments[].body | contains("'"$marker"'")] | any')"
+          if [[ "$existing" != "true" ]]; then
+            gh pr comment 39 --repo "$GITHUB_REPOSITORY" --body "$marker
+          The released CLI began requiring exact \`Content-Length\` and \`X-Zpkg-Graph-Authoritative\` metadata before this persistence PR was ready. The wire-only compatibility repair has therefore been extracted to \`fix/graph-response-metadata-compat\` against current API \`main\` and is being certified independently with the released CLI and real graph E2E stack. #39 remains draft for its distinct durable-artifact/lib-core integration and must not be promoted merely to repair the released wire contract."
+          fi
