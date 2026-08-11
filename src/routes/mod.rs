@@ -6,6 +6,7 @@
 mod artifacts;
 mod audit;
 mod graph;
+mod graph_exports;
 mod list;
 mod orgs;
 mod packages;
@@ -41,6 +42,8 @@ pub const ROUTE_AUDIT_VERIFY: &str = "/v1/orgs/{org}/audit/verify";
 pub const ROUTE_FILES: &str = "/v1/files/{org}/{name}/{version}/{*path}";
 pub const ROUTE_DECLARED_GRAPH: &str =
     "/v1/packages/{org}/{name}/versions/{version}/dependency-graph";
+pub const ROUTE_DECLARED_GRAPH_EXPORT: &str =
+    "/v1/packages/{org}/{name}/versions/{version}/dependency-graph/export/{format}";
 pub const ROUTE_RESOLUTION_GRAPH: &str = "/v1/resolutions/{resolution_digest}/dependency-graph";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -69,16 +72,20 @@ fn artifact_serve_concurrency(max_artifact_bytes: usize) -> usize {
 }
 
 pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
-    // The two endpoints that buffer a whole artifact in memory get their own,
+    // The endpoints that buffer a whole artifact in memory get their own,
     // tighter concurrency limit so they can't exhaust pod memory even while
     // the global limit still admits cheap JSON requests.
     //
-    // The declared dependency graph reads its manifest out of the stored
-    // artifact, so it buffers one too and belongs under the same budget.
+    // Dependency-graph reads extract the manifest from the stored artifact,
+    // so both canonical and extended export routes share this budget.
     let artifact_routes = Router::new()
         .route(ROUTE_ARTIFACT, get(artifacts::get_artifact))
         .route(ROUTE_FILES, get(artifacts::get_file))
         .route(ROUTE_DECLARED_GRAPH, get(graph::get_declared_graph))
+        .route(
+            ROUTE_DECLARED_GRAPH_EXPORT,
+            get(graph_exports::get_declared_graph_export),
+        )
         .layer(tower::limit::ConcurrencyLimitLayer::new(
             artifact_serve_concurrency(max_artifact_bytes),
         ));
@@ -321,6 +328,10 @@ mod tests {
         assert_eq!(
             format!("{}?view=declared", fill(ROUTE_DECLARED_GRAPH)),
             zed_interfaces::declared_dependency_graph_path("acme", "http-kit", "1.2.0")
+        );
+        assert_eq!(
+            fill(ROUTE_DECLARED_GRAPH_EXPORT).replace("{format}", "xml"),
+            "/v1/packages/acme/http-kit/versions/1.2.0/dependency-graph/export/xml"
         );
         assert_eq!(
             ROUTE_RESOLUTION_GRAPH.replace("{resolution_digest}", "sha256:abc"),
