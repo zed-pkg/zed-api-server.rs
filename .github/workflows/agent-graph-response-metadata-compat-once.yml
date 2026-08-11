@@ -1,0 +1,252 @@
+name: agent graph response metadata compatibility once
+
+on:
+  push:
+    branches:
+      - fix/graph-response-metadata-compat
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-graph-response-metadata-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt
+      - name: Add exact response metadata without persistence changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          native_path = Path("src/routes/graph.rs")
+          native = native_path.read_text()
+
+          old_import = '''use zed_interfaces::{
+              declared_dependency_graph_path, DependencyGraphDocument, DependencyGraphEdge,
+              DependencyGraphFormat, DependencyGraphNode, DependencyKind, DEPENDENCY_GRAPH_DIGEST_HEADER,
+          };'''
+          new_import = '''use zed_interfaces::{
+              declared_dependency_graph_path,
+              dependency_graph_export::DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER, DependencyGraphDocument,
+              DependencyGraphEdge, DependencyGraphFormat, DependencyGraphNode, DependencyKind,
+              DEPENDENCY_GRAPH_DIGEST_HEADER,
+          };'''
+          assert native.count(old_import) == 1, "native interface import changed unexpectedly"
+          native = native.replace(old_import, new_import, 1)
+
+          content_type = '''    headers.insert(
+              header::CONTENT_TYPE,
+              header_value(format.media_type()).map_err(ApiError::from)?,
+          );
+          '''
+          metadata = '''    headers.insert(
+              header::CONTENT_TYPE,
+              header_value(format.media_type()).map_err(ApiError::from)?,
+          );
+          headers.insert(
+              header::CONTENT_LENGTH,
+              header_value(&body.len().to_string()).map_err(ApiError::from)?,
+          );
+          headers.insert(
+              HeaderName::from_static(DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER),
+              HeaderValue::from_static(if format.is_authoritative() {
+                  "true"
+              } else {
+                  "false"
+              }),
+          );
+          '''
+          assert native.count(content_type) == 1, "native response insertion point changed unexpectedly"
+          native = native.replace(content_type, metadata, 1)
+
+          test_anchor = '''    #[test]
+              fn format_contract_is_stable() {'''
+          test_block = '''    #[test]
+              fn native_response_metadata_matches_selected_bytes_on_200_and_304() {
+                  let document = graph_document();
+                  for format in DependencyGraphFormat::ALL {
+                      let encoded = encode(format, &document).unwrap();
+                      let expected_length = encoded.len().to_string();
+                      let expected_authority = if format.is_authoritative() {
+                          "true"
+                      } else {
+                          "false"
+                      };
+
+                      let response = respond(format, &document, GraphAccess::Public, None).unwrap();
+                      assert_eq!(response.status(), StatusCode::OK);
+                      assert_eq!(
+                          response
+                              .headers()
+                              .get(header::CONTENT_LENGTH)
+                              .unwrap()
+                              .to_str()
+                              .unwrap(),
+                          expected_length.as_str()
+                      );
+                      assert_eq!(
+                          response
+                              .headers()
+                              .get(HeaderName::from_static(
+                                  DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER,
+                              ))
+                              .unwrap()
+                              .to_str()
+                              .unwrap(),
+                          expected_authority
+                      );
+
+                      let etag = response.headers().get(header::ETAG).unwrap().clone();
+                      let not_modified =
+                          respond(format, &document, GraphAccess::Public, Some(&etag)).unwrap();
+                      assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+                      assert_eq!(
+                          not_modified
+                              .headers()
+                              .get(header::CONTENT_LENGTH)
+                              .unwrap()
+                              .to_str()
+                              .unwrap(),
+                          expected_length.as_str()
+                      );
+                      assert_eq!(
+                          not_modified
+                              .headers()
+                              .get(HeaderName::from_static(
+                                  DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER,
+                              ))
+                              .unwrap()
+                              .to_str()
+                              .unwrap(),
+                          expected_authority
+                      );
+                  }
+              }
+
+              #[test]
+              fn format_contract_is_stable() {'''
+          assert native.count(test_anchor) == 1, "native test insertion point changed unexpectedly"
+          native = native.replace(test_anchor, test_block, 1)
+          native_path.write_text(native)
+
+          extended_path = Path("src/routes/graph_exports/mod.rs")
+          extended = extended_path.read_text()
+
+          old_export_import = '''    dependency_graph_export::{
+                  format_from_extension, DependencyGraphExportFormat as GraphExportFormat,
+              },'''
+          new_export_import = '''    dependency_graph_export::{
+                  format_from_extension, DependencyGraphExportFormat as GraphExportFormat,
+                  DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER,
+              },'''
+          assert extended.count(old_export_import) == 1, "extended interface import changed unexpectedly"
+          extended = extended.replace(old_export_import, new_export_import, 1)
+
+          old_field = '''    content_length: usize,
+              public: bool,'''
+          new_field = '''    content_length: usize,
+              authoritative: bool,
+              public: bool,'''
+          assert extended.count(old_field) == 1, "extended response head fields changed unexpectedly"
+          extended = extended.replace(old_field, new_field, 1)
+
+          old_constructor = '''            content_length: bytes.len(),
+                  public,'''
+          new_constructor = '''            content_length: bytes.len(),
+                  authoritative: format.is_authoritative(),
+                  public,'''
+          assert extended.count(old_constructor) == 1, "extended response head constructor changed unexpectedly"
+          extended = extended.replace(old_constructor, new_constructor, 1)
+
+          vary_insert = '''    response_headers.insert(
+                  header::VARY,
+                  HeaderValue::from_static(DEPENDENCY_GRAPH_VARY),
+              );'''
+          authority_insert = '''    response_headers.insert(
+                  HeaderName::from_static(DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER),
+                  HeaderValue::from_static(if head.authoritative { "true" } else { "false" }),
+              );
+              response_headers.insert(
+                  header::VARY,
+                  HeaderValue::from_static(DEPENDENCY_GRAPH_VARY),
+              );'''
+          assert extended.count(vary_insert) == 1, "extended response header insertion point changed unexpectedly"
+          extended = extended.replace(vary_insert, authority_insert, 1)
+
+          length_assert = '''            assert_eq!(
+                          response.headers()[header::CONTENT_LENGTH],
+                          expected.len().to_string()
+                      );'''
+          metadata_assert = '''            assert_eq!(
+                          response.headers()[header::CONTENT_LENGTH],
+                          expected.len().to_string()
+                      );
+                      assert_eq!(
+                          response.headers()[HeaderName::from_static(
+                              DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER,
+                          )],
+                          if format.is_authoritative() {
+                              "true"
+                          } else {
+                              "false"
+                          }
+                      );'''
+          assert extended.count(length_assert) == 1, "extended 200 metadata assertion changed unexpectedly"
+          extended = extended.replace(length_assert, metadata_assert, 1)
+
+          not_modified_length = '''            assert_eq!(
+                          not_modified.headers()[header::CONTENT_LENGTH],
+                          expected.len().to_string()
+                      );'''
+          not_modified_metadata = '''            assert_eq!(
+                          not_modified.headers()[header::CONTENT_LENGTH],
+                          expected.len().to_string()
+                      );
+                      assert_eq!(
+                          not_modified.headers()[HeaderName::from_static(
+                              DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER,
+                          )],
+                          if format.is_authoritative() {
+                              "true"
+                          } else {
+                              "false"
+                          }
+                      );'''
+          assert extended.count(not_modified_length) == 1, "extended 304 metadata assertion changed unexpectedly"
+          extended = extended.replace(not_modified_length, not_modified_metadata, 1)
+          extended_path.write_text(extended)
+          PY
+
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo test --locked native_response_metadata_matches_selected_bytes_on_200_and_304
+          cargo test --locked every_format_response_matches_golden_bytes
+          git diff --check
+          mapfile -t changed < <(git diff --name-only)
+          printf 'changed: %s\n' "${changed[*]}"
+          test "${#changed[@]}" -eq 2
+          test "${changed[0]}" = "src/routes/graph.rs"
+          test "${changed[1]}" = "src/routes/graph_exports/mod.rs"
+      - name: Commit focused compatibility repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/routes/graph.rs src/routes/graph_exports/mod.rs
+          git commit -m "fix(graph): restore CLI response metadata compatibility"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
