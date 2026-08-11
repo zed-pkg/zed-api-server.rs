@@ -23,12 +23,8 @@ pub(super) fn encode(document: &DependencyGraphDocument) -> String {
             xml_attribute(&mut output, "view", "declared");
             output.push_str(">\n  ");
             xml_identity(&mut output, "package", package);
-            writeln!(
-                output,
-                "  <dependencies count=\"{}\">",
-                dependencies.len()
-            )
-            .expect("writing to a String cannot fail");
+            writeln!(output, "  <dependencies count=\"{}\">", dependencies.len())
+                .expect("writing to a String cannot fail");
             for dependency in dependencies {
                 output.push_str("    <dependency");
                 xml_attribute(&mut output, "registry-id", &dependency.registry_id);
