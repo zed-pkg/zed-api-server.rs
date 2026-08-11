@@ -11,11 +11,10 @@ members = [".", "migration"]
 
 [dependencies]
 # Keep every cross-repository boundary immutable and independently reviewable.
-# This revision includes both the account/audit contracts already consumed by
-# the service and the audited dependency-graph v1 contract (DEN-2864,
-# zed-interfaces#52). It intentionally predates the later polyglot layout move,
-# which changes the Rust crate path and must be adopted atomically by consumers.
-zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "5fa652f6c8aaef5228b34b24bb8c5a4a07b415ca" }
+# This revision includes the account/audit and dependency-graph contracts
+# already consumed by the service plus the audited, target-qualified binary
+# artifact v1 DTOs and portable path validation (zed-interfaces#64).
+zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "4b87e425b04777b0ee413971dc1df805d24f295f" }
 # Canonical account, registry projection, and migration data plane. The API is
 # the only long-running service that opts into write symbols; the discrete
 # `migrate` command is the only runtime path that invokes DDL.

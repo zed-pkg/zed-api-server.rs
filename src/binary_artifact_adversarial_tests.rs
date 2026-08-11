@@ -181,7 +181,11 @@ fn mutate(mut mutation: impl FnMut(&mut Vec<Entry>)) -> (PublishMeta, Vec<u8>) {
 }
 
 fn rewrite_equal_length_filename(bytes: &mut [u8], from: &str, to: &str) {
-    assert_eq!(from.len(), to.len(), "ZIP filename rewrite must be in place");
+    assert_eq!(
+        from.len(),
+        to.len(),
+        "ZIP filename rewrite must be in place"
+    );
     let from = from.as_bytes();
     let to = to.as_bytes();
     let mut replacements = 0usize;
@@ -212,6 +216,24 @@ fn duplicate_via_header_alias(original: &str, alias: &str) -> (PublishMeta, Vec<
         entries.push(duplicate);
     });
     rewrite_equal_length_filename(&mut archive, alias, original);
+    meta.size = archive.len() as u64;
+    meta.sha256 = sha256(&archive);
+    (meta, archive)
+}
+
+fn rename_via_header_alias(
+    original: &str,
+    placeholder: &str,
+    alias: &str,
+) -> (PublishMeta, Vec<u8>) {
+    let (mut meta, mut archive) = mutate(|entries| {
+        entries
+            .iter_mut()
+            .find(|entry| entry.name == original)
+            .expect("entry to rename")
+            .name = placeholder.to_owned();
+    });
+    rewrite_equal_length_filename(&mut archive, placeholder, alias);
     meta.size = archive.len() as u64;
     meta.sha256 = sha256(&archive);
     (meta, archive)
@@ -250,16 +272,22 @@ fn assert_invalid(meta: &PublishMeta, archive: &[u8], expected: &str) {
 
 #[test]
 fn server_rejects_duplicate_descriptor_and_portable_aliases() {
-    let (meta, archive) =
-        duplicate_via_header_alias(DESCRIPTOR, "pkg/.zpkg-binary.js0n");
+    let (meta, archive) = duplicate_via_header_alias(DESCRIPTOR, "pkg/.zpkg-binary.js0n");
     assert_invalid_any(&meta, &archive, &["copies", "duplicate", "collide"]);
 
-    for alias in ["pkg/.ZPKG-BINARY.JSON", "pkg\\.zpkg-binary.json"] {
-        let (meta, archive) = mutate(|entries| {
-            descriptor(entries).name = alias.to_owned();
-        });
-        assert_invalid(&meta, &archive, "must be exactly");
-    }
+    let (meta, archive) = mutate(|entries| {
+        descriptor(entries).name = "pkg/.ZPKG-BINARY.JSON".to_owned();
+    });
+    assert_invalid(&meta, &archive, "must be exactly");
+
+    // ZipWriter normalizes backslashes before writing. Patch an equal-length
+    // placeholder in both headers so this remains a genuinely hostile archive.
+    let (meta, archive) = rename_via_header_alias(
+        DESCRIPTOR,
+        "pkg/.zpkg-binary.js0n",
+        "pkg\\.zpkg-binary.json",
+    );
+    assert_invalid(&meta, &archive, "must be exactly");
 }
 
 #[test]
@@ -282,11 +310,7 @@ fn server_rejects_unlisted_missing_tampered_and_mode_mismatched_payloads() {
     let (meta, archive) = mutate(|entries| {
         payload(entries).bytes.extend_from_slice(b"tampered");
     });
-    assert_invalid_any(
-        &meta,
-        &archive,
-        &["mismatch", "descriptor-declared size"],
-    );
+    assert_invalid_any(&meta, &archive, &["mismatch", "descriptor-declared size"]);
 
     let (meta, archive) = mutate(|entries| {
         payload(entries).mode = 0o644;
@@ -297,10 +321,10 @@ fn server_rejects_unlisted_missing_tampered_and_mode_mismatched_payloads() {
 #[test]
 fn server_rejects_unsafe_and_portably_colliding_paths() {
     let cases = [
-        ("pkg/../escape", "escapes"),
-        ("/pkg/escape", "escapes"),
+        ("pkg/../escape", "not beneath"),
+        ("/pkg/escape", "canonically encoded"),
         ("outside.txt", "not beneath"),
-        ("pkg\\escape", "backslash"),
+        ("pkg\\escape", "canonically encoded"),
         ("pkg/BIN/hello", "collide"),
     ];
     for (name, expected) in cases {
@@ -317,6 +341,70 @@ fn server_rejects_unsafe_and_portably_colliding_paths() {
 
     let (meta, archive) = duplicate_via_header_alias(PAYLOAD, "pkg/bin/hell0");
     assert_invalid_any(&meta, &archive, &["collide", "duplicate"]);
+}
+
+#[test]
+fn server_rejects_host_filesystem_path_ambiguities() {
+    let too_long = format!("pkg/{}", "a".repeat(256));
+    let cases = [
+        too_long.as_str(),
+        "pkg/share/trailing.",
+        "pkg/share/trailing ",
+        "pkg/share/a?.txt",
+        "pkg/share/stream:payload",
+        "pkg/bin/NUL.txt",
+        "pkg/bin/com9.exe",
+    ];
+    for name in cases {
+        let (meta, archive) = mutate(|entries| {
+            entries.push(Entry {
+                name: name.to_owned(),
+                bytes: b"hostile path".to_vec(),
+                mode: 0o644,
+                compression: CompressionMethod::Stored,
+            });
+        });
+        assert_invalid(&meta, &archive, "invalid value");
+    }
+
+    let (meta, archive) = mutate(|entries| {
+        for name in ["pkg/share/É.txt", "pkg/share/é.txt"] {
+            entries.push(Entry {
+                name: name.to_owned(),
+                bytes: name.as_bytes().to_vec(),
+                mode: 0o644,
+                compression: CompressionMethod::Stored,
+            });
+        }
+    });
+    assert_invalid(&meta, &archive, "portable path rules");
+
+    for names in [
+        ["pkg/share", "pkg/share/tool"],
+        ["pkg/share/tool", "pkg/share"],
+    ] {
+        let (meta, archive) = mutate(|entries| {
+            for name in names {
+                entries.push(Entry {
+                    name: name.to_owned(),
+                    bytes: name.as_bytes().to_vec(),
+                    mode: 0o644,
+                    compression: CompressionMethod::Stored,
+                });
+            }
+        });
+        assert_invalid(&meta, &archive, "ancestor");
+    }
+
+    let (meta, archive) = mutate(|entries| {
+        entries.push(Entry {
+            name: "pkg/share/".to_owned(),
+            bytes: b"directories must not carry data".to_vec(),
+            mode: 0o755,
+            compression: CompressionMethod::Stored,
+        });
+    });
+    assert_invalid(&meta, &archive, "directory entry");
 }
 
 #[test]
@@ -367,6 +455,70 @@ fn patch_zip_headers(bytes: &mut [u8], mut patch: impl FnMut(&mut [u8], usize, b
     assert!(patched >= 2, "expected local and central ZIP headers");
 }
 
+fn inject_first_central_extra(bytes: &mut Vec<u8>, extra: &[u8]) -> usize {
+    let eocd = bytes
+        .windows(4)
+        .rposition(|window| window == b"PK\x05\x06")
+        .expect("fixture EOCD");
+    let central = u32::from_le_bytes(bytes[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+    assert_eq!(&bytes[central..central + 4], b"PK\x01\x02");
+    let name_len =
+        u16::from_le_bytes(bytes[central + 28..central + 30].try_into().unwrap()) as usize;
+    let old_extra_len =
+        u16::from_le_bytes(bytes[central + 30..central + 32].try_into().unwrap()) as usize;
+    let new_extra_len = old_extra_len + extra.len();
+    bytes[central + 30..central + 32]
+        .copy_from_slice(&u16::try_from(new_extra_len).unwrap().to_le_bytes());
+    let insertion = central + 46 + name_len + old_extra_len;
+    bytes.splice(insertion..insertion, extra.iter().copied());
+
+    let moved_eocd = eocd + extra.len();
+    let old_central_size =
+        u32::from_le_bytes(bytes[moved_eocd + 12..moved_eocd + 16].try_into().unwrap());
+    bytes[moved_eocd + 12..moved_eocd + 16].copy_from_slice(
+        &old_central_size
+            .checked_add(u32::try_from(extra.len()).unwrap())
+            .unwrap()
+            .to_le_bytes(),
+    );
+    central
+}
+
+#[test]
+fn server_rejects_data_descriptors_and_unnecessary_per_entry_zip64() {
+    let (mut meta, mut archive) = valid_archive();
+    patch_zip_headers(&mut archive, |bytes, offset, central| {
+        let flag_offset = offset + if central { 8 } else { 6 };
+        let flags = u16::from_le_bytes([bytes[flag_offset], bytes[flag_offset + 1]]) | 0x0008;
+        bytes[flag_offset..flag_offset + 2].copy_from_slice(&flags.to_le_bytes());
+    });
+    meta.size = archive.len() as u64;
+    meta.sha256 = sha256(&archive);
+    assert_invalid(&meta, &archive, "data descriptors");
+
+    let (mut meta, mut archive) = valid_archive();
+    inject_first_central_extra(&mut archive, &[0x01, 0x00, 0x00, 0x00]);
+    meta.size = archive.len() as u64;
+    meta.sha256 = sha256(&archive);
+    assert_invalid(&meta, &archive, "ZIP64 extra field");
+
+    let (mut meta, mut archive) = valid_archive();
+    let eocd = archive
+        .windows(4)
+        .rposition(|window| window == b"PK\x05\x06")
+        .unwrap();
+    let central = u32::from_le_bytes(archive[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+    let expanded = u32::from_le_bytes(archive[central + 24..central + 28].try_into().unwrap());
+    let mut zip64_extra = vec![0x01, 0x00, 0x08, 0x00];
+    zip64_extra.extend_from_slice(&u64::from(expanded).to_le_bytes());
+    let central = inject_first_central_extra(&mut archive, &zip64_extra);
+    archive[central + 6..central + 8].copy_from_slice(&45_u16.to_le_bytes());
+    archive[central + 24..central + 28].copy_from_slice(&u32::MAX.to_le_bytes());
+    meta.size = archive.len() as u64;
+    meta.sha256 = sha256(&archive);
+    assert_invalid(&meta, &archive, "ZIP64 sentinel");
+}
+
 #[test]
 fn server_rejects_encryption_unsupported_compression_and_ratio_bombs() {
     let (mut meta, mut archive) = valid_archive();
@@ -377,7 +529,11 @@ fn server_rejects_encryption_unsupported_compression_and_ratio_bombs() {
     });
     meta.size = archive.len() as u64;
     meta.sha256 = sha256(&archive);
-    assert_invalid_any(&meta, &archive, &["encrypted", "password required", "decrypt"]);
+    assert_invalid_any(
+        &meta,
+        &archive,
+        &["encrypted", "password required", "decrypt"],
+    );
 
     let (mut meta, mut archive) = valid_archive();
     patch_zip_headers(&mut archive, |bytes, offset, central| {
@@ -386,7 +542,14 @@ fn server_rejects_encryption_unsupported_compression_and_ratio_bombs() {
     });
     meta.size = archive.len() as u64;
     meta.sha256 = sha256(&archive);
-    assert_invalid(&meta, &archive, "unsupported compression");
+    assert_invalid_any(
+        &meta,
+        &archive,
+        &[
+            "unsupported compression",
+            "compression method not supported",
+        ],
+    );
 
     let (meta, archive) = mutate(|entries| {
         entries.push(Entry {

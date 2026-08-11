@@ -85,33 +85,134 @@ enum DescriptorPresence {
 }
 
 fn descriptor_presence(archive_bytes: &[u8]) -> BinaryResult<DescriptorPresence> {
-    let mut archive = zip::ZipArchive::new(Cursor::new(archive_bytes))
+    let archive = zip::ZipArchive::new(Cursor::new(archive_bytes))
         .map_err(|error| invalid(format!("invalid ZIP archive: {error}")))?;
+    let mut offset = usize::try_from(archive.central_directory_start())
+        .map_err(|_| invalid("ZIP central-directory offset does not fit usize"))?;
     let mut exact = 0_usize;
-    for index in 0..archive.len() {
-        let entry = archive
-            .by_index(index)
-            .map_err(|error| invalid(format!("invalid ZIP entry {index}: {error}")))?;
-        let raw = entry.name_raw();
+    let mut entries = 0_usize;
+    let mut encoding_violation: Option<String> = None;
+
+    // `ZipArchive` stores central-directory entries in a map keyed by raw
+    // filename, so asking it to iterate silently hides duplicate names. Walk
+    // the already-located central directory directly and compare its raw count
+    // with the map's deduplicated length. This reads bounded headers only,
+    // never inflates attacker content, and does not retain every hostile name.
+    while archive_bytes.get(offset..offset.saturating_add(4)) == Some(b"PK\x01\x02") {
+        const CENTRAL_HEADER_BYTES: usize = 46;
+        let header = archive_bytes
+            .get(offset..offset.saturating_add(CENTRAL_HEADER_BYTES))
+            .ok_or_else(|| invalid("truncated ZIP central-directory header"))?;
+        let name_len = usize::from(u16::from_le_bytes([header[28], header[29]]));
+        let extra_len = usize::from(u16::from_le_bytes([header[30], header[31]]));
+        let comment_len = usize::from(u16::from_le_bytes([header[32], header[33]]));
+        let flags = u16::from_le_bytes([header[8], header[9]]);
+        if flags & 0x0008 != 0 && encoding_violation.is_none() {
+            encoding_violation = Some(
+                "binary ZIP entries must not use general-purpose bit 3 data descriptors".to_owned(),
+            );
+        }
+        let compressed_size = u32::from_le_bytes([header[20], header[21], header[22], header[23]]);
+        let expanded_size = u32::from_le_bytes([header[24], header[25], header[26], header[27]]);
+        let disk_start = u16::from_le_bytes([header[34], header[35]]);
+        let local_header_offset =
+            u32::from_le_bytes([header[42], header[43], header[44], header[45]]);
+        if (compressed_size == u32::MAX
+            || expanded_size == u32::MAX
+            || disk_start == u16::MAX
+            || local_header_offset == u32::MAX)
+            && encoding_violation.is_none()
+        {
+            encoding_violation =
+                Some("binary ZIP contains an unnecessary per-entry ZIP64 sentinel".to_owned());
+        }
+        let name_start = offset
+            .checked_add(CENTRAL_HEADER_BYTES)
+            .ok_or_else(|| invalid("ZIP central-directory offset overflow"))?;
+        let name_end = name_start
+            .checked_add(name_len)
+            .ok_or_else(|| invalid("ZIP central-directory filename length overflow"))?;
+        let raw = archive_bytes
+            .get(name_start..name_end)
+            .ok_or_else(|| invalid("truncated ZIP central-directory filename"))?;
+        let extra_end = name_end
+            .checked_add(extra_len)
+            .ok_or_else(|| invalid("ZIP central-directory extra-field length overflow"))?;
+        let extra = archive_bytes
+            .get(name_end..extra_end)
+            .ok_or_else(|| invalid("truncated ZIP central-directory extra field"))?;
+        match contains_zip64_extra(extra) {
+            Some(true) if encoding_violation.is_none() => {
+                encoding_violation = Some(
+                    "binary ZIP contains an unnecessary per-entry ZIP64 extra field".to_owned(),
+                );
+            }
+            None if encoding_violation.is_none() => {
+                encoding_violation = Some(
+                    "binary ZIP contains a malformed central-directory extra field".to_owned(),
+                );
+            }
+            Some(_) | None => {}
+        }
         if raw == BINARY_DESCRIPTOR_ARCHIVE_PATH.as_bytes() {
             exact += 1;
-            continue;
-        }
-        if let Ok(name) = std::str::from_utf8(raw)
-            && portable_path_key(name) == BINARY_DESCRIPTOR_ARCHIVE_PATH
+        } else if let Ok(name) = std::str::from_utf8(raw)
+            && normalized_archive_path(name).as_deref() == Some(BINARY_DESCRIPTOR_ARCHIVE_PATH)
         {
             return Err(invalid(format!(
                 "reserved binary descriptor path must be exactly `{BINARY_DESCRIPTOR_ARCHIVE_PATH}`, got `{name}`"
             )));
         }
+
+        entries = entries
+            .checked_add(1)
+            .ok_or_else(|| invalid("ZIP central-directory entry count overflow"))?;
+        offset = extra_end
+            .checked_add(comment_len)
+            .ok_or_else(|| invalid("ZIP central-directory entry length overflow"))?;
+        if offset > archive_bytes.len() {
+            return Err(invalid("truncated ZIP central-directory entry"));
+        }
+    }
+    if entries != archive.len() {
+        return Err(invalid(format!(
+            "ZIP central directory contains duplicate or inconsistently indexed entries: raw count {entries}, parser exposes {}",
+            archive.len()
+        )));
     }
     match exact {
         0 => Ok(DescriptorPresence::Absent),
-        1 => Ok(DescriptorPresence::Present),
+        1 => {
+            if let Some(message) = encoding_violation {
+                Err(invalid(message))
+            } else {
+                Ok(DescriptorPresence::Present)
+            }
+        }
         count => Err(invalid(format!(
             "binary ZIP contains {count} copies of `{BINARY_DESCRIPTOR_ARCHIVE_PATH}`"
         ))),
     }
+}
+
+fn contains_zip64_extra(extra: &[u8]) -> Option<bool> {
+    let mut offset = 0_usize;
+    while offset < extra.len() {
+        let header = extra.get(offset..offset.checked_add(4)?)?;
+        let kind = u16::from_le_bytes([header[0], header[1]]);
+        let len = usize::from(u16::from_le_bytes([header[2], header[3]]));
+        let data_end = offset
+            .checked_add(4)
+            .and_then(|start| start.checked_add(len))?;
+        if data_end > extra.len() {
+            return None;
+        }
+        if kind == 0x0001 {
+            return Some(true);
+        }
+        offset = data_end;
+    }
+    Some(false)
 }
 
 fn verify_binary_zip(
@@ -147,6 +248,7 @@ fn verify_binary_zip(
 
     let mut regular_files = BTreeSet::<String>::new();
     let mut portable_paths = BTreeMap::<String, String>::new();
+    let mut portable_regular_files = BTreeSet::<String>::new();
     let mut descriptor_bytes: Option<Vec<u8>> = None;
     let mut package_manifest_bytes: Option<Vec<u8>> = None;
     let mut expanded_total = 0_u64;
@@ -176,6 +278,12 @@ fn verify_binary_zip(
         if !entry.is_file() && !entry.is_dir() {
             return Err(invalid(format!(
                 "ZIP entry `{raw_name}` is neither a regular file nor a directory"
+            )));
+        }
+        if entry.is_dir() && entry.size() != 0 {
+            return Err(invalid(format!(
+                "ZIP directory entry `{raw_name}` carries {} bytes of data",
+                entry.size()
             )));
         }
         if let Some(mode) = entry.unix_mode() {
@@ -226,14 +334,36 @@ fn verify_binary_zip(
         }
 
         let portable = portable_path_key(&relative);
-        if let Some(existing) = portable_paths.insert(portable, relative.clone()) {
+        if let Some(existing) = portable_paths.get(&portable) {
             return Err(invalid(format!(
                 "ZIP entries `{existing}` and `{relative}` collide under portable path rules"
             )));
         }
+        for (separator, _) in portable.match_indices('/') {
+            let ancestor = &portable[..separator];
+            if let Some(existing) = portable_regular_files.get(ancestor) {
+                return Err(invalid(format!(
+                    "ZIP file `{existing}` is an ancestor of `{relative}`"
+                )));
+            }
+        }
+        if entry.is_file() {
+            let descendant_prefix = format!("{portable}/");
+            if let Some((_, existing)) = portable_paths
+                .range(descendant_prefix.clone()..)
+                .next()
+                .filter(|(path, _)| path.starts_with(&descendant_prefix))
+            {
+                return Err(invalid(format!(
+                    "ZIP file `{relative}` is an ancestor of `{existing}`"
+                )));
+            }
+        }
+        portable_paths.insert(portable.clone(), relative.clone());
         if entry.is_dir() {
             continue;
         }
+        portable_regular_files.insert(portable);
         if !regular_files.insert(relative.clone()) {
             return Err(invalid(format!(
                 "binary ZIP contains duplicate file `{relative}`"
@@ -283,18 +413,6 @@ fn verify_binary_zip(
                 "parsing `{BINARY_DESCRIPTOR_ARCHIVE_PATH}` failed: {error}"
             ))
         })?;
-    descriptor
-        .validate()
-        .map_err(|error| invalid(error.to_string()))?;
-    let canonical_descriptor = descriptor
-        .canonical_json_bytes()
-        .map_err(|error| invalid(error.to_string()))?;
-    if descriptor_bytes != canonical_descriptor {
-        return Err(invalid(format!(
-            "`{BINARY_DESCRIPTOR_ARCHIVE_PATH}` is not canonical JSON"
-        )));
-    }
-
     let package_manifest_bytes = package_manifest_bytes.ok_or_else(|| {
         invalid(format!(
             "binary ZIP is missing `pkg/{BINARY_PACKAGE_MANIFEST_PATH}`"
@@ -304,9 +422,17 @@ fn verify_binary_zip(
         .map_err(|_| invalid("embedded `.zpkg.toml` is not UTF-8"))?;
     let embedded_manifest = Manifest::parse(package_manifest_text)
         .map_err(|error| invalid(format!("parsing embedded `.zpkg.toml` failed: {error}")))?;
-    embedded_manifest
-        .validate()
-        .map_err(|error| invalid(format!("embedded `.zpkg.toml` is invalid: {error}")))?;
+    descriptor
+        .validate_against_manifest(&embedded_manifest)
+        .map_err(|error| invalid(error.to_string()))?;
+    let canonical_descriptor = descriptor
+        .canonical_json_bytes()
+        .map_err(|error| invalid(error.to_string()))?;
+    if descriptor_bytes != canonical_descriptor {
+        return Err(invalid(format!(
+            "`{BINARY_DESCRIPTOR_ARCHIVE_PATH}` is not canonical JSON"
+        )));
+    }
     if embedded_manifest != meta.manifest {
         return Err(invalid(
             "embedded `.zpkg.toml` does not exactly match publish metadata",
@@ -379,19 +505,6 @@ fn ensure_descriptor_matches_publish(
     meta: &PublishMeta,
 ) -> BinaryResult<()> {
     let package = &meta.manifest.package;
-    if descriptor.package.org != package.org
-        || descriptor.package.name != package.name
-        || descriptor.package.version != package.version
-    {
-        return Err(invalid(
-            "binary descriptor package identity does not match publish metadata",
-        ));
-    }
-    if descriptor.entrypoints != meta.manifest.bin {
-        return Err(invalid(
-            "binary descriptor entrypoints do not exactly match `.zpkg.toml` `[bin]`",
-        ));
-    }
     let source = descriptor.source.as_ref().ok_or_else(|| {
         invalid("binary publication requires source provenance in `.zpkg-binary.json`")
     })?;
@@ -483,7 +596,40 @@ fn enforce_compression_ratio(name: &str, expanded: u64, compressed: u64) -> Bina
 }
 
 fn portable_path_key(path: &str) -> String {
-    path.replace('\\', "/").to_ascii_lowercase()
+    path.replace('\\', "/").to_lowercase()
+}
+
+/// Normalize only for detecting aliases of the reserved binary marker.
+///
+/// This is deliberately *not* used as an extraction path. ZIP producers and
+/// host filesystems disagree about repeated separators, dot components,
+/// backslashes, case, and trailing dots/spaces. If any of those spellings
+/// resolve to the binary descriptor on a supported host, the upload has opted
+/// into the binary profile and must either use the one canonical spelling or
+/// fail closed. Otherwise an archive can bypass verification on one host and
+/// materialize the reserved marker on another.
+fn normalized_archive_path(path: &str) -> Option<String> {
+    let portable = path.replace('\\', "/");
+    let mut components = Vec::new();
+    for raw in portable.split('/') {
+        match raw {
+            "" | "." => continue,
+            ".." => {
+                components.pop()?;
+                continue;
+            }
+            _ => {}
+        }
+
+        // Win32 strips trailing dots and spaces from ordinary path
+        // components. Treat those host aliases as reserved too.
+        let component = raw.trim_end_matches(['.', ' ']);
+        if component.is_empty() {
+            continue;
+        }
+        components.push(component.to_lowercase());
+    }
+    Some(components.join("/"))
 }
 
 fn max_binary_archive_bytes() -> u64 {
@@ -501,11 +647,10 @@ fn max_binary_expanded_bytes() -> u64 {
 }
 
 fn max_binary_entries() -> usize {
-    std::env::var("ZED_MAX_BINARY_ENTRIES")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_MAX_BINARY_ENTRIES)
+    bounded_usize_override(
+        std::env::var("ZED_MAX_BINARY_ENTRIES").ok().as_deref(),
+        DEFAULT_MAX_BINARY_ENTRIES,
+    )
 }
 
 fn max_binary_compression_ratio() -> u64 {
@@ -515,12 +660,22 @@ fn max_binary_compression_ratio() -> u64 {
     )
 }
 
-fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
+fn env_u64(name: &str, ceiling: u64) -> u64 {
+    bounded_u64_override(std::env::var(name).ok().as_deref(), ceiling)
+}
+
+fn bounded_u64_override(value: Option<&str>, ceiling: u64) -> u64 {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(default)
+        .map_or(ceiling, |value| value.min(ceiling))
+}
+
+fn bounded_usize_override(value: Option<&str>, ceiling: usize) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map_or(ceiling, |value| value.min(ceiling))
 }
 
 fn invalid(message: impl Into<String>) -> BinaryArtifactError {
@@ -681,6 +836,19 @@ hello = "bin/hello"
     }
 
     #[test]
+    fn binary_limit_overrides_can_only_lower_v1_ceilings() {
+        assert_eq!(bounded_u64_override(None, 1_000), 1_000);
+        assert_eq!(bounded_u64_override(Some("invalid"), 1_000), 1_000);
+        assert_eq!(bounded_u64_override(Some("0"), 1_000), 1_000);
+        assert_eq!(bounded_u64_override(Some("250"), 1_000), 250);
+        assert_eq!(bounded_u64_override(Some("1001"), 1_000), 1_000);
+
+        assert_eq!(bounded_usize_override(None, 200_000), 200_000);
+        assert_eq!(bounded_usize_override(Some("1000"), 200_000), 1_000);
+        assert_eq!(bounded_usize_override(Some("200001"), 200_000), 200_000);
+    }
+
+    #[test]
     fn rejects_payload_bytes_that_disagree_with_the_descriptor() {
         let (meta, archive) = binary_archive(b"tampered\n", b"hello binary\n");
         let error = verify_publish(&meta, &archive).unwrap_err().to_string();
@@ -713,6 +881,41 @@ hello = "bin/hello"
                 .to_string()
                 .contains("must be exactly")
         );
+    }
+
+    #[test]
+    fn rejects_reserved_descriptor_path_aliases() {
+        for alias in [
+            "./pkg/.zpkg-binary.json",
+            "/pkg/.zpkg-binary.json",
+            "pkg//.zpkg-binary.json",
+            "pkg/./.zpkg-binary.json",
+            "pkg/staging/../.zpkg-binary.json",
+            "pkg/.zpKg-binary.json",
+            "pkg/.zpkg-binary.json.",
+            "pkg/.zpkg-binary.json ",
+        ] {
+            let manifest = manifest();
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            writer
+                .start_file(alias, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"{}").unwrap();
+            let archive = writer.finish().unwrap().into_inner();
+            let meta = PublishMeta {
+                manifest,
+                vcs_tag: "v1.2.3".to_owned(),
+                vcs_commit: None,
+                sha256: sha256(&archive),
+                size: archive.len() as u64,
+                format: ArtifactFormat::Zip,
+            };
+            let error = verify_publish(&meta, &archive).unwrap_err().to_string();
+            assert!(
+                error.contains("must be exactly"),
+                "alias `{alias}` unexpectedly produced `{error}`"
+            );
+        }
     }
 
     #[test]
