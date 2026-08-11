@@ -4,6 +4,8 @@ mod account_router;
 mod audit;
 mod auth;
 mod binary_artifact;
+#[cfg(test)]
+mod binary_artifact_adversarial_tests;
 mod config;
 mod embeddings;
 mod entities;
