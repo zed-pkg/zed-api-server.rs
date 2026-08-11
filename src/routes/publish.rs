@@ -87,6 +87,30 @@ pub async fn publish(
         ));
     }
 
+    let actual_size = artifact.len() as u64;
+    if actual_size != meta.size {
+        return Err(ApiErr::bad_request(
+            "artifact_size_mismatch",
+            format!(
+                "client declared {} bytes, server received {actual_size}",
+                meta.size
+            ),
+        ));
+    }
+
+    if let Some(descriptor) = crate::binary_artifact::verify_publish(&meta, &artifact)
+        .map_err(|error| ApiErr::bad_request("invalid_binary_artifact", error.to_string()))?
+    {
+        tracing::info!(
+            org = %m.org,
+            name = %m.name,
+            version = %m.version,
+            target = %descriptor.platform.target,
+            files = descriptor.files.len(),
+            "verified self-describing binary ZIP before publication"
+        );
+    }
+
     match state
         .verifier
         .verify(m.repository.vcs, &m.repository.url, &meta.vcs_tag)

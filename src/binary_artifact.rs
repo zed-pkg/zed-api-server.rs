@@ -277,8 +277,12 @@ fn verify_binary_zip(
             "binary ZIP is missing `{BINARY_DESCRIPTOR_ARCHIVE_PATH}`"
         ))
     })?;
-    let descriptor: BinaryArtifactManifestV1 = serde_json::from_slice(&descriptor_bytes)
-        .map_err(|error| invalid(format!("parsing `{BINARY_DESCRIPTOR_ARCHIVE_PATH}` failed: {error}")))?;
+    let descriptor: BinaryArtifactManifestV1 =
+        serde_json::from_slice(&descriptor_bytes).map_err(|error| {
+            invalid(format!(
+                "parsing `{BINARY_DESCRIPTOR_ARCHIVE_PATH}` failed: {error}"
+            ))
+        })?;
     descriptor
         .validate()
         .map_err(|error| invalid(error.to_string()))?;
@@ -438,9 +442,7 @@ fn hash_zip_entry<R: Read>(reader: &mut R, expected_size: u64) -> BinaryResult<S
             .checked_add(read as u64)
             .ok_or_else(|| invalid("ZIP payload size overflows u64"))?;
         if size > expected_size {
-            return Err(invalid(
-                "ZIP payload exceeds its descriptor-declared size",
-            ));
+            return Err(invalid("ZIP payload exceeds its descriptor-declared size"));
         }
         hasher.update(&buffer[..read]);
     }
@@ -531,8 +533,8 @@ mod tests {
 
     use super::*;
     use zed_interfaces::binary_artifact::{
-        BINARY_ARTIFACT_SCHEMA_V1, BinaryArchiveFormatV1, BinaryFileV1,
-        BinaryPackageIdentityV1, BinaryPlatformV1, BinarySourceProvenanceV1,
+        BINARY_ARTIFACT_SCHEMA_V1, BinaryArchiveFormatV1, BinaryFileV1, BinaryPackageIdentityV1,
+        BinaryPlatformV1, BinarySourceProvenanceV1,
     };
 
     fn manifest() -> Manifest {
@@ -649,10 +651,7 @@ hello = "bin/hello"
         let manifest = manifest();
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
         writer
-            .start_file(
-                "pkg/source.txt",
-                zip::write::SimpleFileOptions::default(),
-            )
+            .start_file("pkg/source.txt", zip::write::SimpleFileOptions::default())
             .unwrap();
         writer.write_all(b"source").unwrap();
         let archive = writer.finish().unwrap().into_inner();

@@ -3,6 +3,7 @@ mod account;
 mod account_router;
 mod audit;
 mod auth;
+mod binary_artifact;
 mod config;
 mod embeddings;
 mod entities;

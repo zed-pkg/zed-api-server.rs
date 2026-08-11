@@ -15,7 +15,7 @@ members = [".", "migration"]
 # the service and the audited dependency-graph v1 contract (DEN-2864,
 # zed-interfaces#52). It intentionally predates the later polyglot layout move,
 # which changes the Rust crate path and must be adopted atomically by consumers.
-zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "30d739167036f54b7919c5776c453123f206ca3c" }
+zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "5fa652f6c8aaef5228b34b24bb8c5a4a07b415ca" }
 # Canonical account, registry projection, and migration data plane. The API is
 # the only long-running service that opts into write symbols; the discrete
 # `migrate` command is the only runtime path that invokes DDL.
