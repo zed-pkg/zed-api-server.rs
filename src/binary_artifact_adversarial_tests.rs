@@ -99,8 +99,7 @@ fn valid_archive() -> (PublishMeta, Vec<u8>) {
     let descriptor_bytes = descriptor
         .canonical_json_bytes()
         .expect("canonical descriptor");
-    let epoch = zip::DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0)
-        .expect("valid ZIP epoch");
+    let epoch = zip::DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0).expect("valid ZIP epoch");
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     for (name, bytes, mode) in [
         (DESCRIPTOR, descriptor_bytes.as_slice(), 0o644),
@@ -152,8 +151,7 @@ fn read_entries(bytes: &[u8]) -> Vec<Entry> {
 }
 
 fn write_entries(entries: &[Entry]) -> Vec<u8> {
-    let epoch = zip::DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0)
-        .expect("valid ZIP epoch");
+    let epoch = zip::DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0).expect("valid ZIP epoch");
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     for entry in entries {
         writer
@@ -201,7 +199,9 @@ fn assert_invalid(meta: &PublishMeta, archive: &[u8], expected: &str) {
         .expect_err("hostile binary upload must fail closed")
         .to_string();
     assert!(
-        error.to_ascii_lowercase().contains(&expected.to_ascii_lowercase()),
+        error
+            .to_ascii_lowercase()
+            .contains(&expected.to_ascii_lowercase()),
         "expected error containing `{expected}`, got `{error}`"
     );
 }
