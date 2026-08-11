@@ -144,8 +144,9 @@ async fn load_declared_document(
 
     let manifest_text = String::from_utf8(manifest_bytes)
         .map_err(|_| ApiErr::from(anyhow::anyhow!("stored manifest is not valid UTF-8")))?;
-    let manifest = zed_interfaces::Manifest::parse(&manifest_text)
-        .map_err(|error| ApiErr::from(anyhow::anyhow!("stored manifest does not parse: {error}")))?;
+    let manifest = zed_interfaces::Manifest::parse(&manifest_text).map_err(|error| {
+        ApiErr::from(anyhow::anyhow!("stored manifest does not parse: {error}"))
+    })?;
 
     declared_document(&registry_id(&state.public_base_url), ver, &manifest)
 }
@@ -445,14 +446,14 @@ mod tests {
             "acme_app_1.0.0",
         )
         .unwrap();
-        assert_ne!(json5.headers().get(header::ETAG), xml.headers().get(header::ETAG));
+        assert_ne!(
+            json5.headers().get(header::ETAG),
+            xml.headers().get(header::ETAG)
+        );
         assert_eq!(
             json5.headers().get(DEPENDENCY_GRAPH_DIGEST_HEADER),
             xml.headers().get(DEPENDENCY_GRAPH_DIGEST_HEADER)
         );
-        assert_eq!(
-            json5.headers().get(AUTHORITATIVE_HEADER).unwrap(),
-            "true"
-        );
+        assert_eq!(json5.headers().get(AUTHORITATIVE_HEADER).unwrap(), "true");
     }
 }
