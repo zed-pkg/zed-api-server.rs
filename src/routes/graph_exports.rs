@@ -16,8 +16,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use zed_interfaces::{
     DEPENDENCY_GRAPH_DEFAULT_MAX_ENCODED_BYTES, DEPENDENCY_GRAPH_DIGEST_HEADER,
-    DEPENDENCY_GRAPH_SCHEMA_V1, DeclaredDependency, DependencyGraphData,
-    DependencyGraphDocument, DependencyKind, PackageVersionIdentity,
+    DEPENDENCY_GRAPH_SCHEMA_V1, DeclaredDependency, DependencyGraphData, DependencyGraphDocument,
+    DependencyKind, PackageVersionIdentity,
 };
 
 use crate::entities::version;
@@ -79,12 +79,7 @@ impl ExportFormat {
 /// `GET|HEAD /v1/packages/{org}/{name}/versions/{version}/dependency-graph/export/{format}`
 pub async fn get_declared_graph_export(
     State(state): State<Arc<AppState>>,
-    Path((org_slug, name, package_version, format_name)): Path<(
-        String,
-        String,
-        String,
-        String,
-    )>,
+    Path((org_slug, name, package_version, format_name)): Path<(String, String, String, String)>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     let format = ExportFormat::parse(&format_name).ok_or_else(|| ApiErr {
@@ -144,8 +139,9 @@ async fn load_declared_document(
 
     let manifest_text = String::from_utf8(manifest_bytes)
         .map_err(|_| ApiErr::from(anyhow::anyhow!("stored manifest is not valid UTF-8")))?;
-    let manifest = zed_interfaces::Manifest::parse(&manifest_text)
-        .map_err(|error| ApiErr::from(anyhow::anyhow!("stored manifest does not parse: {error}")))?;
+    let manifest = zed_interfaces::Manifest::parse(&manifest_text).map_err(|error| {
+        ApiErr::from(anyhow::anyhow!("stored manifest does not parse: {error}"))
+    })?;
 
     declared_document(
         &registry_id(&state.public_base_url),
@@ -368,12 +364,8 @@ fn encode_xml(document: &DependencyGraphDocument) -> ApiResult<String> {
     output.push_str(">\n  <package");
     xml_identity_attributes(&mut output, package);
     output.push_str(" />\n");
-    writeln!(
-        output,
-        "  <dependencies count=\"{}\">",
-        dependencies.len()
-    )
-    .expect("writing to a String cannot fail");
+    writeln!(output, "  <dependencies count=\"{}\">", dependencies.len())
+        .expect("writing to a String cannot fail");
 
     for dependency in dependencies {
         output.push_str("    <dependency");
@@ -620,9 +612,8 @@ fn csv_field(output: &mut String, value: &str) {
 
 fn encode_messagepack(document: &DependencyGraphDocument) -> ApiResult<Vec<u8>> {
     let canonical = canonical_json(document)?;
-    let value: Value = serde_json::from_slice(&canonical).map_err(|error| {
-        ApiErr::from(anyhow::anyhow!("reparse canonical graph JSON: {error}"))
-    })?;
+    let value: Value = serde_json::from_slice(&canonical)
+        .map_err(|error| ApiErr::from(anyhow::anyhow!("reparse canonical graph JSON: {error}")))?;
     let mut output = Vec::with_capacity(canonical.len());
     messagepack_value(&value, &mut output)?;
     Ok(output)
@@ -747,9 +738,8 @@ fn messagepack_map_len(length: usize, output: &mut Vec<u8>) -> ApiResult<()> {
             output.extend_from_slice(&(length as u16).to_be_bytes());
         }
         _ => {
-            let length = u32::try_from(length).map_err(|_| {
-                ApiErr::from(anyhow::anyhow!("MessagePack map exceeds u32 length"))
-            })?;
+            let length = u32::try_from(length)
+                .map_err(|_| ApiErr::from(anyhow::anyhow!("MessagePack map exceeds u32 length")))?;
             output.push(0xdf);
             output.extend_from_slice(&length.to_be_bytes());
         }
@@ -936,7 +926,10 @@ mod tests {
         assert!(csv.contains("node,declared"));
         assert!(csv.contains("edge,declared"));
         assert!(csv.contains("\"^2, >=2.1\nnext\""));
-        assert_eq!(csv.lines().next().unwrap().split(',').count(), CSV_HEADER.len());
+        assert_eq!(
+            csv.lines().next().unwrap().split(',').count(),
+            CSV_HEADER.len()
+        );
     }
 
     #[test]
@@ -988,7 +981,10 @@ mod tests {
             "acme_app_1.0.0",
         )
         .unwrap();
-        assert_ne!(json5.headers().get(header::ETAG), xml.headers().get(header::ETAG));
+        assert_ne!(
+            json5.headers().get(header::ETAG),
+            xml.headers().get(header::ETAG)
+        );
         assert_eq!(
             json5.headers().get(DEPENDENCY_GRAPH_DIGEST_HEADER),
             xml.headers().get(DEPENDENCY_GRAPH_DIGEST_HEADER)
