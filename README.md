@@ -23,12 +23,17 @@ self-hostable for private registries.
 
 Errors are JSON `ApiError { code, message }` — codes include `not_found`,
 `unauthorized`, `org_not_found`, `org_taken`, `version_exists`,
-`sha256_mismatch`, `tag_not_found`, `invalid_manifest`.
+`sha256_mismatch`, `tag_not_found`, `invalid_manifest`, `invalid_multipart`,
+`invalid_binary_artifact`, and `vcs_commit_mismatch`.
 
 Publish pipeline: bearer token -> manifest validation -> URL/manifest
 agreement -> server-side sha256 recomputation -> org ownership -> VCS tag
 verification (policy below) -> immutability check -> store artifact -> record
 version.
+
+Native binary ZIP layout, server verification, R2 race recovery, and the
+coordinated multi-platform route/data-model boundary are specified in
+[`docs/binary-artifact-publication.md`](docs/binary-artifact-publication.md).
 
 ## Configuration (env)
 
@@ -40,6 +45,10 @@ version.
 | `STORAGE_BACKEND` | `local` | `memory`, `local`, or `s3` |
 | `STORAGE_MEMORY_MAX_BYTES` | `268435456` | hard total for the process-memory backend; must be greater than zero |
 | `STORAGE_LOCAL_DIR` | `.data/artifacts` | local backend |
+| `ZED_MAX_BINARY_ARCHIVE_BYTES` | `1073741824` | binary ZIP outer-byte limit; may only lower the v1 ceiling |
+| `ZED_MAX_BINARY_EXPANDED_BYTES` | `2147483648` | total expanded-byte limit; may only lower the v1 ceiling |
+| `ZED_MAX_BINARY_ENTRIES` | `200000` | entry-count limit; may only lower the v1 ceiling |
+| `ZED_MAX_BINARY_COMPRESSION_RATIO` | `1000` | per-entry ratio limit; may only lower the v1 ceiling |
 | `S3_BUCKET` | required for s3 | |
 | `S3_ENDPOINT_URL` | unset | set for R2/MinIO |
 | `S3_REGION` | `auto` | R2 uses `auto` |

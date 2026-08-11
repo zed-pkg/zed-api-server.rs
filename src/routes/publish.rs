@@ -87,6 +87,30 @@ pub async fn publish(
         ));
     }
 
+    let actual_size = artifact.len() as u64;
+    if actual_size != meta.size {
+        return Err(ApiErr::bad_request(
+            "artifact_size_mismatch",
+            format!(
+                "client declared {} bytes, server received {actual_size}",
+                meta.size
+            ),
+        ));
+    }
+
+    if let Some(descriptor) = crate::binary_artifact::verify_publish(&meta, &artifact)
+        .map_err(|error| ApiErr::bad_request("invalid_binary_artifact", error.to_string()))?
+    {
+        tracing::info!(
+            org = %m.org,
+            name = %m.name,
+            version = %m.version,
+            target = %descriptor.platform.target,
+            files = descriptor.files.len(),
+            "verified self-describing binary ZIP before publication"
+        );
+    }
+
     match state
         .verifier
         .verify(m.repository.vcs, &m.repository.url, &meta.vcs_tag)
@@ -101,7 +125,10 @@ pub async fn publish(
                 ),
             ));
         }
-        TagCheck::Verified { .. } | TagCheck::Skipped => {}
+        TagCheck::Verified { commit } => {
+            validate_verified_vcs_commit(meta.vcs_commit.as_deref(), commit.as_deref())?;
+        }
+        TagCheck::Skipped => {}
     }
 
     let key = artifact_key(&actual_sha, meta.format.extension());
@@ -149,7 +176,7 @@ pub async fn publish(
     // the version row records it after the put.
     state
         .store
-        .put(&key, artifact, meta.format.content_type())
+        .put_verified(&key, artifact, meta.format.content_type(), &actual_sha)
         .await?;
 
     // Upsert the package metadata and insert the version atomically: a failed
@@ -270,6 +297,34 @@ fn legacy_version_matches(
         && existing.artifact_key == artifact_key
 }
 
+fn validate_verified_vcs_commit(declared: Option<&str>, verified: Option<&str>) -> ApiResult<()> {
+    let Some(declared) = declared else {
+        return Ok(());
+    };
+    let Some(verified) = verified else {
+        return Err(ApiErr::bad_request(
+            "vcs_commit_mismatch",
+            "publish metadata declares a VCS commit, but the verified tag did not resolve directly to a commit",
+        ));
+    };
+
+    let canonical = |value: &str| {
+        (matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| value.to_ascii_lowercase())
+    };
+    let declared_canonical = canonical(declared);
+    let verified_canonical = canonical(verified);
+    if declared_canonical.is_none() || declared_canonical != verified_canonical {
+        return Err(ApiErr::bad_request(
+            "vcs_commit_mismatch",
+            format!(
+                "publish metadata declares VCS commit `{declared}`, but tag verification resolved `{verified}`"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 async fn adopt_canonical_publish(
     state: &AppState,
     org_row: &org::Model,
@@ -338,6 +393,12 @@ async fn read_multipart(multipart: &mut Multipart) -> ApiResult<(PublishMeta, By
     {
         match field.name() {
             Some(PUBLISH_META_FIELD) => {
+                if meta.is_some() {
+                    return Err(ApiErr::bad_request(
+                        "invalid_multipart",
+                        format!("duplicate multipart field `{PUBLISH_META_FIELD}`"),
+                    ));
+                }
                 let text = field
                     .text()
                     .await
@@ -348,6 +409,12 @@ async fn read_multipart(multipart: &mut Multipart) -> ApiResult<(PublishMeta, By
                 );
             }
             Some(PUBLISH_ARTIFACT_FIELD) => {
+                if artifact.is_some() {
+                    return Err(ApiErr::bad_request(
+                        "invalid_multipart",
+                        format!("duplicate multipart field `{PUBLISH_ARTIFACT_FIELD}`"),
+                    ));
+                }
                 artifact = Some(
                     field
                         .bytes()
@@ -355,7 +422,18 @@ async fn read_multipart(multipart: &mut Multipart) -> ApiResult<(PublishMeta, By
                         .map_err(|e| ApiErr::bad_request("invalid_artifact", e.to_string()))?,
                 );
             }
-            _ => {}
+            Some(name) => {
+                return Err(ApiErr::bad_request(
+                    "invalid_multipart",
+                    format!("unexpected multipart field `{name}`"),
+                ));
+            }
+            None => {
+                return Err(ApiErr::bad_request(
+                    "invalid_multipart",
+                    "multipart fields must have a name",
+                ));
+            }
         }
     }
     let meta = meta.ok_or_else(|| ApiErr::bad_request("invalid_meta", "missing meta field"))?;
@@ -437,6 +515,7 @@ async fn upsert_package<C: ConnectionTrait>(
 mod tests {
     use std::sync::Arc;
 
+    use super::validate_verified_vcs_commit;
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
     use chrono::Utc;
@@ -446,6 +525,7 @@ mod tests {
     };
     use tower::util::ServiceExt;
     use uuid::Uuid;
+    use zed_interfaces::registry::{PUBLISH_ARTIFACT_FIELD, PUBLISH_META_FIELD};
 
     use crate::auth::hash_token;
     use crate::config::{StorageConfig, TagPolicy};
@@ -579,7 +659,11 @@ mod tests {
     /// Build a publish multipart body: a JSON `meta` field whose manifest sets
     /// `description`, plus an `artifact` part whose sha256 is filled in for the
     /// caller so the server's recompute check passes.
-    fn publish_body(version: &str, description: &str) -> (Vec<u8>, String) {
+    fn publish_body_with_extra(
+        version: &str,
+        description: &str,
+        extra_field: Option<&str>,
+    ) -> (Vec<u8>, String) {
         let artifact = b"hi!";
         let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(artifact));
         let meta = serde_json::json!({
@@ -607,8 +691,23 @@ mod tests {
         );
         body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
         body.extend_from_slice(artifact);
+        if let Some(name) = extra_field {
+            body.extend_from_slice(format!("\r\n--{BOUNDARY}\r\n").as_bytes());
+            body.extend_from_slice(
+                format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+            );
+            if name == PUBLISH_META_FIELD {
+                body.extend_from_slice(meta.as_bytes());
+            } else {
+                body.extend_from_slice(artifact);
+            }
+        }
         body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
         (body, format!("multipart/form-data; boundary={BOUNDARY}"))
+    }
+
+    fn publish_body(version: &str, description: &str) -> (Vec<u8>, String) {
+        publish_body_with_extra(version, description, None)
     }
 
     async fn put_version(state: &Arc<AppState>, version: &str, description: &str) -> StatusCode {
@@ -629,6 +728,28 @@ mod tests {
         response.status()
     }
 
+    async fn put_version_with_extra(
+        state: &Arc<AppState>,
+        version: &str,
+        description: &str,
+        extra_field: &str,
+    ) -> StatusCode {
+        let (body, content_type) = publish_body_with_extra(version, description, Some(extra_field));
+        let app = super::super::router(state.clone(), 8 * 1024 * 1024);
+        app.oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/packages/acme/http-kit/versions/{version}"))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN_PLAINTEXT}"))
+                .header(header::CONTENT_TYPE, content_type)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    }
+
     async fn description_of(db: &DatabaseConnection, pkg_id: Uuid) -> Option<String> {
         package::Entity::find_by_id(pkg_id)
             .one(db)
@@ -636,6 +757,32 @@ mod tests {
             .unwrap()
             .unwrap()
             .description
+    }
+
+    #[test]
+    fn supplied_commit_must_match_the_verified_tag_commit() {
+        let lower = "0123456789abcdef0123456789abcdef01234567";
+        let upper = lower.to_ascii_uppercase();
+        validate_verified_vcs_commit(Some(&upper), Some(lower)).unwrap();
+        validate_verified_vcs_commit(None, Some(lower)).unwrap();
+
+        let mismatch = validate_verified_vcs_commit(
+            Some("1123456789abcdef0123456789abcdef01234567"),
+            Some(lower),
+        )
+        .unwrap_err();
+        assert_eq!(mismatch.code, "vcs_commit_mismatch");
+
+        let unresolved = validate_verified_vcs_commit(Some(lower), None).unwrap_err();
+        assert_eq!(unresolved.code, "vcs_commit_mismatch");
+
+        let noncanonical = validate_verified_vcs_commit(Some("not-a-commit"), Some(lower))
+            .expect_err("non-hex commit claims must fail closed");
+        assert_eq!(noncanonical.code, "vcs_commit_mismatch");
+
+        let abbreviated = validate_verified_vcs_commit(Some("0123456789abcdef"), Some(lower))
+            .expect_err("abbreviated commit claims must fail closed");
+        assert_eq!(abbreviated.code, "vcs_commit_mismatch");
     }
 
     /// M1/M2: a duplicate-version publish is rejected with 409 and does NOT
@@ -677,6 +824,33 @@ mod tests {
             .await
             .unwrap();
         assert!(inserted.is_some(), "new version row must be committed");
+    }
+
+    #[tokio::test]
+    async fn publish_rejects_duplicate_and_unknown_multipart_fields() {
+        for field in [PUBLISH_META_FIELD, PUBLISH_ARTIFACT_FIELD, "surprise"] {
+            let db = test_db().await;
+            let (_org, pkg_id) = seed(&db, "ORIGINAL").await;
+            let state = state_with(db).await;
+
+            let status = put_version_with_extra(&state, "1.1.0", "UPDATED", field).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "field `{field}`");
+            assert_eq!(
+                description_of(&state.db, pkg_id).await.as_deref(),
+                Some("ORIGINAL"),
+                "malformed multipart must not mutate package metadata"
+            );
+            let inserted = version::Entity::find()
+                .filter(version::Column::PackageId.eq(pkg_id))
+                .filter(version::Column::Version.eq("1.1.0"))
+                .one(&state.db)
+                .await
+                .unwrap();
+            assert!(
+                inserted.is_none(),
+                "malformed multipart field `{field}` must not publish a version"
+            );
+        }
     }
 
     /// DEN-660 / `committed_artifact_is_available`: a metadata transaction can

@@ -2,7 +2,7 @@
 # supplies side-by-side, commit-verified cross-repository sources:
 #
 #   docker build -f zed-api-server.rs/Dockerfile \
-#     --build-arg ZED_INTERFACES_REVISION=7d31f80dd8a310f218931165a3ad636a2f32b932 \
+#     --build-arg ZED_INTERFACES_REVISION=4b87e425b04777b0ee413971dc1df805d24f295f \
 #     --build-arg ZED_LIB_CORE_REVISION=c3d486a1519381276fbec02aa25247f542924443 \
 #     -t ghcr.io/zed-pkg/zed-api-server:dev .
 #
