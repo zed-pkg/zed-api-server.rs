@@ -1,0 +1,51 @@
+name: certify server-side binary upload verification
+
+on:
+  push:
+    branches:
+      - agent/verify-binary-uploads
+
+permissions:
+  contents: write
+
+concurrency:
+  group: certify-binary-uploads-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  certify:
+    if: ${{ !contains(github.event.head_commit.message, '[binary-upload-verified]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: agent/verify-binary-uploads
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          components: rustfmt, clippy
+      - name: Integrate the binary verifier contract
+        env:
+          INTERFACES_REV: 5fa652f6c8aaef5228b34b24bb8c5a4a07b415ca
+          OLD_INTERFACES_REV: 30d739167036f54b7919c5776c453123f206ca3c
+        run: |
+          set -euo pipefail
+          python3 scripts/agent_integrate_binary_upload_verifier.py
+          cargo update -p zed-interfaces --precise "$INTERFACES_REV"
+          cargo fmt --all
+      - name: Test the complete workspace
+        run: cargo test --workspace --all-targets --locked
+      - name: Deny all warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Persist certified non-workflow changes
+        run: |
+          set -euo pipefail
+          git restore --source=HEAD --staged --worktree .github/workflows
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Cargo.toml Cargo.lock src
+          git diff --cached --quiet && exit 0
+          git commit -m 'feat: verify binary ZIP uploads before publication [binary-upload-verified]'
+          git push origin HEAD:agent/verify-binary-uploads
