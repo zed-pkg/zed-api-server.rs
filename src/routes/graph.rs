@@ -1773,6 +1773,76 @@ url = "https://github.com/acme/http-kit"
             .unwrap()
     }
 
+    struct LiveResponse {
+        status: u16,
+        headers: std::collections::BTreeMap<String, String>,
+        body: Vec<u8>,
+    }
+
+    impl LiveResponse {
+        fn header(&self, name: &str) -> &str {
+            self.headers
+                .get(&name.to_ascii_lowercase())
+                .unwrap_or_else(|| panic!("live response omitted {name}"))
+        }
+    }
+
+    /// Exercise Hyper's real HTTP/1 encoder. In-memory `oneshot` responses do
+    /// not expose protocol-layer header rewriting.
+    async fn live_request(
+        app: &axum::Router,
+        method: &str,
+        uri: &str,
+        request_headers: &[(&str, &str)],
+    ) -> LiveResponse {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = app.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let mut wire_request =
+            format!("{method} {uri} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n");
+        for (name, value) in request_headers {
+            wire_request.push_str(name);
+            wire_request.push_str(": ");
+            wire_request.push_str(value);
+            wire_request.push_str("\r\n");
+        }
+        wire_request.push_str("\r\n");
+        stream.write_all(wire_request.as_bytes()).await.unwrap();
+
+        let mut wire_response = Vec::new();
+        stream.read_to_end(&mut wire_response).await.unwrap();
+        server.abort();
+
+        let header_end = wire_response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4)
+            .expect("live response has an HTTP header terminator");
+        let head = std::str::from_utf8(&wire_response[..header_end]).unwrap();
+        let mut lines = head.trim_end().split("\r\n");
+        let status = lines
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u16>().ok())
+            .expect("live response has a numeric status");
+        let headers = lines
+            .map(|line| line.split_once(':').expect("live response header is valid"))
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_string()))
+            .collect();
+        LiveResponse {
+            status,
+            headers,
+            body: wire_response[header_end..].to_vec(),
+        }
+    }
+
     const DECLARED_URI: &str =
         "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph?view=declared";
 
@@ -1942,6 +2012,51 @@ url = "https://github.com/acme/http-kit"
                     "304 {name} for {uri}"
                 );
             }
+        }
+    }
+
+    /// Hyper sees a deliberately unknown-size body on 304 so it retains the
+    /// selected representation's length header while transmitting no bytes.
+    #[tokio::test]
+    async fn live_http_retains_selected_length_for_canonical_and_extended_304() {
+        let app = seeded_app().await;
+        let cases = [
+            (
+                "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph?view=declared&format=json",
+                "true",
+            ),
+            (
+                "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph/export/csv",
+                "false",
+            ),
+        ];
+
+        for (uri, authoritative) in cases {
+            let get = live_request(&app, "GET", uri, &[]).await;
+            assert_eq!(get.status, 200, "GET {uri}");
+            let selected_length = get.header("content-length").to_string();
+            assert_eq!(selected_length.parse::<usize>().unwrap(), get.body.len());
+            assert_eq!(
+                get.header(DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER),
+                authoritative
+            );
+
+            let head = live_request(&app, "HEAD", uri, &[]).await;
+            assert_eq!(head.status, 200, "HEAD {uri}");
+            assert!(head.body.is_empty(), "HEAD body for {uri}");
+            assert_eq!(head.header("content-length"), selected_length);
+            assert_eq!(head.header("etag"), get.header("etag"));
+
+            let not_modified =
+                live_request(&app, "GET", uri, &[("If-None-Match", get.header("etag"))]).await;
+            assert_eq!(not_modified.status, 304, "conditional GET {uri}");
+            assert!(not_modified.body.is_empty(), "304 body for {uri}");
+            assert_eq!(not_modified.header("content-length"), selected_length);
+            assert_eq!(not_modified.header("etag"), get.header("etag"));
+            assert_eq!(
+                not_modified.header(DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER),
+                authoritative
+            );
         }
     }
 

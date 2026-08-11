@@ -42,7 +42,7 @@ services:
       context: ..
       dockerfile: zed-api-server.rs/Dockerfile
       args:
-        ZED_INTERFACES_REVISION: 4d40ae96f5ce6240356ad4fa5e455d0310b1c97d
+        ZED_INTERFACES_REVISION: 15577e17a820c3b2b1a39ee178d4645185309a05
         ZED_LIB_CORE_REVISION: 38ef3f50638614a14170d5c677173e040e916a6d
     depends_on:
       postgres:

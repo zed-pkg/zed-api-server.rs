@@ -15,7 +15,7 @@ members = [".", "migration"]
 # the additive export route/media contract reviewed in zed-interfaces#63. The
 # repository root remains a Cargo workspace, so git consumers resolve its Rust
 # package from the polyglot `src/rust` member without a path override.
-zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "4d40ae96f5ce6240356ad4fa5e455d0310b1c97d" }
+zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "15577e17a820c3b2b1a39ee178d4645185309a05" }
 # Canonical account, registry projection, and migration data plane. The API is
 # the only long-running service that opts into write symbols; the discrete
 # `migrate` command is the only runtime path that invokes DDL.
