@@ -35,11 +35,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # The image tag names the API commit. Pin the sibling path dependency too so
+  # The image tag names the API commit. Pin every cross-repository source too so
   # that tag always identifies the complete source graph used by the build.
-  # Keep this synchronized with the Rust CI pin; source-graph drift previously
+  # Keep these synchronized with the Rust CI pins; source-graph drift previously
   # made the debug test build pass while the release container could not compile.
-  ZED_INTERFACES_SHA: 5fa652f6c8aaef5228b34b24bb8c5a4a07b415ca
+  ZED_INTERFACES_SHA: 4b87e425b04777b0ee413971dc1df805d24f295f
+  ZED_LIB_CORE_SHA: fc4f2677a2315d522913bef05a1c0d23f8208960
 
 jobs:
   image:
@@ -50,7 +51,7 @@ jobs:
         # Migration m20260726_000007_embeddings_and_tags creates the vector
         # extension. A plain postgres image cannot satisfy that production
         # schema, so test the container against the exact bootstrap capability.
-        image: pgvector/pgvector:0.8.5-pg16
+        image: pgvector/pgvector:0.8.6-pg16-bookworm@sha256:84a355869251af1a3379cfc9fa7b4dbf962c03f642a4bb7b339a203925071c43
         env:
           POSTGRES_USER: zed
           POSTGRES_DB: zed
@@ -77,13 +78,56 @@ jobs:
           path: zed-interfaces
           persist-credentials: false
 
+      - name: Checkout pinned canonical ORM
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: zed-pkg/zed-lib-core
+          ref: ${{ env.ZED_LIB_CORE_SHA }}
+          path: zed-lib-core
+          persist-credentials: false
+
       - name: Verify the complete source graph
         shell: bash
         run: |
           set -euo pipefail
           test "$(git -C zed-api-server.rs rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(git -C zed-interfaces rev-parse HEAD)" = "$ZED_INTERFACES_SHA"
+          test "$(git -C zed-lib-core rev-parse HEAD)" = "$ZED_LIB_CORE_SHA"
           test "$(sed -n 's/^  ZED_INTERFACES_SHA: //p' zed-api-server.rs/.github/workflows/ci.yml)" = "$ZED_INTERFACES_SHA"
+          test "$(sed -n 's/^  ZED_LIB_CORE_SHA: //p' zed-api-server.rs/.github/workflows/ci.yml)" = "$ZED_LIB_CORE_SHA"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import tomllib
+
+          root = Path("zed-api-server.rs")
+          manifest = tomllib.loads((root / "Cargo.toml").read_text())
+          lock = tomllib.loads((root / "Cargo.lock").read_text())
+          pins = {
+              "zed-interfaces": (
+                  "https://github.com/zed-pkg/zed-interfaces.git",
+                  os.environ["ZED_INTERFACES_SHA"],
+              ),
+              "zed-orm-core": (
+                  "https://github.com/zed-pkg/zed-lib-core.git",
+                  os.environ["ZED_LIB_CORE_SHA"],
+              ),
+          }
+
+          for package, (repository, revision) in pins.items():
+              spec = manifest["dependencies"][package]
+              assert "path" not in spec, spec
+              assert spec["git"] == repository, spec
+              assert spec["rev"] == revision, spec
+              expected_source = f"git+{repository}?rev={revision}#{revision}"
+              matches = [
+                  entry for entry in lock["package"]
+                  if entry["name"] == package and entry.get("source") == expected_source
+              ]
+              assert len(matches) == 1, (
+                  f"Cargo.lock does not uniquely pin {package} to {expected_source}"
+              )
+          PY
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -106,6 +150,7 @@ jobs:
           build-args: |
             ZED_API_REVISION=${{ github.sha }}
             ZED_INTERFACES_REVISION=${{ env.ZED_INTERFACES_SHA }}
+            ZED_LIB_CORE_REVISION=${{ env.ZED_LIB_CORE_SHA }}
           tags: |
             ghcr.io/zed-pkg/zed-api-server:${{ github.sha }}
             ghcr.io/zed-pkg/zed-api-server:main
@@ -119,6 +164,7 @@ jobs:
           image="ghcr.io/zed-pkg/zed-api-server:${GITHUB_SHA}"
           test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
           test "$(docker image inspect "$image" --format '{{ index .Config.Labels "io.zpkg.interfaces.revision" }}')" = "$ZED_INTERFACES_SHA"
+          test "$(docker image inspect "$image" --format '{{ index .Config.Labels "io.zpkg.lib-core.revision" }}')" = "$ZED_LIB_CORE_SHA"
 
       - name: Start the API image against Postgres and bounded process memory
         shell: bash
@@ -169,8 +215,8 @@ jobs:
           docker image inspect "ghcr.io/zed-pkg/zed-api-server:${GITHUB_SHA}" \
             > smoke-diagnostics/image-inspect.json 2>&1
           docker ps -a > smoke-diagnostics/docker-ps.txt 2>&1
-          printf 'api_revision=%s\ninterfaces_revision=%s\nstorage_backend=memory\n' \
-            "$GITHUB_SHA" "$ZED_INTERFACES_SHA" \
+          printf 'api_revision=%s\ninterfaces_revision=%s\nlib_core_revision=%s\nstorage_backend=memory\n' \
+            "$GITHUB_SHA" "$ZED_INTERFACES_SHA" "$ZED_LIB_CORE_SHA" \
             > smoke-diagnostics/source-revisions.txt
           sed -n '1,240p' smoke-diagnostics/container.log
 
@@ -199,8 +245,8 @@ jobs:
           }
 
           docker push ghcr.io/zed-pkg/zed-api-server:main 2>&1 | tee "$compatibility_log"
-          printf 'image=%s@%s\napi_revision=%s\ninterfaces_revision=%s\n' \
-            'ghcr.io/zed-pkg/zed-api-server' "$digest" "$GITHUB_SHA" "$ZED_INTERFACES_SHA" \
+          printf 'image=%s@%s\napi_revision=%s\ninterfaces_revision=%s\nlib_core_revision=%s\n' \
+            'ghcr.io/zed-pkg/zed-api-server' "$digest" "$GITHUB_SHA" "$ZED_INTERFACES_SHA" "$ZED_LIB_CORE_SHA" \
             > smoke-diagnostics/published-image.txt
 
       - name: Upload API smoke and provenance evidence

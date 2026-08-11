@@ -70,7 +70,16 @@ impl IntoResponse for ApiErr {
             code: self.code.to_string(),
             message: self.message,
         };
-        (self.status, Json(body)).into_response()
+        let mut response = (self.status, Json(body)).into_response();
+        // Error bodies can encode authorization outcomes and deliberately
+        // indistinguishable private-resource misses. They must never be stored
+        // by a shared cache, regardless of whether the successful resource is
+        // otherwise public and immutable.
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("private, no-store"),
+        );
+        response
     }
 }
 

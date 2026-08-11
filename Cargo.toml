@@ -11,14 +11,16 @@ members = [".", "migration"]
 
 [dependencies]
 # Keep every cross-repository boundary immutable and independently reviewable.
-# This revision includes the account/audit and dependency-graph contracts
-# already consumed by the service plus the audited, target-qualified binary
-# artifact v1 DTOs and portable path validation (zed-interfaces#64).
+# This revision includes the account/audit and dependency-graph contracts, the
+# additive graph export route/media contract (zed-interfaces#63), and the
+# target-qualified binary artifact v1 DTOs and portable path validation
+# (zed-interfaces#64). The repository root remains a Cargo workspace, so git
+# consumers resolve its Rust package without a path override.
 zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "4b87e425b04777b0ee413971dc1df805d24f295f" }
 # Canonical account, registry projection, and migration data plane. The API is
 # the only long-running service that opts into write symbols; the discrete
 # `migrate` command is the only runtime path that invokes DDL.
-zed-orm-core = { git = "https://github.com/zed-pkg/zed-lib-core.git", rev = "700f1f9578c6633a20693a5b1f52970ab845a740", features = ["read-write", "migrate"] }
+zed-orm-core = { git = "https://github.com/zed-pkg/zed-lib-core.git", rev = "fc4f2677a2315d522913bef05a1c0d23f8208960", features = ["read-write", "migrate"] }
 # The private shared-auth-clients repository cannot be cloned by this
 # repository's scoped GITHUB_TOKEN. `src/shared_auth.rs` implements the small,
 # reviewed exchange/introspection HTTP contract using the existing reqwest
