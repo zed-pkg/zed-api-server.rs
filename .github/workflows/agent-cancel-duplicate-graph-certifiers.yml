@@ -1,0 +1,34 @@
+name: keep newest graph metadata certifier
+
+on:
+  push:
+    branches:
+      - ci/graph-response-metadata-release
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel-older:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Cancel older queued or running certifiers
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 8
+          mapfile -t runs < <(
+            gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/agent-certify-graph-response-metadata.yml/runs" \
+              -f branch='ci/graph-response-metadata-release' \
+              -f per_page=30 \
+              --jq '.workflow_runs | sort_by(.created_at) | reverse | .[] | select(.status == "queued" or .status == "in_progress") | .id'
+          )
+          [[ "${#runs[@]}" -le 1 ]] && exit 0
+          for run_id in "${runs[@]:1}"; do
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel" || true
+          done
