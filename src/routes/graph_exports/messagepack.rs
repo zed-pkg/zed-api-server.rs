@@ -7,9 +7,8 @@ pub(super) fn encode(document: &DependencyGraphDocument) -> ApiResult<Vec<u8>> {
     let canonical = document
         .canonical_document_bytes()
         .map_err(|error| ApiErr::from(anyhow::anyhow!("graph canonicalization failed: {error}")))?;
-    let value: Value = serde_json::from_slice(&canonical).map_err(|error| {
-        ApiErr::from(anyhow::anyhow!("reparse canonical graph JSON: {error}"))
-    })?;
+    let value: Value = serde_json::from_slice(&canonical)
+        .map_err(|error| ApiErr::from(anyhow::anyhow!("reparse canonical graph JSON: {error}")))?;
     let mut output = Vec::with_capacity(canonical.len());
     messagepack_value(&value, &mut output)?;
     Ok(output)
@@ -134,9 +133,8 @@ fn messagepack_map_len(length: usize, output: &mut Vec<u8>) -> ApiResult<()> {
             output.extend_from_slice(&(length as u16).to_be_bytes());
         }
         _ => {
-            let length = u32::try_from(length).map_err(|_| {
-                ApiErr::from(anyhow::anyhow!("MessagePack map exceeds u32 length"))
-            })?;
+            let length = u32::try_from(length)
+                .map_err(|_| ApiErr::from(anyhow::anyhow!("MessagePack map exceeds u32 length")))?;
             output.push(0xdf);
             output.extend_from_slice(&length.to_be_bytes());
         }
