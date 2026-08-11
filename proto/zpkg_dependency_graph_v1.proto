@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package zpkg.dependency_graph.v1;
+
+// Typed binary projection of zpkg/dependency-graph/v1.
+// graph_digest is the semantic SHA-256 digest from the canonical graph contract;
+// it is not the HTTP ETag of these encoded bytes.
+message DependencyGraphDocument {
+  string schema = 1;
+  string graph_digest = 2;
+
+  oneof graph {
+    DeclaredGraph declared = 10;
+    ResolvedGraph resolved = 11;
+  }
+}
+
+message PackageVersionIdentity {
+  string registry_id = 1;
+  string org = 2;
+  string name = 3;
+  string version = 4;
+}
+
+enum DependencyKind {
+  DEPENDENCY_KIND_UNSPECIFIED = 0;
+  DEPENDENCY_KIND_RUNTIME = 1;
+  DEPENDENCY_KIND_BUILD = 2;
+  DEPENDENCY_KIND_DEVELOPMENT = 3;
+  DEPENDENCY_KIND_PEER = 4;
+  DEPENDENCY_KIND_TOOLING = 5;
+}
+
+message DeclaredDependency {
+  string registry_id = 1;
+  string org = 2;
+  string name = 3;
+  string requirement = 4;
+  DependencyKind kind = 5;
+  bool optional = 6;
+  bool default_features = 7;
+  repeated string features = 8;
+  optional string target = 9;
+}
+
+message DeclaredGraph {
+  PackageVersionIdentity package = 1;
+  repeated DeclaredDependency dependencies = 2;
+}
+
+enum GraphCompleteness {
+  GRAPH_COMPLETENESS_UNSPECIFIED = 0;
+  GRAPH_COMPLETENESS_COMPLETE = 1;
+  GRAPH_COMPLETENESS_PROJECTED = 2;
+}
+
+message ResolvedDependencyNode {
+  PackageVersionIdentity id = 1;
+  optional string artifact_digest = 2;
+  repeated string features = 3;
+}
+
+message ResolvedDependencyEdge {
+  PackageVersionIdentity from = 1;
+  PackageVersionIdentity to = 2;
+  DependencyKind kind = 3;
+  optional string requirement = 4;
+  optional string target = 5;
+  bool optional = 6;
+  repeated string features = 7;
+}
+
+message RegistrySnapshot {
+  string registry_id = 1;
+  string checkpoint_digest = 2;
+}
+
+message ResolutionProvenance {
+  string resolver_version = 1;
+  string target = 2;
+  repeated string enabled_features = 3;
+  repeated RegistrySnapshot registry_snapshots = 4;
+  string lock_digest = 5;
+}
+
+message DependencyGraphProjection {
+  optional string target = 1;
+  repeated string features = 2;
+  repeated DependencyKind kinds = 3;
+  optional uint32 max_depth = 4;
+}
+
+message ResolvedGraph {
+  GraphCompleteness completeness = 1;
+  repeated PackageVersionIdentity roots = 2;
+  repeated ResolvedDependencyNode nodes = 3;
+  repeated ResolvedDependencyEdge edges = 4;
+  ResolutionProvenance provenance = 5;
+  optional string parent_graph_digest = 6;
+  optional DependencyGraphProjection projection = 7;
+}
