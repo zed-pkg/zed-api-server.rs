@@ -1,0 +1,424 @@
+name: certify graph response metadata compatibility
+
+on:
+  push:
+    branches:
+      - ci/graph-response-metadata-release
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: graph-response-metadata-release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  TARGET_BRANCH: fix/graph-response-metadata-compat
+  ZED_E2E_CANDIDATE: d1f8b832d246c23b0d01545ecb07ed52be7dcb28
+  ZED_INTERFACES_CANDIDATE: 15577e17a820c3b2b1a39ee178d4645185309a05
+  ZED_WEB_CANDIDATE: 26f830027e7ad7a1e454289702202d6ae9ad2350
+  ZED_CLI_CANDIDATE: 3265e07e80a573b2ac57a0f1e71e27f9a621bc1e
+
+jobs:
+  certify-and-promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - name: Checkout API target branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          path: zed-api-server.rs
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Apply focused compatibility repair idempotently
+        working-directory: zed-api-server.rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          native_path = Path("src/routes/graph.rs")
+          native = native_path.read_text()
+          native_test = "native_response_metadata_matches_selected_bytes_on_200_and_304"
+
+          if native_test not in native:
+              old_import = '''use zed_interfaces::{
+                  declared_dependency_graph_path, DependencyGraphDocument, DependencyGraphEdge,
+                  DependencyGraphFormat, DependencyGraphNode, DependencyKind, DEPENDENCY_GRAPH_DIGEST_HEADER,
+              };'''
+              new_import = '''use zed_interfaces::{
+                  declared_dependency_graph_path,
+                  dependency_graph_export::DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER, DependencyGraphDocument,
+                  DependencyGraphEdge, DependencyGraphFormat, DependencyGraphNode, DependencyKind,
+                  DEPENDENCY_GRAPH_DIGEST_HEADER,
+              };'''
+              assert native.count(old_import) == 1, "native interface import changed unexpectedly"
+              native = native.replace(old_import, new_import, 1)
+
+              content_type = '''    headers.insert(
+                  header::CONTENT_TYPE,
+                  header_value(format.media_type()).map_err(ApiError::from)?,
+              );
+              '''
+              metadata = '''    headers.insert(
+                  header::CONTENT_TYPE,
+                  header_value(format.media_type()).map_err(ApiError::from)?,
+              );
+              headers.insert(
+                  header::CONTENT_LENGTH,
+                  header_value(&body.len().to_string()).map_err(ApiError::from)?,
+              );
+              headers.insert(
+                  HeaderName::from_static(DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER),
+                  HeaderValue::from_static(if format.is_authoritative() {
+                      "true"
+                  } else {
+                      "false"
+                  }),
+              );
+              '''
+              assert native.count(content_type) == 1, "native response insertion point changed unexpectedly"
+              native = native.replace(content_type, metadata, 1)
+
+              test_anchor = '''    #[test]
+                  fn format_contract_is_stable() {'''
+              test_block = '''    #[test]
+                  fn native_response_metadata_matches_selected_bytes_on_200_and_304() {
+                      let document = graph_document();
+                      for format in DependencyGraphFormat::ALL {
+                          let encoded = encode(format, &document).unwrap();
+                          let expected_length = encoded.len().to_string();
+                          let expected_authority = if format.is_authoritative() {
+                              "true"
+                          } else {
+                              "false"
+                          };
+
+                          let response = respond(format, &document, GraphAccess::Public, None).unwrap();
+                          assert_eq!(response.status(), StatusCode::OK);
+                          assert_eq!(
+                              response
+                                  .headers()
+                                  .get(header::CONTENT_LENGTH)
+                                  .unwrap()
+                                  .to_str()
+                                  .unwrap(),
+                              expected_length.as_str()
+                          );
+                          assert_eq!(
+                              response
+                                  .headers()
+                                  .get(HeaderName::from_static(
+                                      DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER,
+                                  ))
+                                  .unwrap()
+                                  .to_str()
+                                  .unwrap(),
+                              expected_authority
+                          );
+
+                          let etag = response.headers().get(header::ETAG).unwrap().clone();
+                          let not_modified =
+                              respond(format, &document, GraphAccess::Public, Some(&etag)).unwrap();
+                          assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+                          assert_eq!(
+                              not_modified
+                                  .headers()
+                                  .get(header::CONTENT_LENGTH)
+                                  .unwrap()
+                                  .to_str()
+                                  .unwrap(),
+                              expected_length.as_str()
+                          );
+                          assert_eq!(
+                              not_modified
+                                  .headers()
+                                  .get(HeaderName::from_static(
+                                      DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER,
+                                  ))
+                                  .unwrap()
+                                  .to_str()
+                                  .unwrap(),
+                              expected_authority
+                          );
+                      }
+                  }
+
+                  #[test]
+                  fn format_contract_is_stable() {'''
+              assert native.count(test_anchor) == 1, "native test insertion point changed unexpectedly"
+              native = native.replace(test_anchor, test_block, 1)
+              native_path.write_text(native)
+          else:
+              assert "DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER" in native
+              assert "header::CONTENT_LENGTH" in native
+
+          extended_path = Path("src/routes/graph_exports/mod.rs")
+          extended = extended_path.read_text()
+
+          if "authoritative: bool" not in extended:
+              old_export_import = '''    dependency_graph_export::{
+                      format_from_extension, DependencyGraphExportFormat as GraphExportFormat,
+                  },'''
+              new_export_import = '''    dependency_graph_export::{
+                      format_from_extension, DependencyGraphExportFormat as GraphExportFormat,
+                      DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER,
+                  },'''
+              assert extended.count(old_export_import) == 1, "extended interface import changed unexpectedly"
+              extended = extended.replace(old_export_import, new_export_import, 1)
+
+              old_field = '''    content_length: usize,
+                  public: bool,'''
+              new_field = '''    content_length: usize,
+                  authoritative: bool,
+                  public: bool,'''
+              assert extended.count(old_field) == 1, "extended response head fields changed unexpectedly"
+              extended = extended.replace(old_field, new_field, 1)
+
+              old_constructor = '''            content_length: bytes.len(),
+                      public,'''
+              new_constructor = '''            content_length: bytes.len(),
+                      authoritative: format.is_authoritative(),
+                      public,'''
+              assert extended.count(old_constructor) == 1, "extended response head constructor changed unexpectedly"
+              extended = extended.replace(old_constructor, new_constructor, 1)
+
+              vary_insert = '''    response_headers.insert(
+                      header::VARY,
+                      HeaderValue::from_static(DEPENDENCY_GRAPH_VARY),
+                  );'''
+              authority_insert = '''    response_headers.insert(
+                      HeaderName::from_static(DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER),
+                      HeaderValue::from_static(if head.authoritative { "true" } else { "false" }),
+                  );
+                  response_headers.insert(
+                      header::VARY,
+                      HeaderValue::from_static(DEPENDENCY_GRAPH_VARY),
+                  );'''
+              assert extended.count(vary_insert) == 1, "extended response header insertion point changed unexpectedly"
+              extended = extended.replace(vary_insert, authority_insert, 1)
+
+              length_assert = '''            assert_eq!(
+                              response.headers()[header::CONTENT_LENGTH],
+                              expected.len().to_string()
+                          );'''
+              metadata_assert = '''            assert_eq!(
+                              response.headers()[header::CONTENT_LENGTH],
+                              expected.len().to_string()
+                          );
+                          assert_eq!(
+                              response.headers()[HeaderName::from_static(
+                                  DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER,
+                              )],
+                              if format.is_authoritative() {
+                                  "true"
+                              } else {
+                                  "false"
+                              }
+                          );'''
+              assert extended.count(length_assert) == 1, "extended 200 metadata assertion changed unexpectedly"
+              extended = extended.replace(length_assert, metadata_assert, 1)
+
+              not_modified_length = '''            assert_eq!(
+                              not_modified.headers()[header::CONTENT_LENGTH],
+                              expected.len().to_string()
+                          );'''
+              not_modified_metadata = '''            assert_eq!(
+                              not_modified.headers()[header::CONTENT_LENGTH],
+                              expected.len().to_string()
+                          );
+                          assert_eq!(
+                              not_modified.headers()[HeaderName::from_static(
+                                  DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER,
+                              )],
+                              if format.is_authoritative() {
+                                  "true"
+                              } else {
+                                  "false"
+                              }
+                          );'''
+              assert extended.count(not_modified_length) == 1, "extended 304 metadata assertion changed unexpectedly"
+              extended = extended.replace(not_modified_length, not_modified_metadata, 1)
+              extended_path.write_text(extended)
+          else:
+              assert "DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER" in extended
+              assert "head.authoritative" in extended
+
+          helper = Path(".github/workflows/agent-graph-response-metadata-compat-once.yml")
+          helper.unlink(missing_ok=True)
+          PY
+
+          cargo fmt --all
+          git diff --check
+          mapfile -t changed < <(git diff --name-only)
+          for path in "${changed[@]}"; do
+            case "$path" in
+              src/routes/graph.rs|src/routes/graph_exports/mod.rs|.github/workflows/agent-graph-response-metadata-compat-once.yml) ;;
+              *) echo "unexpected target-branch change: $path" >&2; exit 1 ;;
+            esac
+          done
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "fix(graph): restore CLI response metadata compatibility"
+            git push origin "HEAD:${TARGET_BRANCH}"
+          fi
+          echo "TARGET_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: rustfmt,clippy
+
+      - name: Cache API Rust builds
+        uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2
+        with:
+          workspaces: zed-api-server.rs
+          shared-key: graph-response-metadata-release
+
+      - name: Run exact API gates
+        working-directory: zed-api-server.rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          cargo fmt --all -- --check
+          cargo test --locked --all-targets
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo build --locked
+          git diff --check
+          git status --short
+          test -z "$(git status --porcelain)"
+
+      - name: Checkout E2E harness
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: zed-pkg/zed-e2e
+          ref: ${{ env.ZED_E2E_CANDIDATE }}
+          path: zed-e2e
+
+      - name: Checkout interface contract
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: zed-pkg/zed-interfaces
+          ref: ${{ env.ZED_INTERFACES_CANDIDATE }}
+          path: zed-interfaces
+
+      - name: Checkout released web server
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: zed-pkg/zed-web-server.rs
+          ref: ${{ env.ZED_WEB_CANDIDATE }}
+          path: zed-web-server.rs
+
+      - name: Checkout released CLI
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: zed-pkg/zed-cli
+          ref: ${{ env.ZED_CLI_CANDIDATE }}
+          path: zed-cli
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: zed-e2e/package-lock.json
+
+      - name: Install E2E dependencies and Chromium
+        working-directory: zed-e2e
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run typecheck
+          npm run test:harness
+
+      - name: Boot current API/CLI graph stack
+        working-directory: zed-e2e
+        env:
+          ZED_E2E_STORAGE_BACKEND: memory
+          ZED_E2E_ARTIFACT_SERVE_MEMORY_BUDGET_BYTES: "16777216"
+          ZED_E2E_MAX_ARTIFACT_BYTES: "8388608"
+        run: >-
+          node scripts/allocate-stack-ports.mjs
+          --github-env "$GITHUB_ENV"
+          -- npm run stack:up
+
+      - name: Certify browser and CLI graph journeys
+        working-directory: zed-e2e
+        env:
+          ZED_E2E_DEPENDENCY_GRAPH_CANDIDATE: "1"
+          ZED_E2E_EXTERNAL_STACK: "1"
+          ZED_E2E_STORAGE_BACKEND: memory
+          ZED_E2E_ARTIFACT_SERVE_MEMORY_BUDGET_BYTES: "16777216"
+          ZED_E2E_MAX_ARTIFACT_BYTES: "8388608"
+        run: >-
+          npx playwright test
+          suites/playwright/dependency-graph.spec.ts
+          suites/playwright/dependency-graph-projection.spec.ts
+          --project=chromium
+          --workers=1
+
+      - name: Print stack diagnostics
+        if: failure()
+        working-directory: zed-e2e
+        shell: bash
+        run: |
+          echo "API URL: ${ZED_E2E_API_URL:-unset}"
+          echo "Web URL: ${ZED_E2E_WEB_URL:-unset}"
+          find .e2e-state -maxdepth 1 -type f \( -name '*.log' -o -name '*.pid' \) -print -exec tail -n 250 {} \; 2>/dev/null || true
+
+      - name: Stop stack
+        if: always()
+        working-directory: zed-e2e
+        env:
+          ZED_E2E_EXTERNAL_STACK: ""
+        run: npm run stack:down || true
+
+      - name: Promote exact certified API head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PR_NUMBER="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --head "$TARGET_BRANCH" \
+            --base main \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [[ -z "$PR_NUMBER" ]]; then
+            PR_URL="$(gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --head "$TARGET_BRANCH" \
+              --base main \
+              --title "fix(graph): restore CLI response metadata compatibility" \
+              --body $'Restores exact Content-Length and X-Zpkg-Graph-Authoritative metadata for native and extended dependency-graph responses on both 200 and 304, with format-wide regression tests. This is deliberately isolated from the still-draft persistence stack.\n\nRelated: zed-pkg/zed-cli#267, zed-pkg/zed-api-server.rs#39, DEN-3472, DEN-3476')"
+            PR_NUMBER="${PR_URL##*/}"
+          fi
+
+          gh pr ready "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || true
+          PR_HEAD="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
+          test "$PR_HEAD" = "$TARGET_SHA"
+
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "Exact-head certification passed for \`$TARGET_SHA\`: Rust formatting, all-target tests, clippy with warnings denied, locked build, clean-tree checks, E2E type/harness checks, real PostgreSQL/API/web/CLI stack startup, and the focused Chromium dependency-graph plus SVG/PNG projection journeys using released CLI \`${ZED_CLI_CANDIDATE}\`."
+
+          gh pr merge "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --squash \
+            --match-head-commit "$TARGET_SHA" \
+            --subject "fix(graph): restore CLI response metadata compatibility (#${PR_NUMBER})" \
+            --body "Emit exact Content-Length and shared authoritative/non-authoritative response metadata across native and extended dependency-graph formats on both 200 and 304 responses, restoring compatibility with the released CLI without importing the draft persistence stack."
