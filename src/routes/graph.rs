@@ -1447,11 +1447,14 @@ url = "https://github.com/acme/http-kit"
         })
         .await
         .unwrap();
+        let artifact = artifact_with_manifest();
+        let artifact_sha256 = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&artifact));
         store
-            .put(
+            .put_verified(
                 "artifacts/graph.tar.gz",
-                artifact_with_manifest().into(),
+                artifact.into(),
                 "application/gzip",
+                &artifact_sha256,
             )
             .await
             .unwrap();
