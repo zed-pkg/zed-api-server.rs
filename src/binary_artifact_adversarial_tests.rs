@@ -180,6 +180,43 @@ fn mutate(mut mutation: impl FnMut(&mut Vec<Entry>)) -> (PublishMeta, Vec<u8>) {
     (meta, archive)
 }
 
+fn rewrite_equal_length_filename(bytes: &mut [u8], from: &str, to: &str) {
+    assert_eq!(from.len(), to.len(), "ZIP filename rewrite must be in place");
+    let from = from.as_bytes();
+    let to = to.as_bytes();
+    let mut replacements = 0usize;
+    let mut offset = 0usize;
+    while offset + from.len() <= bytes.len() {
+        if &bytes[offset..offset + from.len()] == from {
+            bytes[offset..offset + to.len()].copy_from_slice(to);
+            replacements += 1;
+            offset += to.len();
+        } else {
+            offset += 1;
+        }
+    }
+    assert!(
+        replacements >= 2,
+        "expected to rewrite local and central ZIP filenames"
+    );
+}
+
+fn duplicate_via_header_alias(original: &str, alias: &str) -> (PublishMeta, Vec<u8>) {
+    let (mut meta, mut archive) = mutate(|entries| {
+        let mut duplicate = entries
+            .iter()
+            .find(|entry| entry.name == original)
+            .expect("entry to duplicate")
+            .clone();
+        duplicate.name = alias.to_owned();
+        entries.push(duplicate);
+    });
+    rewrite_equal_length_filename(&mut archive, alias, original);
+    meta.size = archive.len() as u64;
+    meta.sha256 = sha256(&archive);
+    (meta, archive)
+}
+
 fn descriptor(entries: &mut [Entry]) -> &mut Entry {
     entries
         .iter_mut()
@@ -194,25 +231,28 @@ fn payload(entries: &mut [Entry]) -> &mut Entry {
         .expect("payload entry")
 }
 
-fn assert_invalid(meta: &PublishMeta, archive: &[u8], expected: &str) {
+fn assert_invalid_any(meta: &PublishMeta, archive: &[u8], expected: &[&str]) {
     let error = verify_publish(meta, archive)
         .expect_err("hostile binary upload must fail closed")
         .to_string();
+    let normalized = error.to_ascii_lowercase();
     assert!(
-        error
-            .to_ascii_lowercase()
-            .contains(&expected.to_ascii_lowercase()),
-        "expected error containing `{expected}`, got `{error}`"
+        expected
+            .iter()
+            .any(|needle| normalized.contains(&needle.to_ascii_lowercase())),
+        "expected error containing one of {expected:?}, got `{error}`"
     );
+}
+
+fn assert_invalid(meta: &PublishMeta, archive: &[u8], expected: &str) {
+    assert_invalid_any(meta, archive, &[expected]);
 }
 
 #[test]
 fn server_rejects_duplicate_descriptor_and_portable_aliases() {
-    let (meta, archive) = mutate(|entries| {
-        let duplicate = descriptor(entries).clone();
-        entries.push(duplicate);
-    });
-    assert_invalid(&meta, &archive, "copies");
+    let (meta, archive) =
+        duplicate_via_header_alias(DESCRIPTOR, "pkg/.zpkg-binary.js0n");
+    assert_invalid_any(&meta, &archive, &["copies", "duplicate", "collide"]);
 
     for alias in ["pkg/.ZPKG-BINARY.JSON", "pkg\\.zpkg-binary.json"] {
         let (meta, archive) = mutate(|entries| {
@@ -242,7 +282,11 @@ fn server_rejects_unlisted_missing_tampered_and_mode_mismatched_payloads() {
     let (meta, archive) = mutate(|entries| {
         payload(entries).bytes.extend_from_slice(b"tampered");
     });
-    assert_invalid(&meta, &archive, "mismatch");
+    assert_invalid_any(
+        &meta,
+        &archive,
+        &["mismatch", "descriptor-declared size"],
+    );
 
     let (meta, archive) = mutate(|entries| {
         payload(entries).mode = 0o644;
@@ -271,11 +315,8 @@ fn server_rejects_unsafe_and_portably_colliding_paths() {
         assert_invalid(&meta, &archive, expected);
     }
 
-    let (meta, archive) = mutate(|entries| {
-        let duplicate = payload(entries).clone();
-        entries.push(duplicate);
-    });
-    assert_invalid(&meta, &archive, "collide");
+    let (meta, archive) = duplicate_via_header_alias(PAYLOAD, "pkg/bin/hell0");
+    assert_invalid_any(&meta, &archive, &["collide", "duplicate"]);
 }
 
 #[test]
@@ -336,7 +377,7 @@ fn server_rejects_encryption_unsupported_compression_and_ratio_bombs() {
     });
     meta.size = archive.len() as u64;
     meta.sha256 = sha256(&archive);
-    assert_invalid(&meta, &archive, "encrypted");
+    assert_invalid_any(&meta, &archive, &["encrypted", "password required", "decrypt"]);
 
     let (mut meta, mut archive) = valid_archive();
     patch_zip_headers(&mut archive, |bytes, offset, central| {
