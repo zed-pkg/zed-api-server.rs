@@ -16,8 +16,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  ZED_INTERFACES_SHA: b795c92126202cd1e4bd2365eb58d8cefa2095c3
-  ZED_LIB_CORE_SHA: fc4f2677a2315d522913bef05a1c0d23f8208960
+  ZED_INTERFACES_SHA: 4d40ae96f5ce6240356ad4fa5e455d0310b1c97d
+  ZED_LIB_CORE_SHA: 38ef3f50638614a14170d5c677173e040e916a6d
 
 jobs:
   test:
@@ -50,6 +50,8 @@ jobs:
           test "$(git -C reviewed-dependencies/zed-lib-core rev-parse HEAD)" = "$ZED_LIB_CORE_SHA"
           test ! -e ../zed-interfaces
           test ! -e ../zed-lib-core
+          test "$(sed -n 's/^  ZED_INTERFACES_SHA: //p' .github/workflows/publish-container.yml)" = "$ZED_INTERFACES_SHA"
+          test "$(sed -n 's/^  ZED_LIB_CORE_SHA: //p' .github/workflows/publish-container.yml)" = "$ZED_LIB_CORE_SHA"
           python3 - <<'PY'
           import os
           from pathlib import Path

@@ -41,6 +41,9 @@ services:
     build:
       context: ..
       dockerfile: zed-api-server.rs/Dockerfile
+      args:
+        ZED_INTERFACES_REVISION: 4d40ae96f5ce6240356ad4fa5e455d0310b1c97d
+        ZED_LIB_CORE_REVISION: 38ef3f50638614a14170d5c677173e040e916a6d
     depends_on:
       postgres:
         condition: service_healthy
@@ -56,6 +59,8 @@ services:
       AWS_ACCESS_KEY_ID: zed-minio
       AWS_SECRET_ACCESS_KEY: zed-minio-secret
       PUBLIC_BASE_URL: http://localhost:8080
+      ZED_REGISTRY_ID: registry:zpkg-local
+      ZED_GRAPH_SERVE_MEMORY_BUDGET_BYTES: "268435456"
       ZED_VERIFY_TAGS: "off"
       RUST_LOG: info
     ports:

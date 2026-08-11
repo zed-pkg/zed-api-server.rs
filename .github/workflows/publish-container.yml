@@ -9,9 +9,12 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'src/**'
+      - 'proto/**'
       - 'migration/**'
+      - 'tests/**'
       - 'Dockerfile'
       - 'k8s/**'
+      - '.github/workflows/ci.yml'
       - '.github/workflows/publish-container.yml'
   pull_request:
     paths:
@@ -20,9 +23,12 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'src/**'
+      - 'proto/**'
       - 'migration/**'
+      - 'tests/**'
       - 'Dockerfile'
       - 'k8s/**'
+      - '.github/workflows/ci.yml'
       - '.github/workflows/publish-container.yml'
   workflow_dispatch:
 
@@ -39,8 +45,8 @@ env:
   # that tag always identifies the complete source graph used by the build.
   # Keep these synchronized with the Rust CI pins; source-graph drift previously
   # made the debug test build pass while the release container could not compile.
-  ZED_INTERFACES_SHA: b795c92126202cd1e4bd2365eb58d8cefa2095c3
-  ZED_LIB_CORE_SHA: fc4f2677a2315d522913bef05a1c0d23f8208960
+  ZED_INTERFACES_SHA: 4d40ae96f5ce6240356ad4fa5e455d0310b1c97d
+  ZED_LIB_CORE_SHA: 38ef3f50638614a14170d5c677173e040e916a6d
 
 jobs:
   image:
@@ -177,6 +183,7 @@ jobs:
             -e STORAGE_BACKEND=memory \
             -e STORAGE_MEMORY_MAX_BYTES=268435456 \
             -e PUBLIC_BASE_URL=http://127.0.0.1:48080 \
+            -e ZED_REGISTRY_ID=registry:zpkg-container-smoke \
             -e ZED_AUTH_DISABLED=1 \
             -e ZED_RATE_LIMIT_DISABLED=1 \
             -e ZED_VERIFY_TAGS=off \

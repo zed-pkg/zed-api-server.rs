@@ -1,6 +1,6 @@
 # Canonical account and machine-registry cutover
 
-The API is compiled against `zed-orm-core@700f1f9578c6633a20693a5b1f52970ab845a740`. Browser/account routes and the web application now share the canonical `zed_*` PostgreSQL data plane.
+The API is compiled against `zed-orm-core@38ef3f50638614a14170d5c677173e040e916a6d`. Browser/account routes and the web application now share the canonical `zed_*` PostgreSQL data plane.
 
 ## Account boundary
 

@@ -15,11 +15,11 @@ members = [".", "migration"]
 # the additive export route/media contract reviewed in zed-interfaces#63. The
 # repository root remains a Cargo workspace, so git consumers resolve its Rust
 # package from the polyglot `src/rust` member without a path override.
-zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "b795c92126202cd1e4bd2365eb58d8cefa2095c3" }
+zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "4d40ae96f5ce6240356ad4fa5e455d0310b1c97d" }
 # Canonical account, registry projection, and migration data plane. The API is
 # the only long-running service that opts into write symbols; the discrete
 # `migrate` command is the only runtime path that invokes DDL.
-zed-orm-core = { git = "https://github.com/zed-pkg/zed-lib-core.git", rev = "fc4f2677a2315d522913bef05a1c0d23f8208960", features = ["read-write", "migrate"] }
+zed-orm-core = { git = "https://github.com/zed-pkg/zed-lib-core.git", rev = "38ef3f50638614a14170d5c677173e040e916a6d", features = ["read-write", "migrate"] }
 # The private shared-auth-clients repository cannot be cloned by this
 # repository's scoped GITHUB_TOKEN. `src/shared_auth.rs` implements the small,
 # reviewed exchange/introspection HTTP contract using the existing reqwest

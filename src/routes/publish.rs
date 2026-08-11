@@ -504,6 +504,7 @@ mod tests {
             .unwrap(),
             verifier: TagVerifier::new(TagPolicy::Off),
             public_base_url: "http://localhost:8080".to_string(),
+            registry_id: "registry:zpkg-primary".to_string(),
             max_orgs_per_token: 5,
             fiducia: None,
             rate_limiter: None,

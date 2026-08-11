@@ -45,9 +45,12 @@ version.
 | `S3_REGION` | `auto` | R2 uses `auto` |
 | `S3_FORCE_PATH_STYLE` | `true` | MinIO needs it |
 | `PUBLIC_BASE_URL` | `http://localhost:8080` | used in download URLs |
+| `ZED_REGISTRY_ID` | `registry:zpkg-primary` | stable logical graph identity; set once and do not derive it from an ingress alias |
 | `ZED_VERIFY_TAGS` | `off` | `off` or `github` |
 | `GITHUB_TOKEN` | unset | raises tag-check rate limits |
 | `MAX_ARTIFACT_BYTES` | `104857600` | request body cap |
+| `ZED_ARTIFACT_SERVE_MEMORY_BUDGET_BYTES` | `268435456` | memory budget for concurrently buffered artifact/file responses |
+| `ZED_GRAPH_SERVE_MEMORY_BUDGET_BYTES` | `268435456` | independent memory budget for concurrent dependency-graph encoders |
 | `RUST_LOG` | `info` | |
 
 `memory` is intentionally process-local and disposable: every restart clears

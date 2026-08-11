@@ -19,9 +19,9 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use sha2::{Digest, Sha256};
 use zed_interfaces::{
-    DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER, DEPENDENCY_GRAPH_DEFAULT_MAX_ENCODED_BYTES,
-    DEPENDENCY_GRAPH_DIGEST_HEADER, DependencyGraphCompleteness, DependencyGraphDocument,
-    DependencyGraphExportFormat, DependencyKind,
+    DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER, DEPENDENCY_GRAPH_DIGEST_HEADER,
+    DependencyGraphCompleteness, DependencyGraphDocument, DependencyGraphExportFormat,
+    DependencyKind,
 };
 #[cfg(test)]
 use zed_interfaces::{
@@ -33,7 +33,10 @@ use crate::state::AppState;
 
 #[cfg(test)]
 use super::graph::declared_document;
-use super::graph::{DeclaredGraphAccess, load_authorized_declared_document};
+use super::graph::{
+    DeclaredGraphAccess, ensure_encoded_size, ensure_graph_bounds,
+    load_authorized_declared_document,
+};
 
 type GraphExportFormat = DependencyGraphExportFormat;
 
@@ -169,13 +172,7 @@ fn respond(
     access: DeclaredGraphAccess,
 ) -> ApiResult<Response> {
     let body = encode(document, format)?;
-    if body.len() as u64 > DEPENDENCY_GRAPH_DEFAULT_MAX_ENCODED_BYTES {
-        return Err(ApiErr {
-            status: StatusCode::PAYLOAD_TOO_LARGE,
-            code: "graph_representation_too_large",
-            message: "dependency graph representation exceeds the server limit".to_string(),
-        });
-    }
+    ensure_encoded_size(body.len())?;
 
     let etag = format!("\"{}\"", hex::encode(Sha256::digest(&body)));
     let graph_digest = document
@@ -251,22 +248,23 @@ fn filename_stem(org: &str, name: &str, version: &str) -> String {
 }
 
 fn encode(document: &DependencyGraphDocument, format: GraphExportFormat) -> ApiResult<Vec<u8>> {
+    ensure_graph_bounds(document)?;
     document
         .verify_digest()
         .map_err(|error| ApiErr::from(anyhow::anyhow!("graph verification failed: {error}")))?;
     let canonical = document
         .canonical_document_bytes()
         .map_err(|error| ApiErr::from(anyhow::anyhow!("graph canonicalization failed: {error}")))?;
-    if canonical.len() as u64 > DEPENDENCY_GRAPH_DEFAULT_MAX_ENCODED_BYTES {
-        return Err(representation_too_large());
-    }
-    match format {
+    ensure_encoded_size(canonical.len())?;
+    let encoded = match format {
         GraphExportFormat::Json5 => encode_json5(document, &canonical),
         GraphExportFormat::Xml => xml::encode(document),
         GraphExportFormat::Csv => csv::encode(document),
         GraphExportFormat::MessagePack => messagepack::encode(&canonical),
         GraphExportFormat::Protobuf => Ok(protobuf::encode(document)),
-    }
+    }?;
+    ensure_encoded_size(encoded.len())?;
+    Ok(encoded)
 }
 
 fn encode_json5(document: &DependencyGraphDocument, canonical: &[u8]) -> ApiResult<Vec<u8>> {
@@ -281,9 +279,7 @@ fn encode_json5(document: &DependencyGraphDocument, canonical: &[u8]) -> ApiResu
         .checked_add(canonical.len())
         .and_then(|length| length.checked_add(1))
         .ok_or_else(representation_too_large)?;
-    if encoded_len as u64 > DEPENDENCY_GRAPH_DEFAULT_MAX_ENCODED_BYTES {
-        return Err(representation_too_large());
-    }
+    ensure_encoded_size(encoded_len)?;
     let mut output = Vec::with_capacity(encoded_len);
     output.extend_from_slice(prefix.as_bytes());
     output.extend_from_slice(canonical);

@@ -1,7 +1,10 @@
 # Build context must be the PARENT directory because the release workflow
 # supplies side-by-side, commit-verified cross-repository sources:
 #
-#   docker build -f zed-api-server.rs/Dockerfile -t ghcr.io/zed-pkg/zed-api-server:dev .
+#   docker build -f zed-api-server.rs/Dockerfile \
+#     --build-arg ZED_INTERFACES_REVISION=4d40ae96f5ce6240356ad4fa5e455d0310b1c97d \
+#     --build-arg ZED_LIB_CORE_REVISION=38ef3f50638614a14170d5c677173e040e916a6d \
+#     -t ghcr.io/zed-pkg/zed-api-server:dev .
 #
 # The toolchain must satisfy the crate's `edition = "2024"` (>= 1.85) and the
 # aws-sdk-* crates' MSRV (>= 1.94.1), so the base is pinned to 1.97.1.
@@ -9,13 +12,21 @@
 # the build uses the toolchain already present in the image.
 # `-bookworm` keeps the build glibc compatible with the Debian 12 runtime stage.
 FROM rust:1.97-slim-bookworm AS build
+ARG ZED_INTERFACES_REVISION
+ARG ZED_LIB_CORE_REVISION
 ENV RUSTUP_TOOLCHAIN=1.97.1
 WORKDIR /work
 COPY zed-interfaces ./zed-interfaces
 COPY zed-lib-core ./zed-lib-core
 COPY zed-api-server.rs ./zed-api-server.rs
 WORKDIR /work/zed-api-server.rs
-RUN cargo build --release --locked
+RUN test -n "$ZED_INTERFACES_REVISION" \
+    && test -n "$ZED_LIB_CORE_REVISION" \
+    && grep -F "rev = \"$ZED_INTERFACES_REVISION\"" Cargo.toml \
+    && grep -F "?rev=$ZED_INTERFACES_REVISION#$ZED_INTERFACES_REVISION" Cargo.lock \
+    && grep -F "rev = \"$ZED_LIB_CORE_REVISION\"" Cargo.toml \
+    && grep -F "?rev=$ZED_LIB_CORE_REVISION#$ZED_LIB_CORE_REVISION" Cargo.lock \
+    && cargo build --release --locked
 
 FROM debian:12-slim
 ARG ZED_API_REVISION=unknown
