@@ -1,7 +1,7 @@
 use zed_interfaces::{
-    DeclaredDependency, DependencyGraphData, DependencyGraphDocument,
-    DependencyGraphProjection, PackageVersionIdentity, RegistrySnapshot,
-    ResolutionProvenance, ResolvedDependencyEdge, ResolvedDependencyNode,
+    DeclaredDependency, DependencyGraphData, DependencyGraphDocument, DependencyGraphProjection,
+    PackageVersionIdentity, RegistrySnapshot, ResolutionProvenance, ResolvedDependencyEdge,
+    ResolvedDependencyNode,
 };
 
 use super::{completeness_code, dependency_kind_code};
