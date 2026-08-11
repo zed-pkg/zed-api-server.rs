@@ -19,7 +19,7 @@ zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = 
 # Canonical account, registry projection, and migration data plane. The API is
 # the only long-running service that opts into write symbols; the discrete
 # `migrate` command is the only runtime path that invokes DDL.
-zed-orm-core = { git = "https://github.com/zed-pkg/zed-lib-core.git", rev = "38ef3f50638614a14170d5c677173e040e916a6d", features = ["read-write", "migrate"] }
+zed-orm-core = { git = "https://github.com/zed-pkg/zed-lib-core.git", rev = "c3d486a1519381276fbec02aa25247f542924443", features = ["read-write", "migrate"] }
 # The private shared-auth-clients repository cannot be cloned by this
 # repository's scoped GITHUB_TOKEN. `src/shared_auth.rs` implements the small,
 # reviewed exchange/introspection HTTP contract using the existing reqwest

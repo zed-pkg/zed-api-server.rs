@@ -3,7 +3,7 @@
 #
 #   docker build -f zed-api-server.rs/Dockerfile \
 #     --build-arg ZED_INTERFACES_REVISION=7d31f80dd8a310f218931165a3ad636a2f32b932 \
-#     --build-arg ZED_LIB_CORE_REVISION=38ef3f50638614a14170d5c677173e040e916a6d \
+#     --build-arg ZED_LIB_CORE_REVISION=c3d486a1519381276fbec02aa25247f542924443 \
 #     -t ghcr.io/zed-pkg/zed-api-server:dev .
 #
 # The toolchain must satisfy the crate's `edition = "2024"` (>= 1.85) and the

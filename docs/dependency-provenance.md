@@ -4,7 +4,7 @@ The account and registry API is compiled from reviewed, immutable dependency rev
 
 | Dependency | Revision | Purpose |
 | --- | --- | --- |
-| `zed-pkg/zed-lib-core` | `38ef3f50638614a14170d5c677173e040e916a6d` | Canonical SeaORM data-plane owner, dependency-graph persistence, and migration contract |
+| `zed-pkg/zed-lib-core` | `c3d486a1519381276fbec02aa25247f542924443` | Canonical SeaORM data-plane owner, dependency-graph persistence, and migration contract |
 | `zed-pkg/zed-interfaces` | `7d31f80dd8a310f218931165a3ad636a2f32b932` | Shared registry/API and protected dependency-graph representation contracts |
 | `zed-pkg/zed-cli` | `8929a58c6591c7a964d7f91412665d7c8a4afdf3` | Publish/install E2E client fixture |
 

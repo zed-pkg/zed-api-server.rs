@@ -2042,7 +2042,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -2894,7 +2894,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.43",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror",
  "tokio",
  "tracing",
@@ -2932,7 +2932,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -5243,12 +5243,13 @@ dependencies = [
 [[package]]
 name = "zed-orm-core"
 version = "0.1.0"
-source = "git+https://github.com/zed-pkg/zed-lib-core.git?rev=38ef3f50638614a14170d5c677173e040e916a6d#38ef3f50638614a14170d5c677173e040e916a6d"
+source = "git+https://github.com/zed-pkg/zed-lib-core.git?rev=c3d486a1519381276fbec02aa25247f542924443#c3d486a1519381276fbec02aa25247f542924443"
 dependencies = [
  "chrono",
  "sea-orm",
  "serde_json",
  "uuid",
+ "zed-interfaces",
 ]
 
 [[package]]
