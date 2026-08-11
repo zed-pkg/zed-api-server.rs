@@ -1,0 +1,195 @@
+name: finalize certified graph response metadata
+
+on:
+  push:
+    branches:
+      - ci/graph-response-metadata-release
+    paths:
+      - .github/workflows/agent-finalize-graph-response-metadata.yml
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: finalize-graph-response-metadata
+  cancel-in-progress: false
+
+env:
+  TARGET_BRANCH: fix/graph-response-metadata-compat
+  CERTIFIER_WORKFLOW: agent-certify-graph-response-metadata.yml
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Wait for the same-head certification run
+        id: certification
+        shell: bash
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 3900))
+          run_id=""
+          while [[ -z "$run_id" && $SECONDS -lt $deadline ]]; do
+            run_id="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${CERTIFIER_WORKFLOW}/runs?branch=ci%2Fgraph-response-metadata-release&per_page=30" \
+              --jq '.workflow_runs[] | select(.head_sha == "'"$GITHUB_SHA"'") | .id' | head -n 1)"
+            [[ -n "$run_id" ]] || sleep 10
+          done
+          [[ -n "$run_id" ]] || { echo "same-head certifier run was not created" >&2; exit 1; }
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+          status=""
+          while [[ "$status" != "completed" && $SECONDS -lt $deadline ]]; do
+            status="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq .status)"
+            [[ "$status" == "completed" ]] || sleep 20
+          done
+          [[ "$status" == "completed" ]] || { echo "certifier timed out" >&2; exit 1; }
+
+      - name: Require every substantive certification step
+        shell: bash
+        env:
+          RUN_ID: ${{ steps.certification.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          jobs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100")"
+          for step in \
+            "Apply focused compatibility repair idempotently" \
+            "Run exact API gates" \
+            "Install E2E dependencies and Chromium" \
+            "Boot current API/CLI graph stack" \
+            "Certify browser and CLI graph journeys" \
+            "Stop stack"
+          do
+            conclusion="$(jq -r --arg step "$step" '[.jobs[].steps[] | select(.name == $step) | .conclusion] | last // "missing"' <<<"$jobs")"
+            echo "$step: $conclusion"
+            [[ "$conclusion" == "success" ]] || exit 1
+          done
+
+      - name: Resolve exact target PR and head
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_json="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --head "$TARGET_BRANCH" \
+            --base main \
+            --state all \
+            --limit 10 \
+            --json number,state,isDraft,headRefOid,mergeCommit \
+            --jq 'sort_by(.number) | reverse | .[0]')"
+          [[ "$pr_json" != "null" ]] || { echo "target PR missing" >&2; exit 1; }
+          pr_number="$(jq -r .number <<<"$pr_json")"
+          target_sha="$(jq -r .headRefOid <<<"$pr_json")"
+          [[ -n "$pr_number" && -n "$target_sha" && "$target_sha" != "null" ]]
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$target_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for ordinary pull-request checks
+        if: ${{ success() }}
+        shell: bash
+        env:
+          PR_NUMBER: ${{ steps.target.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          state="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq .state)"
+          [[ "$state" == "MERGED" ]] && exit 0
+          gh pr ready "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || true
+
+          deadline=$((SECONDS + 2100))
+          while [[ $SECONDS -lt $deadline ]]; do
+            checks="$(gh pr checks "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json name,state,workflow 2>/dev/null || printf '[]')"
+            failures="$(jq '[.[] | select(.state == "FAILURE" or .state == "ERROR" or .state == "CANCELLED" or .state == "TIMED_OUT" or .state == "ACTION_REQUIRED")] | length' <<<"$checks")"
+            pending="$(jq '[.[] | select(.state == "PENDING" or .state == "QUEUED" or .state == "IN_PROGRESS" or .state == "WAITING" or .state == "REQUESTED")] | length' <<<"$checks")"
+            [[ "$failures" == "0" ]] || { jq . <<<"$checks"; exit 1; }
+            [[ "$pending" == "0" ]] && break
+            sleep 20
+          done
+          [[ $SECONDS -lt $deadline ]] || { echo "PR checks did not become terminal" >&2; exit 1; }
+
+      - name: Merge exact certified head normally
+        id: merge
+        shell: bash
+        env:
+          PR_NUMBER: ${{ steps.target.outputs.pr_number }}
+          TARGET_SHA: ${{ steps.target.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          state="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq .state)"
+          if [[ "$state" != "MERGED" ]]; then
+            current_head="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
+            [[ "$current_head" == "$TARGET_SHA" ]]
+            gh pr merge "$PR_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --squash \
+              --match-head-commit "$TARGET_SHA" \
+              --subject "fix(graph): restore CLI response metadata compatibility (#${PR_NUMBER})" \
+              --body "Emit exact Content-Length and shared authoritative/non-authoritative response metadata across native and extended dependency-graph formats on both 200 and 304 responses, restoring compatibility with the released CLI without importing the draft persistence stack."
+          fi
+
+          deadline=$((SECONDS + 1200))
+          while [[ $SECONDS -lt $deadline ]]; do
+            state="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq .state)"
+            [[ "$state" == "MERGED" ]] && break
+            sleep 15
+          done
+          [[ "$state" == "MERGED" ]] || { echo "PR was not merged" >&2; exit 1; }
+          merge_sha="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json mergeCommit --jq .mergeCommit.oid)"
+          main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)"
+          echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+          echo "main_sha=$main_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Verify repaired source blobs are on main
+        shell: bash
+        env:
+          TARGET_SHA: ${{ steps.target.outputs.target_sha }}
+          MAIN_SHA: ${{ steps.merge.outputs.main_sha }}
+        run: |
+          set -euo pipefail
+          git init verify
+          cd verify
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$TARGET_SHA" "$MAIN_SHA"
+          for path in src/routes/graph.rs src/routes/graph_exports/mod.rs; do
+            target_blob="$(git rev-parse "${TARGET_SHA}:${path}")"
+            main_blob="$(git rev-parse "${MAIN_SHA}:${path}")"
+            echo "$path target=$target_blob main=$main_blob"
+            [[ "$target_blob" == "$main_blob" ]]
+          done
+          git show "${MAIN_SHA}:src/routes/graph.rs" | grep -Fq 'DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER'
+          git show "${MAIN_SHA}:src/routes/graph.rs" | grep -Fq 'native_response_metadata_matches_selected_bytes_on_200_and_304'
+          git show "${MAIN_SHA}:src/routes/graph_exports/mod.rs" | grep -Fq 'head.authoritative'
+
+      - name: Record immutable release evidence
+        shell: bash
+        env:
+          PR_NUMBER: ${{ steps.target.outputs.pr_number }}
+          TARGET_SHA: ${{ steps.target.outputs.target_sha }}
+          MERGE_SHA: ${{ steps.merge.outputs.merge_sha }}
+          MAIN_SHA: ${{ steps.merge.outputs.main_sha }}
+          RUN_ID: ${{ steps.certification.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          content="$(jq -n \
+            --arg status merged \
+            --arg timestamp "$timestamp" \
+            --argjson pr_number "$PR_NUMBER" \
+            --arg target_sha "$TARGET_SHA" \
+            --arg merge_sha "$MERGE_SHA" \
+            --arg main_sha "$MAIN_SHA" \
+            --argjson certifier_run_id "$RUN_ID" \
+            '{status:$status,timestamp:$timestamp,pr_number:$pr_number,target_sha:$target_sha,merge_sha:$merge_sha,main_sha:$main_sha,certifier_run_id:$certifier_run_id,evidence:["cargo fmt --check","cargo test --locked --all-targets","cargo clippy --locked --all-targets -- -D warnings","cargo build --locked","E2E typecheck and harness","PostgreSQL/API/web/current-CLI stack","Chromium dependency graph journey","Chromium SVG/PNG projection journey","ordinary PR checks","main blob identity"]}')"
+          encoded="$(printf '%s\n' "$content" | base64 -w0)"
+          branch_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/ci/graph-response-metadata-release" --jq .object.sha)"
+          existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/contents/graph-response-metadata-release.json?ref=ci%2Fgraph-response-metadata-release" --jq .sha 2>/dev/null || true)"
+          args=(--method PUT "repos/${GITHUB_REPOSITORY}/contents/graph-response-metadata-release.json" -f message='chore(ci): record graph metadata release [skip ci]' -f content="$encoded" -f branch='ci/graph-response-metadata-release')
+          [[ -z "$existing_sha" ]] || args+=(-f sha="$existing_sha")
+          gh api "${args[@]}" >/dev/null
+
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "Released as \`${MERGE_SHA}\` after exact-head API gates, current-CLI PostgreSQL/API/web Chromium graph journeys, ordinary PR checks, and post-merge source-blob identity verification. Main observed at \`${MAIN_SHA}\`. Certifier run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
