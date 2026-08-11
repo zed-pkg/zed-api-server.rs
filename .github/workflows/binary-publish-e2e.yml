@@ -164,7 +164,7 @@ jobs:
           [bin]
           registry-binary-smoke = "bin/registry-binary-smoke"
           TOML
-          printf 'target/\n' >"$package_dir/.gitignore"
+          printf 'target/\n.zed/\n' >"$package_dir/.gitignore"
           printf 'MIT fixture license\n' >"$package_dir/LICENSE"
 
           git -C "$package_dir" init -q
