@@ -91,6 +91,7 @@ pub(crate) async fn run() -> Result<()> {
         store,
         verifier: TagVerifier::new(cfg.verify_tags),
         public_base_url: cfg.public_base_url.trim_end_matches('/').to_string(),
+        registry_id: cfg.registry_id,
         max_orgs_per_token: cfg.max_orgs_per_token,
         fiducia,
         rate_limiter,

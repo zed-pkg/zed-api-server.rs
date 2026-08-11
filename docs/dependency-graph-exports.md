@@ -8,8 +8,10 @@ and carries:
 - `X-Zpkg-Graph-Digest`: semantic graph identity shared by every representation.
 - `ETag`: a strong validator over the exact response bytes, unique per format.
 - `Cache-Control: public, max-age=31536000, immutable` for a public exact
-  package version, or `private, no-store` for an authorized private graph.
+  package version, or `private, no-store` for an authorized protected graph.
 - `Content-Disposition` with a sanitized deterministic filename.
+- `Content-Length` equal to the selected GET representation on `GET`, `HEAD`,
+  and a matching `304` response.
 - `X-Zpkg-Graph-Authoritative`: `true` for lossless interchange formats and
   `false` for convenience or analytics projections.
 
@@ -44,8 +46,9 @@ Supported `{format}` values and aliases:
 `If-None-Match` uses weak comparison even though the emitted ETag is strong.
 `Content-Length` is the encoded GET length and is retained on HEAD.
 Public successful and `304` responses carry `Vary: Accept`, preventing an
-immutable shared-cache entry from bypassing that negotiation. Private successes
-carry `Vary: Accept, Authorization` together with `private, no-store`.
+immutable shared-cache entry from bypassing that negotiation. Protected
+`internal` and `private` successes carry `Vary: Accept, Authorization` together
+with `private, no-store`.
 
 ## Representation notes
 
@@ -95,25 +98,31 @@ opaque JSON blob.
 
 ## Security and limits
 
+Every node uses the configured `ZED_REGISTRY_ID`, not `PUBLIC_BASE_URL`.
+Changing a domain, ingress path, or local registry alias therefore cannot
+reinterpret an existing graph or change its semantic digest.
+
 Canonical package visibility is checked before either graph route loads the
 exact immutable `zed_package_versions` row and its normalized manifest. This
 keeps visibility, version existence, and graph source in one Postgres authority;
 the artifact key and digest remain bound to that same published row. Public
-package graphs are anonymous. Private package graphs
+package graphs are anonymous. Internal and private package graphs
 require either a live legacy token scoped to that package's organization or a
 session-backed delegated web token whose canonical user belongs to the
 organization or owning project. Invalid credentials, cross-tenant credentials,
 unknown packages, unknown versions, and inaccessible graphs use the same
 no-store not-found response. The web BFF must forward its delegated bearer when
-requesting a private graph; prior UI authorization is not a substitute for API
-authorization. A base Shared Auth JWT is not accepted directly: browser access
-requires the audience-bound `zpkg-web` delegated token, while CLI access uses a
-live organization-scoped legacy registry token until a CLI delegation flow is
-defined.
+requesting any protected graph; prior UI authorization is not a substitute for
+API authorization. A base Shared Auth JWT is not accepted directly: browser
+access requires the audience-bound `zpkg-web` delegated token, while CLI access
+uses a live organization-scoped legacy registry token until a CLI delegation
+flow is defined.
 
 Export bodies are subject to the existing encoded graph size limit and are
 never truncated. The potentially expansive XML
 and CSV encoders stop at that limit, JSON5 is pre-sized, and every binary output
 is checked before a response is created. Declared dependency counts are also
-bounded by the graph edge limit. Download filenames are built from validated
-coordinates and cannot inject response headers.
+bounded by both graph node and edge limits. Download filenames are built from validated
+coordinates and cannot inject response headers. All graph routes run in a
+dedicated concurrency lane sized from `ZED_GRAPH_SERVE_MEMORY_BUDGET_BYTES`, so
+large encodes cannot consume the artifact-serving or ordinary request lanes.

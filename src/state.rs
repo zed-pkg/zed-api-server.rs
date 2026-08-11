@@ -22,6 +22,8 @@ pub struct AppState {
     pub store: ArtifactStore,
     pub verifier: TagVerifier,
     pub public_base_url: String,
+    /// Stable graph-node identity; deliberately independent of ingress URLs.
+    pub registry_id: String,
     pub max_orgs_per_token: u64,
     /// Distributed lock service; None → Postgres-only serialization (correct,
     /// just without cross-replica FIFO queueing/observability).

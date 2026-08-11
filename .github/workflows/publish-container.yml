@@ -9,9 +9,12 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'src/**'
+      - 'proto/**'
       - 'migration/**'
+      - 'tests/**'
       - 'Dockerfile'
       - 'k8s/**'
+      - '.github/workflows/ci.yml'
       - '.github/workflows/publish-container.yml'
   pull_request:
     paths:
@@ -20,9 +23,12 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'src/**'
+      - 'proto/**'
       - 'migration/**'
+      - 'tests/**'
       - 'Dockerfile'
       - 'k8s/**'
+      - '.github/workflows/ci.yml'
       - '.github/workflows/publish-container.yml'
   workflow_dispatch:
 
@@ -40,7 +46,7 @@ env:
   # Keep these synchronized with the Rust CI pins; source-graph drift previously
   # made the debug test build pass while the release container could not compile.
   ZED_INTERFACES_SHA: 4b87e425b04777b0ee413971dc1df805d24f295f
-  ZED_LIB_CORE_SHA: fc4f2677a2315d522913bef05a1c0d23f8208960
+  ZED_LIB_CORE_SHA: c3d486a1519381276fbec02aa25247f542924443
 
 jobs:
   image:
@@ -177,6 +183,7 @@ jobs:
             -e STORAGE_BACKEND=memory \
             -e STORAGE_MEMORY_MAX_BYTES=268435456 \
             -e PUBLIC_BASE_URL=http://127.0.0.1:48080 \
+            -e ZED_REGISTRY_ID=registry:zpkg-container-smoke \
             -e ZED_AUTH_DISABLED=1 \
             -e ZED_RATE_LIMIT_DISABLED=1 \
             -e ZED_VERIFY_TAGS=off \
