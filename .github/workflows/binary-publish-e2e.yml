@@ -127,6 +127,7 @@ jobs:
             *) printf '%s\n' "$output" >&2; exit 1 ;;
           esac
           echo "::add-mask::$token"
+          export ZED_PKG_TOKEN="$token"
           printf 'ZED_PKG_TOKEN=%s\n' "$token" >>"$GITHUB_ENV"
           "$RUNNER_TEMP/zed-cli/bin/zed" org claim binary-e2e
 
@@ -202,14 +203,16 @@ jobs:
             http://127.0.0.1:8080/v1/packages/binary-e2e/registry-binary-smoke/versions/0.1.0)
           printf '%s\n' "$metadata" | tee "$RUNNER_TEMP/binary-metadata.json" | jq .
           printf '%s\n' "$metadata" | jq -e '
-            .org == "binary-e2e"
-            and .name == "registry-binary-smoke"
-            and .version == "0.1.0"
-            and .format == "zip"
-            and (.sha256 | test("^[0-9a-f]{64}$"))
-            and .size > 0
-            and (.download_url | endswith("/v1/artifacts/" + .sha256))
-            and .yanked == false
+            . as $metadata
+            | $metadata.org == "binary-e2e"
+            and $metadata.name == "registry-binary-smoke"
+            and $metadata.version == "0.1.0"
+            and $metadata.format == "zip"
+            and ($metadata.sha256 | test("^[0-9a-f]{64}$"))
+            and $metadata.size > 0
+            and ($metadata.download_url
+              | endswith("/v1/artifacts/" + $metadata.sha256))
+            and $metadata.yanked == false
           ' >/dev/null
           grep -q 'verified self-describing binary ZIP before publication' \
             "$RUNNER_TEMP/zed-api-binary.log"
