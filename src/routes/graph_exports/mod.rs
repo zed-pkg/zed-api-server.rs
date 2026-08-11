@@ -35,7 +35,7 @@ use crate::state::AppState;
 use super::graph::declared_document;
 use super::graph::{
     DeclaredGraphAccess, ensure_encoded_size, ensure_graph_bounds,
-    load_authorized_declared_document,
+    load_authorized_declared_document, not_modified_response,
 };
 
 type GraphExportFormat = DependencyGraphExportFormat;
@@ -211,7 +211,7 @@ fn respond(
     );
 
     if if_none_match_matches(request_headers, &etag) {
-        return Ok((StatusCode::NOT_MODIFIED, response_headers).into_response());
+        return Ok(not_modified_response(response_headers));
     }
 
     response_headers.insert(header::CONTENT_TYPE, header_value(format.media_type())?);

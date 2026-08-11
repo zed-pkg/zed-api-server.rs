@@ -13,11 +13,16 @@
 //! have, and re-resolving old metadata against today's index and labelling the
 //! result "the graph for this lock" is precisely what the contract forbids.
 
+use std::convert::Infallible;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use bytes::Bytes;
+use http_body::{Body as HttpBody, Frame, SizeHint};
 #[cfg(test)]
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::Deserialize;
@@ -82,6 +87,42 @@ fn graph_not_found() -> ApiErr {
         code: "not_found",
         message: "dependency graph not found".to_string(),
     }
+}
+
+/// An empty body whose length is deliberately unknown to Hyper.
+///
+/// Hyper 1.11 removes an explicit selected-representation `Content-Length`
+/// from a 304 when the body advertises an exact zero size. An unknown size hint
+/// lets Hyper retain that RFC-valid metadata header, while the 304 status still
+/// forces the wire body to zero bytes. `is_end_stream` must remain false until
+/// Hyper has classified the response body.
+struct MetadataOnlyBody;
+
+impl HttpBody for MetadataOnlyBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Poll::Ready(None)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        false
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::new()
+    }
+}
+
+pub(super) fn not_modified_response(headers: HeaderMap) -> Response {
+    let mut response = Response::new(axum::body::Body::new(MetadataOnlyBody));
+    *response.status_mut() = StatusCode::NOT_MODIFIED;
+    *response.headers_mut() = headers;
+    response
 }
 
 fn requires_graph_authorization(visibility: &str) -> ApiResult<bool> {
@@ -722,8 +763,8 @@ fn respond(
     );
 
     if if_none_match_matches(headers, &etag) {
-        // 304 carries the validators and cache policy, never a body.
-        return Ok((StatusCode::NOT_MODIFIED, response_headers).into_response());
+        // 304 carries selected-representation metadata, never body bytes.
+        return Ok(not_modified_response(response_headers));
     }
 
     response_headers.insert(header::CONTENT_TYPE, header_value(format.media_type())?);

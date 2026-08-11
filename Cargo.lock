@@ -5201,6 +5201,7 @@ dependencies = [
  "fiducia-client",
  "flate2",
  "hex",
+ "http-body 1.1.0",
  "migration",
  "percent-encoding",
  "reqwest",
