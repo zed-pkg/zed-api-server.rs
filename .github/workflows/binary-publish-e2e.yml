@@ -30,7 +30,7 @@ env:
   # the external `zed-binary` command used by the public `zed binary ...` form.
   ZED_CLI_SHA: 1bc86d7ad40acf4fb99a482c37d9a3aa68abc987
   ZED_PKG_REGISTRY: http://127.0.0.1:8080
-  ZED_PKG_INTERACTIVE: never
+  ZED_PKG_INTERACTIVE: "false"
 
 jobs:
   binary-publish-download-roundtrip:
