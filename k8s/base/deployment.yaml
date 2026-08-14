@@ -59,11 +59,15 @@ spec:
           env:
             - { name: BIND_ADDR, value: "0.0.0.0:8080" }
             - { name: PUBLIC_BASE_URL, value: "https://registry.zpkg.net" }
+            - { name: ZED_REGISTRY_ID, value: "registry:zpkg-primary" }
             - { name: STORAGE_BACKEND, value: "memory" }
             # Keep artifact bytes below half the pod's 512 MiB limit so Tokio,
             # multipart parsing, metadata, and archive extraction retain
             # explicit headroom. The server rejects writes over this total.
             - { name: STORAGE_MEMORY_MAX_BYTES, value: "268435456" }
+            # Graph encoding has a separate concurrency lane sized from this
+            # budget and the shared 32 MiB encoded-representation limit.
+            - { name: ZED_GRAPH_SERVE_MEMORY_BUDGET_BYTES, value: "268435456" }
             # TEMPORARY bootstrap posture. Restore all three controls before
             # adding any public API route.
             - { name: ZED_AUTH_DISABLED, value: "1" }

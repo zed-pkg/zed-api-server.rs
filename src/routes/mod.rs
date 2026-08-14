@@ -6,6 +6,7 @@
 mod artifacts;
 mod audit;
 mod graph;
+mod graph_exports;
 mod list;
 mod orgs;
 mod packages;
@@ -21,6 +22,7 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderValue, header};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use zed_interfaces::DEPENDENCY_GRAPH_DEFAULT_MAX_ENCODED_BYTES;
 use zed_interfaces::artifact::ArtifactFormat;
 
 use crate::entities::{org, package, version};
@@ -41,6 +43,8 @@ pub const ROUTE_AUDIT_VERIFY: &str = "/v1/orgs/{org}/audit/verify";
 pub const ROUTE_FILES: &str = "/v1/files/{org}/{name}/{version}/{*path}";
 pub const ROUTE_DECLARED_GRAPH: &str =
     "/v1/packages/{org}/{name}/versions/{version}/dependency-graph";
+pub const ROUTE_DECLARED_GRAPH_EXPORT: &str =
+    zed_interfaces::DEPENDENCY_GRAPH_EXPORT_ROUTE_TEMPLATE;
 pub const ROUTE_RESOLUTION_GRAPH: &str = "/v1/resolutions/{resolution_digest}/dependency-graph";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -56,6 +60,11 @@ const JSON_BODY_LIMIT: usize = 64 * 1024;
 /// `MAX_IN_FLIGHT_REQUESTS × max_artifact_bytes` (which trivially OOMs a
 /// memory-limited pod). Override with `ZED_ARTIFACT_SERVE_MEMORY_BUDGET_BYTES`.
 const DEFAULT_ARTIFACT_SERVE_BUDGET: usize = 256 * 1024 * 1024;
+/// Graph encoders can temporarily retain the typed document, canonical JSON,
+/// and the selected response bytes. Give that route family a separate budget
+/// so large exports cannot occupy the artifact-buffering or cheap JSON lanes.
+const DEFAULT_GRAPH_SERVE_BUDGET: usize = 256 * 1024 * 1024;
+const GRAPH_WORKING_SET_MULTIPLIER: usize = 3;
 
 /// How many artifact-buffering requests may run at once, given the per-read
 /// worst case (`max_artifact_bytes`) and the memory budget. At least 1, and
@@ -68,19 +77,45 @@ fn artifact_serve_concurrency(max_artifact_bytes: usize) -> usize {
     (budget / max_artifact_bytes.max(1)).clamp(1, MAX_IN_FLIGHT_REQUESTS)
 }
 
+fn graph_serve_concurrency() -> usize {
+    let budget = std::env::var("ZED_GRAPH_SERVE_MEMORY_BUDGET_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_GRAPH_SERVE_BUDGET);
+    graph_serve_concurrency_for_budget(budget)
+}
+
+fn graph_serve_concurrency_for_budget(budget: usize) -> usize {
+    let max_encoded =
+        usize::try_from(DEPENDENCY_GRAPH_DEFAULT_MAX_ENCODED_BYTES).unwrap_or(usize::MAX);
+    let working_set = max_encoded.saturating_mul(GRAPH_WORKING_SET_MULTIPLIER);
+    (budget / working_set.max(1)).clamp(1, MAX_IN_FLIGHT_REQUESTS)
+}
+
 pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
-    // The two endpoints that buffer a whole artifact in memory get their own,
+    // The endpoints that buffer a whole artifact in memory get their own,
     // tighter concurrency limit so they can't exhaust pod memory even while
     // the global limit still admits cheap JSON requests.
     //
-    // The declared dependency graph reads its manifest out of the stored
-    // artifact, so it buffers one too and belongs under the same budget.
     let artifact_routes = Router::new()
         .route(ROUTE_ARTIFACT, get(artifacts::get_artifact))
         .route(ROUTE_FILES, get(artifacts::get_file))
-        .route(ROUTE_DECLARED_GRAPH, get(graph::get_declared_graph))
         .layer(tower::limit::ConcurrencyLimitLayer::new(
             artifact_serve_concurrency(max_artifact_bytes),
+        ));
+
+    // Graph generation has independent allocation and authorization behavior.
+    // Isolating all graph routes keeps their worst-case encoding work from
+    // consuming the artifact or ordinary request concurrency budgets.
+    let graph_routes = Router::new()
+        .route(ROUTE_DECLARED_GRAPH, get(graph::get_declared_graph))
+        .route(
+            ROUTE_DECLARED_GRAPH_EXPORT,
+            get(graph_exports::get_declared_graph_export),
+        )
+        .route(ROUTE_RESOLUTION_GRAPH, get(graph::get_resolution_graph))
+        .layer(tower::limit::ConcurrencyLimitLayer::new(
+            graph_serve_concurrency(),
         ));
 
     // Only publish carries an artifact body; every other endpoint takes a
@@ -108,8 +143,8 @@ pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
         .route(ROUTE_ORGS, post(orgs::claim_org))
         .route(ROUTE_AUDIT, get(audit::get_audit_log))
         .route(ROUTE_AUDIT_VERIFY, get(audit::verify_audit_log))
-        .route(ROUTE_RESOLUTION_GRAPH, get(graph::get_resolution_graph))
         .merge(artifact_routes)
+        .merge(graph_routes)
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
         .merge(publish_route)
         // Charge authenticated requests against their token's bucket before
@@ -323,8 +358,25 @@ mod tests {
             zed_interfaces::declared_dependency_graph_path("acme", "http-kit", "1.2.0")
         );
         assert_eq!(
+            fill(ROUTE_DECLARED_GRAPH_EXPORT).replace("{format}", "xml"),
+            "/v1/packages/acme/http-kit/versions/1.2.0/dependency-graph/export/xml"
+        );
+        assert_eq!(
             ROUTE_RESOLUTION_GRAPH.replace("{resolution_digest}", "sha256:abc"),
             zed_interfaces::resolution_dependency_graph_path("sha256:abc")
+        );
+    }
+
+    #[test]
+    fn graph_concurrency_is_bounded_by_its_own_memory_budget() {
+        let working_set = usize::try_from(DEPENDENCY_GRAPH_DEFAULT_MAX_ENCODED_BYTES)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(GRAPH_WORKING_SET_MULTIPLIER);
+        assert_eq!(graph_serve_concurrency_for_budget(working_set - 1), 1);
+        assert_eq!(graph_serve_concurrency_for_budget(working_set * 2), 2);
+        assert_eq!(
+            graph_serve_concurrency_for_budget(usize::MAX),
+            MAX_IN_FLIGHT_REQUESTS
         );
     }
 
@@ -342,6 +394,7 @@ mod tests {
             .unwrap(),
             verifier: TagVerifier::new(TagPolicy::Off),
             public_base_url: "http://localhost:8080".to_string(),
+            registry_id: "registry:zpkg-primary".to_string(),
             max_orgs_per_token: 5,
             fiducia: None,
             rate_limiter: None,
@@ -376,6 +429,7 @@ mod tests {
             .unwrap(),
             verifier: TagVerifier::new(TagPolicy::Off),
             public_base_url: "http://localhost:8080".to_string(),
+            registry_id: "registry:zpkg-primary".to_string(),
             max_orgs_per_token: 5,
             fiducia: None,
             rate_limiter: Some(Arc::new(limiter)),

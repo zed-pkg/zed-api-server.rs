@@ -2042,7 +2042,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -2894,7 +2894,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.43",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror",
  "tokio",
  "tracing",
@@ -2932,7 +2932,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -5201,6 +5201,7 @@ dependencies = [
  "fiducia-client",
  "flate2",
  "hex",
+ "http-body 1.1.0",
  "migration",
  "percent-encoding",
  "reqwest",
@@ -5219,7 +5220,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "zed-interfaces",
+ "zed-interfaces 0.1.0 (git+https://github.com/zed-pkg/zed-interfaces.git?rev=4b87e425b04777b0ee413971dc1df805d24f295f)",
  "zed-orm-core",
  "zip",
 ]
@@ -5227,7 +5228,22 @@ dependencies = [
 [[package]]
 name = "zed-interfaces"
 version = "0.1.0"
-source = "git+https://github.com/zed-pkg/zed-interfaces.git?rev=30d739167036f54b7919c5776c453123f206ca3c#30d739167036f54b7919c5776c453123f206ca3c"
+source = "git+https://github.com/zed-pkg/zed-interfaces.git?rev=4b87e425b04777b0ee413971dc1df805d24f295f#4b87e425b04777b0ee413971dc1df805d24f295f"
+dependencies = [
+ "hex",
+ "schemars",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+ "toml 1.1.4+spec-1.1.0",
+]
+
+[[package]]
+name = "zed-interfaces"
+version = "0.1.0"
+source = "git+https://github.com/zed-pkg/zed-interfaces.git?rev=7d31f80dd8a310f218931165a3ad636a2f32b932#7d31f80dd8a310f218931165a3ad636a2f32b932"
 dependencies = [
  "hex",
  "schemars",
@@ -5242,12 +5258,13 @@ dependencies = [
 [[package]]
 name = "zed-orm-core"
 version = "0.1.0"
-source = "git+https://github.com/zed-pkg/zed-lib-core.git?rev=700f1f9578c6633a20693a5b1f52970ab845a740#700f1f9578c6633a20693a5b1f52970ab845a740"
+source = "git+https://github.com/zed-pkg/zed-lib-core.git?rev=c3d486a1519381276fbec02aa25247f542924443#c3d486a1519381276fbec02aa25247f542924443"
 dependencies = [
  "chrono",
  "sea-orm",
  "serde_json",
  "uuid",
+ "zed-interfaces 0.1.0 (git+https://github.com/zed-pkg/zed-interfaces.git?rev=7d31f80dd8a310f218931165a3ad636a2f32b932)",
 ]
 
 [[package]]

@@ -1,12 +1,16 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use aws_sdk_s3::presigning::PresigningConfig;
 use bytes::Bytes;
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::config::StorageConfig;
 
@@ -41,6 +45,15 @@ pub const MAX_BUFFERED_ARTIFACT_BYTES: u64 = 100 * 1024 * 1024;
 /// the header must be baked into the stored object and the presigned request or
 /// it is silently lost on the redirect.
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+const ARTIFACT_SHA256_METADATA_KEY: &str = "zpkg-sha256";
+const COPY_BUFFER_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+struct ExpectedArtifact<'a> {
+    len: u64,
+    sha256: &'a str,
+    content_type: &'a str,
+}
 
 /// How a download should be served to the client.
 pub enum Download {
@@ -94,23 +107,48 @@ impl ArtifactStore {
         dir.join(key)
     }
 
-    /// Takes `Bytes` rather than `Vec<u8>`: the artifact arrives from the
-    /// multipart reader as `Bytes`, and a `Vec` signature forced a second full
-    /// copy of every upload (peak ~2x the artifact size per in-flight publish).
-    /// All backends consume `Bytes` without copying.
-    pub async fn put(&self, key: &str, bytes: Bytes, content_type: &str) -> Result<()> {
+    /// Store bytes whose digest was already recomputed by the caller.
+    ///
+    /// The digest is persisted as object metadata and is also used to verify a
+    /// failed/raced S3-compatible PUT. Only a byte-for-byte, length- and
+    /// metadata-identical object is accepted as an idempotent recovery.
+    pub async fn put_verified(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        content_type: &str,
+        sha256: &str,
+    ) -> Result<()> {
+        if sha256.len() != 64
+            || !sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            anyhow::bail!("artifact sha256 must be 64 lowercase hexadecimal characters");
+        }
+        let expected = ExpectedArtifact {
+            len: bytes.len() as u64,
+            sha256,
+            content_type,
+        };
         match self {
             Self::Memory { objects, max_bytes } => {
                 // The write lock makes capacity accounting and insertion one
-                // transaction. Re-publishing the same content-addressed key
-                // replaces its old bytes without double-counting them.
+                // transaction. Content-addressed keys are immutable across all
+                // backends: an identical retry succeeds, while a collision can
+                // never replace the bytes already visible to readers.
                 let mut objects = objects.write().await;
+                if let Some(existing) = objects.get(key) {
+                    if existing == &bytes {
+                        return Ok(());
+                    }
+                    anyhow::bail!(
+                        "in-memory artifact `{key}` already exists with different immutable content"
+                    );
+                }
                 let retained_bytes = objects
-                    .iter()
-                    .filter(|(existing_key, _)| existing_key.as_str() != key)
-                    .try_fold(0u64, |total, (_, value)| {
-                        total.checked_add(value.len() as u64)
-                    })
+                    .values()
+                    .try_fold(0u64, |total, value| total.checked_add(value.len() as u64))
                     .context("in-memory artifact byte accounting overflowed")?;
                 let next_bytes = retained_bytes
                     .checked_add(bytes.len() as u64)
@@ -126,19 +164,20 @@ impl ArtifactStore {
             }
             Self::Local { dir } => {
                 let path = Self::local_path(dir, key);
-                if let Some(parent) = path.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
-                }
-                tokio::fs::write(path, bytes).await?;
-                Ok(())
+                Self::put_local(&path, bytes, &expected).await
             }
             Self::S3 { client, bucket } => {
                 let put = client
                     .put_object()
                     .bucket(bucket)
                     .key(key)
+                    // Never overwrite an immutable content-addressed key. R2
+                    // and S3 both implement wildcard If-None-Match; an existing
+                    // object takes the verified recovery path below.
+                    .if_none_match("*")
                     .content_type(content_type)
                     .cache_control(IMMUTABLE_CACHE_CONTROL)
+                    .metadata(ARTIFACT_SHA256_METADATA_KEY, sha256)
                     .body(bytes.into())
                     .send()
                     .await;
@@ -147,30 +186,214 @@ impl ArtifactStore {
                     Err(err) => {
                         // Keys are content-addressed (`artifacts/<sha256>.<ext>`),
                         // so a concurrent publish of the same artifact races on the
-                        // identical key with byte-identical content. R2 rate-limits
-                        // per-key writes, so the losing racer's put_object can fail
-                        // even though the winner already stored the exact bytes. If
-                        // the object is present afterwards, the write is effectively
-                        // done — treat it as success and let the caller's version
-                        // insert surface the immutability conflict as a clean 409
-                        // instead of a 500. Any other failure (auth, network, a
-                        // genuinely absent object) still propagates.
-                        if client
-                            .head_object()
-                            .bucket(bucket)
-                            .key(key)
-                            .send()
-                            .await
-                            .is_ok()
+                        // identical key with byte-identical content. R2 can
+                        // rate-limit concurrent writes to one key, but mere
+                        // existence is not proof of idempotence: an out-of-band
+                        // or corrupt object could occupy the key. Recover only
+                        // after a bounded GET proves the length, actual digest,
+                        // content type, immutable cache policy, and digest
+                        // metadata all match this publication.
+                        match Self::s3_object_matches(
+                            client, bucket, key, &expected,
+                        )
+                        .await
                         {
-                            Ok(())
-                        } else {
-                            Err(err).context("s3 put_object failed")
+                            Ok(true) => Ok(()),
+                            Ok(false) => Err(err).context(
+                                "s3 put_object failed and the existing object did not match the expected immutable artifact",
+                            ),
+                            Err(verify_error) => Err(err).context(format!(
+                                "s3 put_object failed and recovery verification failed: {verify_error:#}"
+                            )),
                         }
                     }
                 }
             }
         }
+    }
+
+    async fn put_local(path: &Path, bytes: Bytes, expected: &ExpectedArtifact<'_>) -> Result<()> {
+        if let Some(matches) = Self::local_object_matches(path, expected).await? {
+            if matches {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "local artifact {} already exists with different immutable content",
+                path.display()
+            );
+        }
+
+        let parent = path
+            .parent()
+            .context("local artifact path has no parent directory")?;
+        tokio::fs::create_dir_all(parent).await?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("local artifact path has no UTF-8 file name")?;
+        let temporary = parent.join(format!(".{file_name}.upload-{}.tmp", Uuid::new_v4()));
+
+        let result: Result<()> = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)
+                .await
+                .with_context(|| {
+                    format!(
+                        "creating local artifact staging file {}",
+                        temporary.display()
+                    )
+                })?;
+            file.write_all(&bytes).await.with_context(|| {
+                format!(
+                    "writing local artifact staging file {}",
+                    temporary.display()
+                )
+            })?;
+            file.flush().await?;
+            file.sync_all().await.with_context(|| {
+                format!(
+                    "syncing local artifact staging file {}",
+                    temporary.display()
+                )
+            })?;
+            drop(file);
+
+            // A hard link is a same-filesystem, atomic, no-clobber promotion.
+            // Unlike rename on Unix it cannot silently replace an immutable
+            // object that appeared between the preflight check and promotion.
+            match tokio::fs::hard_link(&temporary, path).await {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                    match Self::local_object_matches(path, expected).await? {
+                        Some(true) => Ok(()),
+                        Some(false) => anyhow::bail!(
+                            "local artifact {} won a race with different immutable content",
+                            path.display()
+                        ),
+                        None => Err(error).with_context(|| {
+                            format!("promoting local artifact {}", path.display())
+                        }),
+                    }
+                }
+                Err(error) => Err(error)
+                    .with_context(|| format!("promoting local artifact {}", path.display())),
+            }
+        }
+        .await;
+
+        let cleanup = tokio::fs::remove_file(&temporary).await;
+        if let Err(error) = cleanup
+            && error.kind() != ErrorKind::NotFound
+            && result.is_ok()
+        {
+            return Err(error).with_context(|| {
+                format!(
+                    "removing local artifact staging file {}",
+                    temporary.display()
+                )
+            });
+        }
+        if result.is_ok() {
+            Self::sync_directory(parent).await?;
+        }
+        result
+    }
+
+    async fn local_object_matches(
+        path: &Path,
+        expected: &ExpectedArtifact<'_>,
+    ) -> Result<Option<bool>> {
+        let metadata = match tokio::fs::metadata(path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.is_file() || metadata.len() != expected.len {
+            return Ok(Some(false));
+        }
+        let file = tokio::fs::File::open(path).await?;
+        let (len, sha256) = Self::hash_async_reader(file, expected.len).await?;
+        Ok(Some(len == expected.len && sha256 == expected.sha256))
+    }
+
+    #[cfg(unix)]
+    async fn sync_directory(path: &Path) -> Result<()> {
+        tokio::fs::File::open(path).await?.sync_all().await?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    async fn sync_directory(_path: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    async fn s3_object_matches(
+        client: &aws_sdk_s3::Client,
+        bucket: &str,
+        key: &str,
+        expected: &ExpectedArtifact<'_>,
+    ) -> Result<bool> {
+        let object = client
+            .get_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .context("s3 recovery get_object failed")?;
+        if !Self::object_metadata_matches(
+            object.content_length(),
+            object.content_type(),
+            object.cache_control(),
+            object.metadata(),
+            expected,
+        ) {
+            return Ok(false);
+        }
+
+        let (len, sha256) =
+            Self::hash_async_reader(object.body.into_async_read(), expected.len).await?;
+        Ok(len == expected.len && sha256 == expected.sha256)
+    }
+
+    fn object_metadata_matches(
+        content_length: Option<i64>,
+        content_type: Option<&str>,
+        cache_control: Option<&str>,
+        metadata: Option<&HashMap<String, String>>,
+        expected: &ExpectedArtifact<'_>,
+    ) -> bool {
+        content_length.and_then(|len| u64::try_from(len).ok()) == Some(expected.len)
+            && content_type == Some(expected.content_type)
+            && cache_control == Some(IMMUTABLE_CACHE_CONTROL)
+            && metadata
+                .and_then(|values| values.get(ARTIFACT_SHA256_METADATA_KEY))
+                .map(String::as_str)
+                == Some(expected.sha256)
+    }
+
+    async fn hash_async_reader(
+        mut reader: impl tokio::io::AsyncRead + Unpin,
+        expected_len: u64,
+    ) -> Result<(u64, String)> {
+        let mut hasher = Sha256::new();
+        let mut len = 0_u64;
+        let mut buffer = [0_u8; COPY_BUFFER_BYTES];
+        loop {
+            let read = reader.read(&mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            len = len
+                .checked_add(read as u64)
+                .context("artifact length overflowed u64 while hashing")?;
+            if len > expected_len {
+                return Ok((len, String::new()));
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok((len, hex::encode(hasher.finalize())))
     }
 
     pub async fn download(&self, key: &str) -> Result<Download> {
@@ -265,7 +488,13 @@ pub fn artifact_key(sha256: &str, extension: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+
+    fn digest(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
 
     #[test]
     fn keys_are_sha_addressed() {
@@ -279,9 +508,15 @@ mod tests {
             .unwrap();
         let payload = Bytes::from_static(b"zed-memory-artifact");
         let expected = payload.clone();
+        let sha256 = digest(&payload);
 
         store
-            .put("artifacts/test.tar.gz", payload, "application/gzip")
+            .put_verified(
+                "artifacts/test.tar.gz",
+                payload,
+                "application/gzip",
+                &sha256,
+            )
             .await
             .unwrap();
 
@@ -300,20 +535,26 @@ mod tests {
         let store = ArtifactStore::from_config(&StorageConfig::Memory { max_bytes: 4 })
             .await
             .unwrap();
+        let first = Bytes::from_static(b"1234");
+        let first_sha256 = digest(&first);
         store
-            .put(
+            .put_verified(
                 "artifacts/one",
-                Bytes::from_static(b"1234"),
+                first,
                 "application/octet-stream",
+                &first_sha256,
             )
             .await
             .unwrap();
 
+        let second = Bytes::from_static(b"5");
+        let second_sha256 = digest(&second);
         let error = store
-            .put(
+            .put_verified(
                 "artifacts/two",
-                Bytes::from_static(b"5"),
+                second,
                 "application/octet-stream",
+                &second_sha256,
             )
             .await
             .unwrap_err();
@@ -323,5 +564,167 @@ mod tests {
             Download::Bytes { bytes } => assert_eq!(bytes, Bytes::from_static(b"1234")),
             _ => panic!("memory backend returned a non-memory download"),
         }
+    }
+
+    #[tokio::test]
+    async fn memory_store_never_overwrites_a_digest_collision() {
+        let store = ArtifactStore::from_config(&StorageConfig::Memory { max_bytes: 64 })
+            .await
+            .unwrap();
+        let key = "artifacts/collision.zip";
+        let original = Bytes::from_static(b"expected bytes");
+        let sha256 = digest(&original);
+        store
+            .put_verified(key, original.clone(), "application/zip", &sha256)
+            .await
+            .unwrap();
+
+        let error = store
+            .put_verified(
+                key,
+                Bytes::from_static(b"different bytes"),
+                "application/zip",
+                &sha256,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("different immutable content"));
+        assert_eq!(store.get_bytes(key).await.unwrap(), original.to_vec());
+    }
+
+    #[tokio::test]
+    async fn verified_put_rejects_a_noncanonical_digest() {
+        let store = ArtifactStore::from_config(&StorageConfig::Memory { max_bytes: 64 })
+            .await
+            .unwrap();
+        let error = store
+            .put_verified(
+                "artifacts/test.zip",
+                Bytes::from_static(b"payload"),
+                "application/zip",
+                "ABC123",
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("64 lowercase hexadecimal"));
+    }
+
+    #[test]
+    fn raced_object_recovery_requires_all_immutable_metadata() {
+        let sha256 = "a".repeat(64);
+        let expected = ExpectedArtifact {
+            len: 7,
+            sha256: &sha256,
+            content_type: "application/zip",
+        };
+        let mut metadata =
+            HashMap::from([(ARTIFACT_SHA256_METADATA_KEY.to_owned(), sha256.clone())]);
+
+        assert!(ArtifactStore::object_metadata_matches(
+            Some(7),
+            Some("application/zip"),
+            Some(IMMUTABLE_CACHE_CONTROL),
+            Some(&metadata),
+            &expected,
+        ));
+        assert!(!ArtifactStore::object_metadata_matches(
+            Some(8),
+            Some("application/zip"),
+            Some(IMMUTABLE_CACHE_CONTROL),
+            Some(&metadata),
+            &expected,
+        ));
+        assert!(!ArtifactStore::object_metadata_matches(
+            Some(7),
+            Some("application/octet-stream"),
+            Some(IMMUTABLE_CACHE_CONTROL),
+            Some(&metadata),
+            &expected,
+        ));
+        assert!(!ArtifactStore::object_metadata_matches(
+            Some(7),
+            Some("application/zip"),
+            None,
+            Some(&metadata),
+            &expected,
+        ));
+        metadata.insert(ARTIFACT_SHA256_METADATA_KEY.to_owned(), "b".repeat(64));
+        assert!(!ArtifactStore::object_metadata_matches(
+            Some(7),
+            Some("application/zip"),
+            Some(IMMUTABLE_CACHE_CONTROL),
+            Some(&metadata),
+            &expected,
+        ));
+    }
+
+    #[tokio::test]
+    async fn local_store_atomically_promotes_concurrent_identical_puts() {
+        let root = std::env::temp_dir().join(format!("zed-local-store-{}", Uuid::new_v4()));
+        let store = Arc::new(
+            ArtifactStore::from_config(&StorageConfig::Local {
+                dir: root.to_string_lossy().to_string(),
+            })
+            .await
+            .unwrap(),
+        );
+        let payload = Bytes::from_static(b"immutable native ZIP bytes");
+        let sha256 = digest(&payload);
+        let key = "artifacts/atomic.zip";
+
+        let mut writes = Vec::new();
+        for _ in 0..8 {
+            let store = store.clone();
+            let payload = payload.clone();
+            let sha256 = sha256.clone();
+            writes.push(tokio::spawn(async move {
+                store
+                    .put_verified(key, payload, "application/zip", &sha256)
+                    .await
+            }));
+        }
+        for write in writes {
+            write.await.unwrap().unwrap();
+        }
+
+        assert_eq!(store.get_bytes(key).await.unwrap(), payload.to_vec());
+        let mut entries = tokio::fs::read_dir(root.join("artifacts")).await.unwrap();
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name().to_string_lossy().to_string());
+        }
+        names.sort();
+        assert_eq!(names, vec!["atomic.zip".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn local_store_never_overwrites_a_digest_collision() {
+        let root = std::env::temp_dir().join(format!("zed-local-store-{}", Uuid::new_v4()));
+        let store = ArtifactStore::from_config(&StorageConfig::Local {
+            dir: root.to_string_lossy().to_string(),
+        })
+        .await
+        .unwrap();
+        let key = "artifacts/collision.zip";
+        let payload = Bytes::from_static(b"expected bytes");
+        let sha256 = digest(&payload);
+        store
+            .put_verified(key, payload.clone(), "application/zip", &sha256)
+            .await
+            .unwrap();
+        let path = root.join(key);
+        tokio::fs::write(&path, b"out-of-band corruption")
+            .await
+            .unwrap();
+
+        let error = store
+            .put_verified(key, payload, "application/zip", &sha256)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("different immutable content"));
+        assert_eq!(
+            tokio::fs::read(path).await.unwrap(),
+            b"out-of-band corruption"
+        );
     }
 }

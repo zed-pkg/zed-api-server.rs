@@ -14,6 +14,9 @@ pub struct Config {
     pub auto_migrate: bool,
     pub storage: StorageConfig,
     pub public_base_url: String,
+    /// Stable logical registry identity embedded in graph nodes. Unlike the
+    /// public URL, this value must not change when an ingress alias changes.
+    pub registry_id: String,
     pub verify_tags: TagPolicy,
     pub max_artifact_bytes: usize,
     pub max_orgs_per_token: u64,
@@ -165,6 +168,7 @@ impl Config {
             auto_migrate: env_or("AUTO_MIGRATE", "false") == "true",
             storage,
             public_base_url: env_or("PUBLIC_BASE_URL", "http://localhost:8080"),
+            registry_id: validate_registry_id(env_or("ZED_REGISTRY_ID", "registry:zpkg-primary"))?,
             verify_tags,
             max_artifact_bytes: env_or("MAX_ARTIFACT_BYTES", "104857600")
                 .parse()
@@ -193,6 +197,24 @@ fn nonempty(key: &str, value: String) -> Result<String> {
     Ok(value)
 }
 
+fn validate_registry_id(value: String) -> Result<String> {
+    let value = value.trim().to_owned();
+    let Some(suffix) = value.strip_prefix("registry:") else {
+        bail!("ZED_REGISTRY_ID must start with `registry:`");
+    };
+    if suffix.is_empty()
+        || suffix.len() > 128
+        || !suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        bail!(
+            "ZED_REGISTRY_ID suffix must contain 1 to 128 ASCII letters, digits, dots, underscores, or hyphens"
+        );
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +232,22 @@ mod tests {
         assert!(!debug.contains("secret-value"));
         assert!(debug.contains("<redacted>"));
         assert!(debug.contains("zpkg-web"));
+    }
+
+    #[test]
+    fn registry_identity_is_logical_and_not_an_ingress_url() {
+        assert_eq!(
+            validate_registry_id(" registry:zpkg-primary ".into()).unwrap(),
+            "registry:zpkg-primary"
+        );
+        for invalid in [
+            "",
+            "https://registry.zpkg.net",
+            "registry:",
+            "registry:contains/slash",
+            "registry:contains space",
+        ] {
+            assert!(validate_registry_id(invalid.into()).is_err(), "{invalid}");
+        }
     }
 }
