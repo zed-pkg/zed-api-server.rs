@@ -51,6 +51,9 @@ services:
         condition: service_completed_successfully
     environment:
       DATABASE_URL: postgres://zed:zed@postgres:5432/zed
+      # Transitional exception for this disposable local stack only. Production
+      # and Kubernetes releases apply reviewed dpm migrations as a separate job.
+      AUTO_MIGRATE: "true"
       STORAGE_BACKEND: s3
       S3_BUCKET: zed-pkg-artifacts
       S3_ENDPOINT_URL: http://minio:9000
