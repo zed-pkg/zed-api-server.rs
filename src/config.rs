@@ -14,6 +14,8 @@ pub struct Config {
     pub auto_migrate: bool,
     pub storage: StorageConfig,
     pub public_base_url: String,
+    /// Mirrors this deployment advertises, from `ZED_MIRRORS`.
+    pub mirrors: Vec<zed_interfaces::mirror::MirrorDescriptorV1>,
     /// Stable logical registry identity embedded in graph nodes. Unlike the
     /// public URL, this value must not change when an ingress alias changes.
     pub registry_id: String,
@@ -95,6 +97,23 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// Parse `ZED_MIRRORS`: a JSON array of mirror descriptors.
+///
+/// A malformed value is a startup failure, not a warning. Mirrors are a
+/// resilience mechanism, and one that has been silently ignored since a typo
+/// in a deploy three months ago is worse than none — it is a fallback everyone
+/// believes exists.
+fn parse_mirrors(raw: &str) -> Result<Vec<zed_interfaces::mirror::MirrorDescriptorV1>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mirrors: Vec<zed_interfaces::mirror::MirrorDescriptorV1> =
+        serde_json::from_str(trimmed).context("ZED_MIRRORS must be a JSON array of mirrors")?;
+    zed_interfaces::mirror::normalize_mirrors(&mirrors)
+        .map_err(|error| anyhow::anyhow!("ZED_MIRRORS is invalid: {error}"))
+}
+
 impl Config {
     pub fn from_env() -> Result<Self> {
         let storage = match env_or("STORAGE_BACKEND", "local").as_str() {
@@ -168,6 +187,7 @@ impl Config {
             auto_migrate: env_or("AUTO_MIGRATE", "false") == "true",
             storage,
             public_base_url: env_or("PUBLIC_BASE_URL", "http://localhost:8080"),
+            mirrors: parse_mirrors(&env_or("ZED_MIRRORS", ""))?,
             registry_id: validate_registry_id(env_or("ZED_REGISTRY_ID", "registry:zpkg-primary"))?,
             verify_tags,
             max_artifact_bytes: env_or("MAX_ARTIFACT_BYTES", "104857600")

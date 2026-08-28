@@ -120,6 +120,7 @@ mod tests {
             shared_auth_audience: "zed-pkg-tests".to_string(),
             shared_auth_application_id: "zed-pkg".to_string(),
             shared_auth_public_url: None,
+            mirrors: Vec::new(),
         })
     }
 
@@ -161,6 +162,8 @@ mod tests {
             version_scheme: ActiveValue::Set("semver".to_string()),
             tags: ActiveValue::Set(serde_json::json!([])),
             created_at: ActiveValue::Set(Utc::now()),
+            index_sequence: ActiveValue::Set(1),
+            signed_index: ActiveValue::NotSet,
         }
         .insert(&state.db)
         .await
@@ -177,6 +180,8 @@ mod tests {
             artifact_key: ActiveValue::Set("artifacts/aaa.tar.gz".to_string()),
             yanked: ActiveValue::Set(false),
             published_at: ActiveValue::Set(Utc::now()),
+            mirrors: ActiveValue::Set(serde_json::json!([])),
+            signatures: ActiveValue::Set(serde_json::json!([])),
         }
         .insert(&state.db)
         .await

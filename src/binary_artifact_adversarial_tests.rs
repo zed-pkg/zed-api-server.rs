@@ -125,6 +125,9 @@ fn valid_archive() -> (PublishMeta, Vec<u8>) {
         sha256: sha256(&archive),
         size: archive.len() as u64,
         format: ArtifactFormat::Zip,
+        mirrors: Vec::new(),
+        published_at: None,
+        signatures: Vec::new(),
     };
     verify_publish(&meta, &archive)
         .expect("valid server fixture")

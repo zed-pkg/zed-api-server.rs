@@ -38,6 +38,20 @@ pub async fn get_package(
         latest: versions.first().cloned(),
         tags,
         versions,
+        // From the newest publish: the mirror set a package advertises is the
+        // one its most recent release declared, not one an abandoned version
+        // named years ago.
+        mirrors: rows
+            .iter()
+            .max_by_key(|row| row.published_at)
+            .and_then(|row| serde_json::from_value(row.mirrors.clone()).ok())
+            .unwrap_or_default(),
+        // Inlined so a client that resolves a package also learns how to
+        // verify a mirror's answer next time — without a second round trip it
+        // may not get to make.
+        signing_keys: super::keys::load_keys(&state, org_row.id)
+            .await
+            .unwrap_or_default(),
     }))
 }
 

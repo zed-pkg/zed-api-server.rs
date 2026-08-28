@@ -43,6 +43,9 @@ axum = { version = "0.8", features = ["multipart"] }
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
+# Verifies publisher metadata signatures at publish time, so a stored
+# signature is one that verified at least once against an enrolled key.
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "fast"] }
 flate2 = "1"
 hex = "0.4"
 http-body = "1"

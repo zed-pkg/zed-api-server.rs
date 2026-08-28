@@ -231,6 +231,7 @@ mod tests {
             shared_auth_audience: "zed-pkg-tests".to_string(),
             shared_auth_application_id: "zed-pkg".to_string(),
             shared_auth_public_url: None,
+            mirrors: Vec::new(),
         })
     }
 

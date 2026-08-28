@@ -26,6 +26,14 @@ pub struct AppState {
     pub storage_backend: crate::storage_report::StorageBackend,
     pub verifier: TagVerifier,
     pub public_base_url: String,
+    /// Mirrors this deployment advertises for its own contents, in try order.
+    ///
+    /// Configured rather than derived: only an operator knows which buckets and
+    /// hostnames actually front this bucket, and a wrong guess here would point
+    /// clients at a host that answers 404 during exactly the outage the list
+    /// exists for. Empty by default, which is the correct answer for a
+    /// self-hosted deployment with no CDN.
+    pub mirrors: Vec<zed_interfaces::mirror::MirrorDescriptorV1>,
     /// Stable graph-node identity; deliberately independent of ingress URLs.
     pub registry_id: String,
     pub max_orgs_per_token: u64,

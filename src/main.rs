@@ -17,6 +17,7 @@ mod rbac;
 mod routes;
 mod server;
 mod shared_auth;
+mod signing;
 mod state;
 mod storage;
 mod storage_report;
