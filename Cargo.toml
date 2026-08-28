@@ -79,3 +79,34 @@ toml = "0.9"
 # `cargo build --release`), giving publish/claim handlers a real in-memory
 # database to exercise transaction/immutability behavior against.
 sea-orm = { version = "1", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros", "with-chrono", "with-uuid"] }
+
+# --- functional programming conformance -------------------------------------
+# Warn level only: these never fail a build. They fail `cargo clippy -- -D warnings`
+# in the nightly job. See FP-GUIDELINES.md for the principle behind each group.
+
+[lints.rust]
+unsafe_code = "warn"
+unused_must_use = "deny"
+unreachable_pub = "warn"
+
+[lints.clippy]
+# typed errors: panicking is not error handling
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+indexing_slicing = "warn"
+# illegal states excluded by types
+wildcard_enum_match_arm = "warn"
+match_wildcard_for_single_variants = "warn"
+# immutable values and pure transformations
+mut_mut = "warn"
+needless_pass_by_ref_mut = "warn"
+# composition
+too_many_lines = "warn"
+cognitive_complexity = "warn"
+module_name_repetitions = "allow"
+# explicit inputs and outputs
+must_use_candidate = "warn"
+return_self_not_must_use = "warn"
