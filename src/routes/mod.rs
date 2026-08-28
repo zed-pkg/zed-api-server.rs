@@ -13,6 +13,7 @@ mod packages;
 mod publish;
 mod search;
 mod semantic;
+mod storage;
 mod yank;
 
 use std::sync::Arc;
@@ -41,6 +42,10 @@ pub const ROUTE_ORGS: &str = "/v1/orgs";
 pub const ROUTE_AUDIT: &str = "/v1/orgs/{org}/audit";
 pub const ROUTE_AUDIT_VERIFY: &str = "/v1/orgs/{org}/audit/verify";
 pub const ROUTE_FILES: &str = "/v1/files/{org}/{name}/{version}/{*path}";
+/// Read-only description of the configured artifact backend.
+pub const ROUTE_STORAGE_STATUS: &str = "/v1/storage/status";
+/// Read-only reconciliation of one artifact against that backend.
+pub const ROUTE_STORAGE_ARTIFACT: &str = "/v1/storage/artifacts/{sha256}";
 pub const ROUTE_DECLARED_GRAPH: &str =
     "/v1/packages/{org}/{name}/versions/{version}/dependency-graph";
 pub const ROUTE_DECLARED_GRAPH_EXPORT: &str =
@@ -122,6 +127,16 @@ pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
     // small JSON document (or none). The 100 MB publish limit applied
     // globally would let a client stream ~100 MB at the cheap JSON endpoints,
     // so scope the large limit to publish and default the rest to 64 KiB.
+    // The storage console's ceilings are the server's own, so they are handed
+    // to the handlers rather than duplicated in a client that would drift.
+    let storage_routes = Router::new()
+        .route(ROUTE_STORAGE_STATUS, get(storage::status))
+        .route(ROUTE_STORAGE_ARTIFACT, get(storage::artifact))
+        .layer(axum::Extension(crate::storage_report::StorageLimits {
+            max_artifact_bytes: max_artifact_bytes as u64,
+            max_buffered_artifact_bytes: crate::storage::MAX_BUFFERED_ARTIFACT_BYTES,
+        }));
+
     let publish_route = Router::new()
         .route(
             ROUTE_VERSION,
@@ -145,6 +160,7 @@ pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
         .route(ROUTE_AUDIT_VERIFY, get(audit::verify_audit_log))
         .merge(artifact_routes)
         .merge(graph_routes)
+        .merge(storage_routes)
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
         .merge(publish_route)
         // Charge authenticated requests against their token's bucket before

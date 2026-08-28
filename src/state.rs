@@ -20,6 +20,10 @@ pub struct AppState {
     /// closed when it is unavailable.
     pub registry_write: Option<WriteContext>,
     pub store: ArtifactStore,
+    /// Static, credential-free description of the configured backend, resolved
+    /// once at startup. Held on state rather than re-derived per request so the
+    /// console can never report a backend the process is not actually using.
+    pub storage_backend: crate::storage_report::StorageBackend,
     pub verifier: TagVerifier,
     pub public_base_url: String,
     /// Stable graph-node identity; deliberately independent of ingress URLs.
