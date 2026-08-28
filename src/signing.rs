@@ -14,7 +14,7 @@
 //! authority.
 
 use anyhow::{Result, anyhow, bail};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use zed_interfaces::signing::{
     DetachedSignatureV1, ED25519_PUBLIC_KEY_BYTES, ED25519_SIGNATURE_BYTES, PublisherKeyV1,
     SIGNING_ALGORITHM,
@@ -80,20 +80,4 @@ fn verify_one(
     verifying
         .verify_strict(preimage, &Signature::from_bytes(&bytes))
         .map_err(|_| anyhow!("signature by `{}` does not verify", key.key_id))
-}
-
-/// Kept so the permissive path is reachable in tests without being reachable
-/// in production; `Verifier` would otherwise be an unused import.
-#[cfg(test)]
-pub(crate) fn verify_permissive(
-    preimage: &[u8],
-    signature: &[u8; ED25519_SIGNATURE_BYTES],
-    public: &[u8; ED25519_PUBLIC_KEY_BYTES],
-) -> bool {
-    VerifyingKey::from_bytes(public)
-        .map(|key| {
-            key.verify(preimage, &Signature::from_bytes(signature))
-                .is_ok()
-        })
-        .unwrap_or(false)
 }

@@ -232,6 +232,7 @@ mod tests {
             shared_auth_application_id: "zed-pkg".to_string(),
             shared_auth_public_url: None,
             mirrors: Vec::new(),
+            storage_backend: crate::storage_report::StorageBackend::process_memory(),
         })
     }
 

@@ -178,7 +178,13 @@ pub async fn put_signed_index(
     }
 
     let mut active: crate::entities::package::ActiveModel = pkg.into();
-    active.signed_index = sea_orm::ActiveValue::Set(Some(serde_json::to_value(&document)?));
+    let encoded = serde_json::to_value(&document).map_err(|error| {
+        crate::error::ApiErr::bad_request(
+            "invalid_index",
+            format!("signed index is not encodable: {error}"),
+        )
+    })?;
+    active.signed_index = sea_orm::ActiveValue::Set(Some(encoded));
     active.index_sequence = sea_orm::ActiveValue::Set(document.payload.sequence as i64);
     sea_orm::ActiveModelTrait::update(active, &state.db).await?;
 

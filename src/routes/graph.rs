@@ -1674,6 +1674,7 @@ url = "https://github.com/acme/http-kit"
             schema.create_table_from_entity(token::Entity),
             schema.create_table_from_entity(package::Entity),
             schema.create_table_from_entity(version::Entity),
+            schema.create_table_from_entity(crate::entities::publisher_key::Entity),
         ] {
             db.execute(backend.build(&stmt)).await.unwrap();
         }
@@ -1759,6 +1760,7 @@ url = "https://github.com/acme/http-kit"
                 shared_auth_application_id: "zpkg-web".to_owned(),
                 shared_auth_public_url: None,
                 mirrors: Vec::new(),
+                storage_backend: crate::storage_report::StorageBackend::process_memory(),
             }),
             8 * 1024 * 1024,
         )

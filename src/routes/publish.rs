@@ -644,6 +644,7 @@ mod tests {
             schema.create_table_from_entity(token::Entity),
             schema.create_table_from_entity(package::Entity),
             schema.create_table_from_entity(version::Entity),
+            schema.create_table_from_entity(crate::entities::publisher_key::Entity),
         ] {
             db.execute(backend.build(&stmt))
                 .await
@@ -681,6 +682,7 @@ mod tests {
             shared_auth_application_id: "zed-pkg".to_string(),
             shared_auth_public_url: None,
             mirrors: Vec::new(),
+            storage_backend: crate::storage_report::StorageBackend::process_memory(),
         })
     }
 

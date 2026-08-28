@@ -334,6 +334,8 @@ mod tests {
             artifact_key: format!("artifacts/{identity}.tar.gz"),
             yanked,
             published_at: Utc::now() + Duration::seconds(published_offset),
+            mirrors: serde_json::json!([]),
+            signatures: serde_json::json!([]),
         }
     }
 
@@ -452,6 +454,7 @@ mod tests {
             shared_auth_application_id: "zed-pkg".to_string(),
             shared_auth_public_url: None,
             mirrors: Vec::new(),
+            storage_backend: crate::storage_report::StorageBackend::process_memory(),
         });
         let app = router(state, 1024 * 1024);
         let response = app
@@ -488,6 +491,7 @@ mod tests {
             shared_auth_application_id: "zed-pkg".to_string(),
             shared_auth_public_url: None,
             mirrors: Vec::new(),
+            storage_backend: crate::storage_report::StorageBackend::process_memory(),
         })
     }
 
