@@ -41,3 +41,7 @@ dir = ".vendor/.zed"
 [targets.repository]
 dir = "."
 adapter = "none"
+
+[dependencies]
+"zed-pkg/zed-lib-core" = "^0.1.0"
+"zed-pkg/zed-orm-core" = "^0.1.0"
