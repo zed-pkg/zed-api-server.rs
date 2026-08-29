@@ -54,3 +54,20 @@ fn healthcheck_is_complete_before_the_runtime_secret_instructions() {
         "HEALTHCHECK continuation must not contain a blank line"
     );
 }
+
+#[test]
+fn runtime_secret_files_are_copied_from_the_documented_parent_build_context() {
+    let runtime = runtime_stage();
+    assert!(
+        runtime.contains(
+            "COPY --chmod=0755 zed-api-server.rs/scripts/sops-entrypoint.sh /usr/local/bin/sops-entrypoint.sh"
+        ),
+        "the release workflow builds from the parent source-graph directory"
+    );
+    assert!(
+        runtime.contains(
+            "COPY --chmod=0644 zed-api-server.rs/env/enc/${SOPS_ENV}.env.enc /app/secrets/app.env"
+        ),
+        "the encrypted environment must resolve inside the checked-out API directory"
+    );
+}
