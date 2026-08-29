@@ -12,7 +12,7 @@ use crate::shared_auth::SharedAuthClient;
 use crate::state::AppState;
 use crate::storage::ArtifactStore;
 use crate::verify::TagVerifier;
-use crate::{account_router, api_docs, ratelimit, routes, tokens};
+use crate::{account_router, api_docs, ratelimit, registry_host, routes, tokens};
 
 #[derive(Debug, PartialEq, Eq)]
 enum ProcessCommand<'a> {
@@ -117,7 +117,13 @@ pub(crate) async fn run() -> Result<()> {
     let app = axum::Router::new()
         .merge(api_docs::router())
         .merge(routes::router(state.clone(), cfg.max_artifact_bytes))
-        .merge(account_router::router(state));
+        .merge(account_router::router(state))
+        // Defense in depth for the registry virtual host. Cloudflare runs the
+        // same transition table at the edge, but direct-origin traffic must
+        // not be able to bypass it with Host: registry.zpkg.net.
+        .layer(axum::middleware::from_fn(
+            registry_host::enforce_registry_host,
+        ));
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     tracing::info!("zed-api-server listening on {}", cfg.bind_addr);
     axum::serve(listener, app).await?;

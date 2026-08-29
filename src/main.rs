@@ -14,6 +14,7 @@ mod error;
 mod files;
 mod ratelimit;
 mod rbac;
+mod registry_host;
 mod routes;
 mod server;
 mod shared_auth;

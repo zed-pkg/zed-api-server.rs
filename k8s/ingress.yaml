@@ -3,11 +3,12 @@
 # verification disabled, so a public Ingress is gated on the DEN-534/DEN-535
 # promotion). Kept here so the public shape is reviewed ahead of time.
 #
-# api.zpkg.net and registry.zpkg.net both serve the API root today. When the
-# registry moves to a sub-path of the API server, the registry.zpkg.net rule
-# gains the path prefix (or an edge rewrite) — DNS stays the same. DNS lives
-# in zed-infra/terraform/cloudflare; records stay DNS-only until cert-manager
-# issues this certificate (ACME HTTP-01 ordering).
+# api.zpkg.net serves the complete API. registry.zpkg.net reaches the same
+# process, but `registry_host` rejects every route/method outside the explicit
+# machine-registry state table before handler work. Cloudflare enforces the
+# same table at the edge; the in-process guard prevents direct-origin bypass.
+# DNS lives in zed-infra/terraform/cloudflare; records stay DNS-only until
+# cert-manager issues this certificate (ACME HTTP-01 ordering).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

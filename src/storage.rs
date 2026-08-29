@@ -499,9 +499,8 @@ pub fn guessable_alias_keys(
     extension: &str,
     repo_url: &str,
 ) -> Vec<String> {
-    let (owner, repo) = crate::verify::parse_github(repo_url).unwrap_or_else(|| {
-        (org.to_string(), name.to_string())
-    });
+    let (owner, repo) = crate::verify::parse_github(repo_url)
+        .unwrap_or_else(|| (org.to_string(), name.to_string()));
     let mut keys = Vec::new();
     if safe_r2_segments(&[&owner, &repo, vcs_tag, name, version, extension]) {
         keys.push(format!(
