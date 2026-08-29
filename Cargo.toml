@@ -10,6 +10,7 @@ repository = "https://github.com/zed-pkg/zed-api-server.rs"
 members = [".", "migration"]
 
 [dependencies]
+k8s-web-api-data-plane = { git = "https://github.com/ORESoftware/k8s-libs-and-shared-defs.git", rev = "55adadc9f6d223d40b28ae66097dfe16930951b1", package = "k8s-web-api-data-plane" }
 # Keep every cross-repository boundary immutable and independently reviewable.
 # This revision includes the account/audit and dependency-graph contracts, the
 # additive graph export route/media contract (zed-interfaces#63), and the
