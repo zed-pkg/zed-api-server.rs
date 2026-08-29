@@ -28,6 +28,12 @@ Errors are JSON `ApiError { code, message }` — codes include `not_found`,
 `sha256_mismatch`, `tag_not_found`, `invalid_manifest`, `invalid_multipart`,
 `invalid_binary_artifact`, and `vcs_commit_mismatch`.
 
+`api.zpkg.net` serves the complete API. `registry.zpkg.net` reaches this same
+process but is constrained by a fail-closed Host state machine to the machine
+registry routes above (plus the rest of the checked-in machine OpenAPI). It
+cannot reach browser/account, auth, docs, admin, or unknown routes, including
+account compatibility routes that happen to live below `/v1`.
+
 Publish pipeline: bearer token -> manifest validation -> URL/manifest
 agreement -> server-side sha256 recomputation -> org ownership -> VCS tag
 verification (policy below) -> immutability check -> store artifact -> record

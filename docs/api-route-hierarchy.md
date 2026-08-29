@@ -21,6 +21,20 @@ the product may expose the same registry operations through an adapter beneath
 Both mounts use the same authentication, authorization, request limits, audit,
 and observability behavior.
 
+## Virtual-host boundary
+
+`api.zpkg.net` exposes the complete API assembled by this process. The
+`registry.zpkg.net` and `registry.<cloud>.zpkg.net` virtual hosts expose only
+the explicit machine-registry method/path table in `src/registry_host.rs`.
+Account/auth compatibility paths such as `/v1/account/*`, `/v1/me`, and
+`/v1/session/bootstrap` are rejected on a registry Host even though they share
+the `/v1` prefix.
+
+Cloudflare enforces the same transition table at the public edge. The server
+guard is independently authoritative for direct-origin traffic, so a DNS,
+Worker-route, or Ingress mistake cannot widen the registry hostname. Unknown
+paths and encoded-path ambiguity fail closed before handler work.
+
 ## Product adapter
 
 CLI and package-manager clients use `/v1`. Product clients may use the bounded

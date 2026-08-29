@@ -184,7 +184,12 @@ pub async fn publish(
     // the version row records it after the put.
     state
         .store
-        .put_verified(&key, artifact.clone(), meta.format.content_type(), &actual_sha)
+        .put_verified(
+            &key,
+            artifact.clone(),
+            meta.format.content_type(),
+            &actual_sha,
+        )
         .await?;
     if let Err(error) = state
         .store
