@@ -486,6 +486,71 @@ pub fn artifact_key(sha256: &str, extension: &str) -> String {
     format!("artifacts/{sha256}.{extension}")
 }
 
+/// Guessable public-R2 aliases so a client can fetch without `registry.zpkg.net`.
+/// The content-addressed [`artifact_key`] remains the canonical object; these
+/// extra keys are copies of the same bytes. Layout matches
+/// `zed-interfaces::source::r2_object_keys` (duplicated here because this
+/// crate's interfaces pin predates that module).
+pub fn guessable_alias_keys(
+    org: &str,
+    name: &str,
+    version: &str,
+    vcs_tag: &str,
+    extension: &str,
+    repo_url: &str,
+) -> Vec<String> {
+    let (owner, repo) = crate::verify::parse_github(repo_url).unwrap_or_else(|| {
+        (org.to_string(), name.to_string())
+    });
+    let mut keys = Vec::new();
+    if safe_r2_segments(&[&owner, &repo, vcs_tag, name, version, extension]) {
+        keys.push(format!(
+            "github/{owner}/{repo}/{vcs_tag}/{name}-{version}.{extension}"
+        ));
+    }
+    if safe_r2_segments(&[org, name, version, extension]) {
+        keys.push(format!(
+            "packages/{org}/{name}/{version}/{name}-{version}.{extension}"
+        ));
+    }
+    keys
+}
+
+fn safe_r2_segments(parts: &[&str]) -> bool {
+    parts.iter().all(|part| {
+        !part.is_empty()
+            && !part.contains('\0')
+            && !part.contains('\\')
+            && part
+                .split('/')
+                .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+    })
+}
+
+impl ArtifactStore {
+    /// Write extra public keys after the canonical content-addressed put.
+    /// Process-memory backends skip this: in-process tests talk to the API,
+    /// not the CDN, and alias copies would triple the capacity accounting.
+    pub async fn put_public_aliases(
+        &self,
+        keys: &[String],
+        bytes: Bytes,
+        content_type: &str,
+        sha256: &str,
+    ) -> Result<()> {
+        match self {
+            Self::Memory { .. } => Ok(()),
+            Self::Local { .. } | Self::S3 { .. } => {
+                for key in keys {
+                    self.put_verified(key, bytes.clone(), content_type, sha256)
+                        .await?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -499,6 +564,24 @@ mod tests {
     #[test]
     fn keys_are_sha_addressed() {
         assert_eq!(artifact_key("abc123", "tar.gz"), "artifacts/abc123.tar.gz");
+    }
+
+    #[test]
+    fn guessable_aliases_follow_github_and_package_layout() {
+        assert_eq!(
+            guessable_alias_keys(
+                "zed-pkg",
+                "zed-cli",
+                "0.1.0",
+                "v0.1.0",
+                "tar.gz",
+                "https://github.com/zed-pkg/zed-cli",
+            ),
+            vec![
+                "github/zed-pkg/zed-cli/v0.1.0/zed-cli-0.1.0.tar.gz".to_string(),
+                "packages/zed-pkg/zed-cli/0.1.0/zed-cli-0.1.0.tar.gz".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
