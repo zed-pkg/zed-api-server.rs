@@ -54,6 +54,13 @@ pub(crate) async fn run() -> Result<()> {
     }
     let registry_read = connect_registry_read_with_retry(&cfg).await?;
     let store = ArtifactStore::from_config(&cfg.storage).await?;
+    let storage_backend = store.describe(&cfg.storage);
+    tracing::info!(
+        backend = storage_backend.kind.as_str(),
+        provider = storage_backend.provider.as_str(),
+        durable = storage_backend.durable,
+        "artifact storage configured"
+    );
     let fiducia = cfg.fiducia.as_ref().map(|configuration| {
         tracing::info!("fiducia locks enabled at {}", configuration.url);
         Arc::new(match &configuration.internal_secret {
@@ -89,8 +96,10 @@ pub(crate) async fn run() -> Result<()> {
         registry_read: Some(registry_read),
         registry_write: Some(registry_write),
         store,
+        storage_backend,
         verifier: TagVerifier::new(cfg.verify_tags),
         public_base_url: cfg.public_base_url.trim_end_matches('/').to_string(),
+        mirrors: cfg.mirrors.clone(),
         registry_id: cfg.registry_id,
         max_orgs_per_token: cfg.max_orgs_per_token,
         fiducia,

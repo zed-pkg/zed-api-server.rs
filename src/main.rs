@@ -1,3 +1,4 @@
+mod web_api_plane;
 #[path = "routes/account.rs"]
 mod account;
 mod account_router;
@@ -17,8 +18,10 @@ mod rbac;
 mod routes;
 mod server;
 mod shared_auth;
+mod signing;
 mod state;
 mod storage;
+mod storage_report;
 mod tokens;
 mod verify;
 

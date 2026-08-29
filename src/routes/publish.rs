@@ -134,6 +134,70 @@ pub async fn publish(
     let key = artifact_key(&actual_sha, meta.format.extension());
     let artifact_len = artifact.len() as i64;
 
+    // Verify the publisher's signature here or never. A signature is checked
+    // by consumers at a time when this server may be unreachable, so admitting
+    // one that does not verify would store a permanent, undiscoverable defect:
+    // the publisher would believe their packages are installable during an
+    // outage, and find out otherwise during one.
+    //
+    // The publisher's own timestamp is inside the signed payload, so it is
+    // taken as given rather than replaced with the server clock — a
+    // "corrected" timestamp is an invalidated signature.
+    let published_at = match meta.published_at.as_deref() {
+        Some(raw) => chrono::DateTime::parse_from_rfc3339(raw)
+            .map(|parsed| parsed.with_timezone(&Utc))
+            .map_err(|_| {
+                ApiErr::bad_request(
+                    "invalid_published_at",
+                    "published_at must be an RFC 3339 timestamp",
+                )
+            })?,
+        None => Utc::now(),
+    };
+    if !meta.signatures.is_empty() {
+        let attestation = zed_interfaces::signing::VersionAttestationV1 {
+            org: org_slug.clone(),
+            name: name.clone(),
+            version: ver.clone(),
+            sha256: actual_sha.clone(),
+            size: artifact_len.max(0) as u64,
+            format: meta.format,
+            vcs_tag: meta.vcs_tag.clone(),
+            vcs_commit: meta.vcs_commit.clone().unwrap_or_default(),
+            published_at: meta
+                .published_at
+                .clone()
+                .unwrap_or_else(|| published_at.to_rfc3339()),
+            mirrors: meta.mirrors.clone(),
+        };
+        let preimage = zed_interfaces::signing::version_attestation_preimage(&attestation)
+            .map_err(|error| {
+                ApiErr::bad_request(
+                    "invalid_signature",
+                    format!("cannot reconstruct the signed payload: {error}"),
+                )
+            })?;
+        let enrolled = super::keys::load_keys(&state, org_row.id).await?;
+        crate::signing::verify_any(&preimage, &meta.signatures, &enrolled).map_err(|error| {
+            ApiErr::bad_request(
+                "signature_invalid",
+                format!("no enrolled key verifies this publication: {error}"),
+            )
+        })?;
+    }
+    let stored_mirrors = serde_json::to_value(&meta.mirrors).map_err(|error| {
+        ApiErr::bad_request(
+            "invalid_mirrors",
+            format!("mirror set is not encodable: {error}"),
+        )
+    })?;
+    let stored_signatures = serde_json::to_value(&meta.signatures).map_err(|error| {
+        ApiErr::bad_request(
+            "invalid_signature",
+            format!("signature set is not encodable: {error}"),
+        )
+    })?;
+
     // Immutability is checked BEFORE any metadata mutation. An identical retry
     // also repairs a possible legacy-only partial commit before returning the
     // stable conflict; a divergent retry never reaches the canonical plane.
@@ -209,7 +273,9 @@ pub async fn publish(
         vcs_commit: ActiveValue::Set(meta.vcs_commit.clone()),
         artifact_key: ActiveValue::Set(key.clone()),
         yanked: ActiveValue::Set(false),
-        published_at: ActiveValue::Set(Utc::now()),
+        published_at: ActiveValue::Set(published_at),
+        mirrors: ActiveValue::Set(stored_mirrors),
+        signatures: ActiveValue::Set(stored_signatures),
     }
     .insert(&txn)
     .await;
@@ -481,6 +547,14 @@ async fn upsert_package<C: ConnectionTrait>(
         // Tags for multi-tag lookup are sourced from the manifest keywords.
         tags: ActiveValue::Set(serde_json::json!(m.keywords)),
         created_at: ActiveValue::Set(Utc::now()),
+        // Starts at one for a package's first publish; bumped separately
+        // below, because ON CONFLICT DO UPDATE cannot express "increment the
+        // existing value" portably across Postgres and the SQLite test backend.
+        index_sequence: ActiveValue::Set(1),
+        // Not touched here: the stored signed index belongs to whoever last
+        // signed one, and an upsert that reset it on every publish would
+        // silently discard it.
+        signed_index: ActiveValue::NotSet,
     })
     .on_conflict(
         OnConflict::columns([package::Column::OrgId, package::Column::Name])
@@ -499,7 +573,7 @@ async fn upsert_package<C: ConnectionTrait>(
     // then read the row back within the same txn.
     .exec(conn)
     .await?;
-    package::Entity::find()
+    let row = package::Entity::find()
         .filter(package::Column::OrgId.eq(org_row.id))
         .filter(package::Column::Name.eq(name))
         .one(conn)
@@ -508,7 +582,21 @@ async fn upsert_package<C: ConnectionTrait>(
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "package_upsert_missing",
             message: "package row missing immediately after upsert".to_string(),
-        })
+        })?;
+
+    // Bump inside the publish transaction, so the counter a client uses as a
+    // rollback floor moves exactly when a version is actually added. Read and
+    // write rather than `SET x = x + 1` because the latter has no portable
+    // spelling across Postgres and the SQLite test backend; the surrounding
+    // transaction plus the (org_id, name) unique index make it safe.
+    let next = row.index_sequence.saturating_add(1).max(1);
+    let mut bumped: package::ActiveModel = row.clone().into();
+    bumped.index_sequence = ActiveValue::Set(next);
+    bumped.update(conn).await?;
+    Ok(package::Model {
+        index_sequence: next,
+        ..row
+    })
 }
 
 #[cfg(test)]
@@ -556,6 +644,7 @@ mod tests {
             schema.create_table_from_entity(token::Entity),
             schema.create_table_from_entity(package::Entity),
             schema.create_table_from_entity(version::Entity),
+            schema.create_table_from_entity(crate::entities::publisher_key::Entity),
         ] {
             db.execute(backend.build(&stmt))
                 .await
@@ -592,6 +681,8 @@ mod tests {
             shared_auth_audience: "zed-pkg-tests".to_string(),
             shared_auth_application_id: "zed-pkg".to_string(),
             shared_auth_public_url: None,
+            mirrors: Vec::new(),
+            storage_backend: crate::storage_report::StorageBackend::process_memory(),
         })
     }
 
@@ -633,6 +724,8 @@ mod tests {
             version_scheme: ActiveValue::Set("semver".to_string()),
             tags: ActiveValue::Set(serde_json::json!([])),
             created_at: ActiveValue::Set(Utc::now()),
+            index_sequence: ActiveValue::Set(1),
+            signed_index: ActiveValue::NotSet,
         }
         .insert(db)
         .await
@@ -649,6 +742,8 @@ mod tests {
             artifact_key: ActiveValue::Set("artifacts/existing.tar.gz".to_string()),
             yanked: ActiveValue::Set(false),
             published_at: ActiveValue::Set(Utc::now()),
+            mirrors: ActiveValue::Set(serde_json::json!([])),
+            signatures: ActiveValue::Set(serde_json::json!([])),
         }
         .insert(db)
         .await

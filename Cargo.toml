@@ -10,6 +10,7 @@ repository = "https://github.com/zed-pkg/zed-api-server.rs"
 members = [".", "migration"]
 
 [dependencies]
+k8s-web-api-data-plane = { git = "https://github.com/ORESoftware/k8s-libs-and-shared-defs.git", rev = "55adadc9f6d223d40b28ae66097dfe16930951b1", package = "k8s-web-api-data-plane" }
 # Keep every cross-repository boundary immutable and independently reviewable.
 # This revision includes the account/audit and dependency-graph contracts, the
 # additive graph export route/media contract (zed-interfaces#63), and the
@@ -43,6 +44,9 @@ axum = { version = "0.8", features = ["multipart"] }
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
+# Verifies publisher metadata signatures at publish time, so a stored
+# signature is one that verified at least once against an enrolled key.
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "fast"] }
 flate2 = "1"
 hex = "0.4"
 http-body = "1"

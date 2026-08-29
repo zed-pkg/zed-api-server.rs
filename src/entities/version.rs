@@ -14,7 +14,24 @@ pub struct Model {
     pub vcs_commit: Option<String>,
     pub artifact_key: String,
     pub yanked: bool,
+    /// Publisher-asserted for a signed publish, server-assigned otherwise.
+    ///
+    /// Asserted rather than assigned because it is inside the signed payload:
+    /// a signature can only cover fields its signer knew at signing time. The
+    /// server records what it was given and serves it back verbatim — a
+    /// "helpful" normalization here would invalidate every signature stored.
     pub published_at: DateTimeUtc,
+    /// Mirror descriptors submitted with the publish, as opaque JSON.
+    ///
+    /// Opaque on purpose. The server never derives a mirror set and never
+    /// rewrites one: the publisher's signature covers these exact bytes, so
+    /// any normalization the server applied would break verification for
+    /// every consumer.
+    #[sea_orm(column_type = "Json")]
+    pub mirrors: Json,
+    /// Detached publisher signatures over the version attestation.
+    #[sea_orm(column_type = "Json")]
+    pub signatures: Json,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
