@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Build context must be the PARENT directory because the release workflow
 # supplies side-by-side, commit-verified cross-repository sources:
 #
@@ -65,4 +66,8 @@ COPY --chmod=0755 zed-api-server.rs/scripts/sops-entrypoint.sh /usr/local/bin/so
 COPY --chmod=0644 zed-api-server.rs/env/enc/${SOPS_ENV}.env.enc /app/secrets/app.env
 ENV SOPS_SECRETS_FILE=/app/secrets/app.env
 
+# ores-otel: in-process OTLP to the cluster collector. The *-sidecar.rs image is a separate loopback helper on 127.0.0.1:9090 — do not EXPOSE 4317/4318 or 9090.
+ENV OTEL_SERVICE_NAME=zed-api-server \
+    OTEL_EXPORTER_OTLP_ENDPOINT=http://dd-otel-collector.observability.svc.cluster.local:4318 \
+    RUST_LOG=info
 ENTRYPOINT ["/usr/local/bin/sops-entrypoint.sh", "/usr/local/bin/zed-api-server"]
