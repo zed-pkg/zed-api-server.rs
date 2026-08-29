@@ -1,3 +1,4 @@
+mod web_api_plane;
 #[path = "routes/account.rs"]
 mod account;
 mod account_router;
