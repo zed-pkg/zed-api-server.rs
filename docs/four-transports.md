@@ -109,8 +109,31 @@ authenticated once at handshake outlives the token that opened it. The
 credential rides inside the envelope and is re-checked on arrival, so a revoked
 token stops working on the next frame rather than at the next reconnect.
 
-## Ordering note
+## Status
 
-`ores-transport` is currently depended on by `branch = "main"`. Pin it to a rev
-once it is pushed, matching how every other git dependency in this org is
-pinned.
+`ORESoftware/ores-transport` is not pushed yet, so **this module is in the tree but
+not in the build.** The dependency sits commented out in `Cargo.toml` and the module
+declaration is commented out in `src/main.rs` (`zed-api-server`) and `src/lib.rs`
+(`zed-web-server`).
+
+Gating it behind a cargo feature was tried and does not work: Cargo resolves a git
+dependency while building the lock file whether or not the feature that would use it
+is enabled, so an unreachable repository fails `cargo build` for everyone. The
+dependency has to be absent from the manifest, not merely inactive.
+
+Nothing is lost by that. Avenue 1 is unaffected -- it never went through
+`ores-transport` -- and avenues 2-4 were scaffolding either way: no `OperationHandler`
+or `DirectReader` implementation exists yet (see the section above), so no live code
+path is switched off here.
+
+To turn it back on, in each of `zed-api-server.rs` and `zed-web-server.rs`:
+
+1. `Cargo.toml` -- uncomment the `ores-transport` line and pin it to a rev.
+2. `src/main.rs` / `src/lib.rs` -- uncomment the `four_transports` module declaration.
+3. `cargo test -p <crate> four_transports` -- the slug/prefix and subject-namespacing
+   tests run again, which is the check that catches a renamed service publishing to
+   subjects nobody consumes.
+
+Because the module is not compiled, nothing keeps it honest against the rest of the
+crate in the meantime; treat step 3 as required, not optional, and expect drift
+proportional to how long the dependency stays unpushed.

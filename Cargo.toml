@@ -10,7 +10,15 @@ repository = "https://github.com/zed-pkg/zed-api-server.rs"
 members = [".", "migration"]
 
 [dependencies]
-ores-transport = { git = "https://github.com/ORESoftware/ores-transport.git", branch = "main" }  # TODO(DEN): pin to a rev once ores-transport is pushed
+# ores-transport = { git = "https://github.com/ORESoftware/ores-transport.git", rev = "..." }
+#
+# Held out of the build until ORESoftware/ores-transport is pushed. Cargo resolves a
+# git dependency even when it is declared `optional`, so an unreachable one fails
+# `cargo build` for every target and every feature set -- gating it behind a cargo
+# feature does not help. `src/four_transports.rs` and `docs/four-transports.md` stay in
+# the tree; docs/four-transports.md#status has the three edits that turn them back on.
+# TODO(DEN): pin to a rev, not a branch, when you restore this -- as every other git
+# dependency in this org is pinned.
 k8s-web-api-data-plane = { git = "https://github.com/ORESoftware/k8s-libs-and-shared-defs.git", rev = "55adadc9f6d223d40b28ae66097dfe16930951b1", package = "k8s-web-api-data-plane" }
 # Keep every cross-repository boundary immutable and independently reviewable.
 # This revision includes the account/audit and dependency-graph contracts, the
