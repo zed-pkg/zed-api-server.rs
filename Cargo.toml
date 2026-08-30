@@ -42,7 +42,7 @@ axum = { version = "0.8", features = ["multipart"] }
 # Bytes flows from the multipart reader into storage without a re-copy.
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
-dotenvy = "0.15"
+flags2env = { version = "0.1.0", git = "https://github.com/flags-2-env/flags-2-env", rev = "d7bad9ea7dfc657653368237e08903514cdca1ec" }
 flate2 = "1"
 hex = "0.4"
 http-body = "1"
@@ -54,6 +54,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tar = "0.4"
+tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 # ReaderStream, so artifact downloads stream from disk instead of buffering.
 tokio-util = { version = "0.7", features = ["io"] }
@@ -61,6 +62,7 @@ tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.6", features = ["set-header", "timeout", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+toml = "0.9"
 uuid = { version = "1", features = ["v4", "serde"] }
 # Read-side only; deflate decoding reuses the flate2 backend already in-tree.
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }

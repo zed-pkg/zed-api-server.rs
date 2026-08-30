@@ -648,7 +648,7 @@ fn max_binary_expanded_bytes() -> u64 {
 
 fn max_binary_entries() -> usize {
     bounded_usize_override(
-        std::env::var("ZED_MAX_BINARY_ENTRIES").ok().as_deref(),
+        crate::flags::var("ZED_MAX_BINARY_ENTRIES").ok().as_deref(),
         DEFAULT_MAX_BINARY_ENTRIES,
     )
 }
@@ -661,7 +661,7 @@ fn max_binary_compression_ratio() -> u64 {
 }
 
 fn env_u64(name: &str, ceiling: u64) -> u64 {
-    bounded_u64_override(std::env::var(name).ok().as_deref(), ceiling)
+    bounded_u64_override(crate::flags::var(name).ok().as_deref(), ceiling)
 }
 
 fn bounded_u64_override(value: Option<&str>, ceiling: u64) -> u64 {

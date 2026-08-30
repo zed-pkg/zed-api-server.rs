@@ -25,9 +25,9 @@ enum ProcessCommand<'a> {
 
 /// Run the registry process or one of its local administrative commands.
 pub(crate) async fn run() -> Result<()> {
-    dotenvy::dotenv().ok();
+    let rust_log = crate::flags::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(EnvFilter::try_new(rust_log).unwrap_or_else(|_| "info".into()))
         .init();
 
     let args = std::env::args().collect::<Vec<_>>();
@@ -65,7 +65,10 @@ pub(crate) async fn run() -> Result<()> {
             None => fiducia_client::FiduciaClient::new(&configuration.url),
         })
     });
-    let rate_limiter = if std::env::var("ZED_RATE_LIMIT_DISABLED").as_deref() == Ok("1") {
+    let rate_limiter = if matches!(
+        crate::flags::var("ZED_RATE_LIMIT_DISABLED").as_deref(),
+        Ok("1" | "true")
+    ) {
         tracing::warn!("per-token rate limiting is DISABLED (ZED_RATE_LIMIT_DISABLED=1)");
         None
     } else {
@@ -253,7 +256,7 @@ async fn connect_registry_read_with_retry(cfg: &Config) -> Result<ReadContext> {
 
 fn database_connect_max_wait() -> Duration {
     Duration::from_secs(
-        std::env::var("DB_CONNECT_MAX_WAIT_SECS")
+        crate::flags::var("DB_CONNECT_MAX_WAIT_SECS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(30),
@@ -262,7 +265,7 @@ fn database_connect_max_wait() -> Duration {
 
 /// Probe the local `/healthz` endpoint for the container HEALTHCHECK.
 async fn healthcheck() -> Result<()> {
-    let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    let bind = crate::flags::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let url = healthcheck_url(&bind);
     let response = reqwest::Client::new()
         .get(&url)
