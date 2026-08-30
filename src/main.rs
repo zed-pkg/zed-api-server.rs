@@ -1,3 +1,5 @@
+// mod four_transports;  // not built: see docs/four-transports.md#status
+mod web_api_plane;
 #[path = "routes/account.rs"]
 mod account;
 mod account_router;
@@ -18,8 +20,10 @@ mod registry_host;
 mod routes;
 mod server;
 mod shared_auth;
+mod signing;
 mod state;
 mod storage;
+mod storage_report;
 mod tokens;
 mod verify;
 

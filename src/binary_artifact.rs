@@ -798,6 +798,9 @@ hello = "bin/hello"
             sha256: sha256(&archive),
             size: archive.len() as u64,
             format: ArtifactFormat::Zip,
+            mirrors: Vec::new(),
+            published_at: None,
+            signatures: Vec::new(),
         };
         (meta, archive)
     }
@@ -817,6 +820,9 @@ hello = "bin/hello"
             sha256: sha256(&archive),
             size: archive.len() as u64,
             format: ArtifactFormat::Zip,
+            mirrors: Vec::new(),
+            published_at: None,
+            signatures: Vec::new(),
         };
         (meta, archive)
     }
@@ -874,6 +880,9 @@ hello = "bin/hello"
             sha256: sha256(&archive),
             size: archive.len() as u64,
             format: ArtifactFormat::Zip,
+            mirrors: Vec::new(),
+            published_at: None,
+            signatures: Vec::new(),
         };
         assert!(
             verify_publish(&meta, &archive)
@@ -909,6 +918,9 @@ hello = "bin/hello"
                 sha256: sha256(&archive),
                 size: archive.len() as u64,
                 format: ArtifactFormat::Zip,
+                mirrors: Vec::new(),
+                published_at: None,
+                signatures: Vec::new(),
             };
             let error = verify_publish(&meta, &archive).unwrap_err().to_string();
             assert!(

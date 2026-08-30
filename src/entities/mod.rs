@@ -10,5 +10,6 @@
 pub mod audit_log;
 pub mod org;
 pub mod package;
+pub mod publisher_key;
 pub mod token;
 pub mod version;
