@@ -61,6 +61,21 @@ pub fn process_control(known_command: Option<&str>) -> Result<Option<String>, St
     Ok(None)
 }
 
+#[cfg(not(test))]
+/// Resolves dotenv and environment configuration without consuming delegated subcommand argv.
+///
+/// # Errors
+///
+/// Returns a redacted error when the embedded contract or an environment value is invalid.
+pub fn process_environment_only() -> Result<(), String> {
+    let argv = vec![env!("CARGO_PKG_NAME").to_owned()];
+    RESOLVED
+        .get_or_init(|| resolve_from(&argv, std::env::vars()))
+        .as_ref()
+        .map(|_| ())
+        .map_err(Clone::clone)
+}
+
 #[cfg(test)]
 /// Bypasses process-level argv handling in isolated unit tests.
 ///
@@ -69,6 +84,16 @@ pub fn process_control(known_command: Option<&str>) -> Result<Option<String>, St
 /// The test implementation is infallible.
 pub fn process_control(_known_command: Option<&str>) -> Result<Option<String>, String> {
     Ok(None)
+}
+
+#[cfg(test)]
+/// Bypasses process-level environment handling in isolated unit tests.
+///
+/// # Errors
+///
+/// The test implementation is infallible.
+pub fn process_environment_only() -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(not(test))]

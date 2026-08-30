@@ -41,9 +41,10 @@ fn delegates_argv(args: &[String]) -> bool {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
-    if !delegates_argv(&args)
-        && let Some(output) =
-            flags::process_control(contract_command(&args)).map_err(anyhow::Error::msg)?
+    if delegates_argv(&args) {
+        flags::process_environment_only().map_err(anyhow::Error::msg)?;
+    } else if let Some(output) =
+        flags::process_control(contract_command(&args)).map_err(anyhow::Error::msg)?
     {
         print!("{output}");
         return Ok(());
