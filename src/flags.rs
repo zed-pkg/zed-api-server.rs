@@ -160,6 +160,7 @@ fn resolve_from(
     raw.extend(parsed.dotenv_overrides);
     raw.remove("FLAGS2ENV_COMMAND");
     raw.extend(parsed.provided_flags);
+    normalize_legacy_boolean(&mut raw, "ZED_RATE_LIMIT_DISABLED");
     let typed = parser
         .coerce::<serde_json::Map<String, serde_json::Value>, _>(&raw, Some(path))
         .map_err(|error| format!("flags-2-env typed configuration failed: {error}"))?;
@@ -170,6 +171,16 @@ fn resolve_from(
         }
     }
     Ok(resolved)
+}
+
+fn normalize_legacy_boolean(values: &mut std::collections::HashMap<String, String>, name: &str) {
+    if let Some(value) = values.get_mut(name) {
+        match value.as_str() {
+            "1" => *value = "true".to_owned(),
+            "0" => *value = "false".to_owned(),
+            _ => {}
+        }
+    }
 }
 
 fn scalar_string(name: &str, value: serde_json::Value) -> Result<String, String> {
@@ -318,6 +329,19 @@ mod tests {
                 Some("help"),
             ),
             vec!["zed-api-server", "--help"]
+        );
+    }
+
+    #[test]
+    fn legacy_numeric_rate_limit_boolean_is_normalized_before_coercion() {
+        let resolved = resolve_from(
+            &["zed-api-server".to_owned()],
+            [("ZED_RATE_LIMIT_DISABLED".to_owned(), "1".to_owned())],
+        )
+        .expect("legacy boolean");
+        assert_eq!(
+            resolved.get("ZED_RATE_LIMIT_DISABLED").map(String::as_str),
+            Some("true")
         );
     }
 }
