@@ -92,7 +92,7 @@ pub enum TagPolicy {
 }
 
 fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
+    crate::flags::var(key).unwrap_or_else(|_| default.to_string())
 }
 
 impl Config {
@@ -111,8 +111,8 @@ impl Config {
                 dir: env_or("STORAGE_LOCAL_DIR", ".data/artifacts"),
             },
             "s3" => StorageConfig::S3 {
-                bucket: std::env::var("S3_BUCKET").context("S3_BUCKET is required for s3")?,
-                endpoint_url: std::env::var("S3_ENDPOINT_URL").ok(),
+                bucket: crate::flags::var("S3_BUCKET").context("S3_BUCKET is required for s3")?,
+                endpoint_url: crate::flags::var("S3_ENDPOINT_URL").ok(),
                 region: env_or("S3_REGION", "auto"),
                 force_path_style: env_or("S3_FORCE_PATH_STYLE", "true") == "true",
             },
@@ -123,16 +123,16 @@ impl Config {
             "github" => TagPolicy::Github,
             other => bail!("ZED_VERIFY_TAGS must be off or github, got `{other}`"),
         };
-        let shared_auth = match std::env::var("SHARED_AUTH_URL") {
+        let shared_auth = match crate::flags::var("SHARED_AUTH_URL") {
             Ok(url) => {
                 let url = nonempty("SHARED_AUTH_URL", url)?;
                 let public_url = nonempty(
                     "SHARED_AUTH_PUBLIC_URL",
-                    std::env::var("SHARED_AUTH_PUBLIC_URL").unwrap_or_else(|_| url.clone()),
+                    crate::flags::var("SHARED_AUTH_PUBLIC_URL").unwrap_or_else(|_| url.clone()),
                 )?;
                 let service_credential = nonempty(
                     "SHARED_AUTH_SERVICE_CREDENTIAL",
-                    std::env::var("SHARED_AUTH_SERVICE_CREDENTIAL").context(
+                    crate::flags::var("SHARED_AUTH_SERVICE_CREDENTIAL").context(
                         "SHARED_AUTH_SERVICE_CREDENTIAL is required when SHARED_AUTH_URL is set",
                     )?,
                 )?;
@@ -140,7 +140,7 @@ impl Config {
                     "SHARED_AUTH_AUDIENCE",
                     env_or("SHARED_AUTH_AUDIENCE", "zed-pkg"),
                 )?;
-                let application_id = match std::env::var("SHARED_AUTH_AUTHORIZED_PARTY") {
+                let application_id = match crate::flags::var("SHARED_AUTH_AUTHORIZED_PARTY") {
                     Ok(value) => nonempty("SHARED_AUTH_AUTHORIZED_PARTY", value)?,
                     Err(std::env::VarError::NotPresent) => nonempty(
                         "SHARED_AUTH_APPLICATION_ID",
@@ -164,7 +164,7 @@ impl Config {
         };
         Ok(Self {
             bind_addr: env_or("BIND_ADDR", "0.0.0.0:8080"),
-            database_url: std::env::var("DATABASE_URL").context("DATABASE_URL is required")?,
+            database_url: crate::flags::var("DATABASE_URL").context("DATABASE_URL is required")?,
             auto_migrate: env_or("AUTO_MIGRATE", "false") == "true",
             storage,
             public_base_url: env_or("PUBLIC_BASE_URL", "http://localhost:8080"),
@@ -179,11 +179,13 @@ impl Config {
             db_max_connections: env_or("DB_MAX_CONNECTIONS", "10")
                 .parse()
                 .context("DB_MAX_CONNECTIONS must be a number")?,
-            fiducia: std::env::var("FIDUCIA_URL").ok().map(|url| FiduciaConfig {
-                url,
-                internal_secret: std::env::var("FIDUCIA_INTERNAL_SECRET").ok(),
-                org_id: env_or("FIDUCIA_ORG_ID", "zed-registry"),
-            }),
+            fiducia: crate::flags::var("FIDUCIA_URL")
+                .ok()
+                .map(|url| FiduciaConfig {
+                    url,
+                    internal_secret: crate::flags::var("FIDUCIA_INTERNAL_SECRET").ok(),
+                    org_id: env_or("FIDUCIA_ORG_ID", "zed-registry"),
+                }),
             shared_auth,
         })
     }

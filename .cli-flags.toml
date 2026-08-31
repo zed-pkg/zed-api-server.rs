@@ -1,0 +1,261 @@
+[identity]
+service = "zed-api-server"
+type_name = "RuntimeEnv"
+
+[help]
+url = "https://github.com/flags-2-env/flags-2-env"
+columns = ["options", "env", "type", "default", "description"]
+
+[parse]
+allow_unknown = false
+
+[env]
+ignore = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "DATABASE_URL", "FIDUCIA_INTERNAL_SECRET", "GITHUB_TOKEN", "SHARED_AUTH_SERVICE_CREDENTIAL"]
+
+[flags.help]
+env = "CLI_HELP_REQUESTED"
+long = "help"
+short = "h"
+type = "boolean"
+default = false
+help = "Print command-line help."
+
+[flags.version]
+env = "CLI_VERSION_REQUESTED"
+long = "version"
+short = "V"
+type = "boolean"
+default = false
+help = "Print the server version."
+
+[flags.bind-addr]
+env = "BIND_ADDR"
+long = "bind-addr"
+type = "string"
+default = "0.0.0.0:8080"
+help = "HTTP listener socket address."
+
+[flags.rust-log]
+env = "RUST_LOG"
+long = "rust-log"
+type = "string"
+default = "info"
+help = "Tracing filter."
+
+[flags.auto-migrate]
+env = "AUTO_MIGRATE"
+long = "auto-migrate"
+type = "boolean"
+default = false
+help = "Run development-only migrations before serving."
+
+[flags.storage-backend]
+env = "STORAGE_BACKEND"
+long = "storage-backend"
+type = "string"
+default = "local"
+help = "Artifact storage backend: memory, local, or s3."
+
+[flags.storage-memory-max-bytes]
+env = "STORAGE_MEMORY_MAX_BYTES"
+long = "storage-memory-max-bytes"
+type = "integer"
+default = 268435456
+help = "Maximum bytes retained by the disposable memory backend."
+
+[flags.storage-local-dir]
+env = "STORAGE_LOCAL_DIR"
+long = "storage-local-dir"
+type = "string"
+default = ".data/artifacts"
+help = "Local artifact storage directory."
+
+[flags.s3-bucket]
+env = "S3_BUCKET"
+long = "s3-bucket"
+type = "string"
+help = "S3 or R2 artifact bucket name."
+
+[flags.s3-endpoint-url]
+env = "S3_ENDPOINT_URL"
+long = "s3-endpoint-url"
+type = "string"
+help = "Credential-free S3-compatible endpoint URL."
+
+[flags.s3-region]
+env = "S3_REGION"
+long = "s3-region"
+type = "string"
+default = "auto"
+help = "S3-compatible storage region."
+
+[flags.s3-force-path-style]
+env = "S3_FORCE_PATH_STYLE"
+long = "s3-force-path-style"
+type = "boolean"
+default = true
+help = "Use path-style S3 requests."
+
+[flags.verify-tags]
+env = "ZED_VERIFY_TAGS"
+long = "verify-tags"
+type = "string"
+default = "off"
+help = "Source-tag verification policy: off or github."
+
+[flags.shared-auth-url]
+env = "SHARED_AUTH_URL"
+long = "shared-auth-url"
+type = "string"
+help = "Credential-free internal Shared Auth URL."
+
+[flags.shared-auth-public-url]
+env = "SHARED_AUTH_PUBLIC_URL"
+long = "shared-auth-public-url"
+type = "string"
+help = "Credential-free public Shared Auth URL."
+
+[flags.shared-auth-audience]
+env = "SHARED_AUTH_AUDIENCE"
+long = "shared-auth-audience"
+type = "string"
+default = "zed-pkg"
+help = "Expected Shared Auth audience."
+
+[flags.shared-auth-authorized-party]
+env = "SHARED_AUTH_AUTHORIZED_PARTY"
+long = "shared-auth-authorized-party"
+type = "string"
+help = "Exact OAuth authorized party for browser routes."
+
+[flags.shared-auth-application-id]
+env = "SHARED_AUTH_APPLICATION_ID"
+long = "shared-auth-application-id"
+type = "string"
+default = "zpkg-web"
+help = "Legacy Shared Auth application identifier fallback."
+
+[flags.public-base-url]
+env = "PUBLIC_BASE_URL"
+long = "public-base-url"
+type = "string"
+default = "http://localhost:8080"
+help = "Credential-free public registry API origin."
+
+[flags.registry-id]
+env = "ZED_REGISTRY_ID"
+long = "registry-id"
+type = "string"
+default = "registry:zpkg-primary"
+help = "Stable logical registry identifier."
+
+[flags.max-artifact-bytes]
+env = "MAX_ARTIFACT_BYTES"
+long = "max-artifact-bytes"
+type = "integer"
+default = 104857600
+help = "Maximum accepted artifact size in bytes."
+
+[flags.max-orgs-per-token]
+env = "ZED_MAX_ORGS_PER_TOKEN"
+long = "max-orgs-per-token"
+type = "integer"
+default = 5
+help = "Maximum organizations claimable by one token."
+
+[flags.db-max-connections]
+env = "DB_MAX_CONNECTIONS"
+long = "db-max-connections"
+type = "integer"
+default = 10
+help = "Maximum database pool connections."
+
+[flags.db-connect-max-wait-secs]
+env = "DB_CONNECT_MAX_WAIT_SECS"
+long = "db-connect-max-wait-secs"
+type = "integer"
+default = 30
+help = "Maximum database startup retry window in seconds."
+
+[flags.fiducia-url]
+env = "FIDUCIA_URL"
+long = "fiducia-url"
+type = "string"
+help = "Credential-free Fiducia coordination URL."
+
+[flags.fiducia-org-id]
+env = "FIDUCIA_ORG_ID"
+long = "fiducia-org-id"
+type = "string"
+default = "zed-registry"
+help = "Fiducia organization identifier."
+
+[flags.rate-limit-disabled]
+env = "ZED_RATE_LIMIT_DISABLED"
+long = "rate-limit-disabled"
+type = "boolean"
+default = false
+help = "Disable application token rate limiting."
+
+[flags.rate-limit-burst]
+env = "ZED_RATE_LIMIT_BURST"
+long = "rate-limit-burst"
+type = "integer"
+default = 60
+help = "Immediate per-token request burst."
+
+[flags.rate-limit-per-second]
+env = "ZED_RATE_LIMIT_PER_SECOND"
+long = "rate-limit-per-second"
+type = "string"
+default = "10.0"
+help = "Continuous per-token request refill rate."
+
+[flags.max-inflated-bytes]
+env = "ZED_MAX_INFLATED_BYTES"
+long = "max-inflated-bytes"
+type = "integer"
+default = 536870912
+help = "Maximum aggregate bytes inflated while scanning an archive."
+
+[flags.max-binary-archive-bytes]
+env = "ZED_MAX_BINARY_ARCHIVE_BYTES"
+long = "max-binary-archive-bytes"
+type = "integer"
+default = 1073741824
+help = "Maximum outer size accepted for a binary archive."
+
+[flags.max-binary-expanded-bytes]
+env = "ZED_MAX_BINARY_EXPANDED_BYTES"
+long = "max-binary-expanded-bytes"
+type = "integer"
+default = 2147483648
+help = "Maximum total expanded size accepted for a binary archive."
+
+[flags.max-binary-entries]
+env = "ZED_MAX_BINARY_ENTRIES"
+long = "max-binary-entries"
+type = "integer"
+default = 200000
+help = "Maximum entries accepted in a binary archive."
+
+[flags.max-binary-compression-ratio]
+env = "ZED_MAX_BINARY_COMPRESSION_RATIO"
+long = "max-binary-compression-ratio"
+type = "integer"
+default = 1000
+help = "Maximum compression ratio accepted for a binary entry."
+
+[flags.artifact-serve-memory-budget-bytes]
+env = "ZED_ARTIFACT_SERVE_MEMORY_BUDGET_BYTES"
+long = "artifact-serve-memory-budget-bytes"
+type = "integer"
+default = 268435456
+help = "Memory budget for concurrent buffered artifact reads."
+
+[flags.graph-serve-memory-budget-bytes]
+env = "ZED_GRAPH_SERVE_MEMORY_BUDGET_BYTES"
+long = "graph-serve-memory-budget-bytes"
+type = "integer"
+default = 268435456
+help = "Memory budget for concurrent dependency-graph encodes."

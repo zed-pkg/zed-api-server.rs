@@ -43,7 +43,21 @@ Native binary ZIP layout, server verification, R2 race recovery, and the
 coordinated multi-platform route/data-model boundary are specified in
 [`docs/binary-artifact-publication.md`](docs/binary-artifact-publication.md).
 
-## Configuration (env)
+## Configuration (CLI and environment)
+
+Long-running and release commands resolve non-secret settings through the
+pinned [flags-2-env](https://github.com/flags-2-env/flags-2-env) Rust binding
+before tracing, network, storage, or database effects. Every option maps to the
+environment variable in [`.cli-flags.toml`](.cli-flags.toml); command-line
+values take precedence, and unknown options fail closed. Run
+`zed-api-server --help` (or `zed-api-server serve --help`) for the audited
+option list.
+
+Credentials remain environment-only: `DATABASE_URL`,
+`SHARED_AUTH_SERVICE_CREDENTIAL`, `FIDUCIA_INTERNAL_SECRET`, `GITHUB_TOKEN`,
+and AWS credential variables deliberately have no command-line form. The
+existing `create-token` and `revoke-token` subcommands retain their own private
+argument parsers.
 
 | Var | Default | Notes |
 | --- | --- | --- |
@@ -124,8 +138,9 @@ cargo run -- migrate
 
 DATABASE_URL=postgres://zed:zed@localhost:5432/zed \
 STORAGE_BACKEND=memory \
-STORAGE_MEMORY_MAX_BYTES=268435456 \
-cargo run
+STORAGE_MEMORY_MAX_BYTES=268435456 cargo run -- \
+  --bind-addr 127.0.0.1:8080 \
+  --rust-log info
 
 # mint a token (printed once)
 DATABASE_URL=... cargo run -- create-token --name ci --org acme

@@ -70,7 +70,7 @@ const GRAPH_WORKING_SET_MULTIPLIER: usize = 3;
 /// worst case (`max_artifact_bytes`) and the memory budget. At least 1, and
 /// never more than the global in-flight cap.
 fn artifact_serve_concurrency(max_artifact_bytes: usize) -> usize {
-    let budget = std::env::var("ZED_ARTIFACT_SERVE_MEMORY_BUDGET_BYTES")
+    let budget = crate::flags::var("ZED_ARTIFACT_SERVE_MEMORY_BUDGET_BYTES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(DEFAULT_ARTIFACT_SERVE_BUDGET);
@@ -78,7 +78,7 @@ fn artifact_serve_concurrency(max_artifact_bytes: usize) -> usize {
 }
 
 fn graph_serve_concurrency() -> usize {
-    let budget = std::env::var("ZED_GRAPH_SERVE_MEMORY_BUDGET_BYTES")
+    let budget = crate::flags::var("ZED_GRAPH_SERVE_MEMORY_BUDGET_BYTES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(DEFAULT_GRAPH_SERVE_BUDGET);

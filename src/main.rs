@@ -12,6 +12,7 @@ mod embeddings;
 mod entities;
 mod error;
 mod files;
+mod flags;
 mod ratelimit;
 mod rbac;
 mod registry_host;
@@ -23,72 +24,63 @@ mod storage;
 mod tokens;
 mod verify;
 
-const HELP: &str = "zed-api-server\n\nUSAGE:\n    zed-api-server [COMMAND]\n\nCOMMANDS:\n    serve                         Start the registry server (default)\n    migrate                       Apply database migrations and exit\n    healthcheck                   Check configured dependencies and exit\n    create-token [OPTIONS]        Create an API token\n    revoke-token [OPTIONS]        Revoke an API token\n\nOPTIONS:\n    -h, --help                    Print help\n    -V, --version                 Print version\n";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EarlyCommand {
-    Help,
-    Version,
-}
-
-fn early_command(args: &[String]) -> Option<EarlyCommand> {
+fn contract_command(args: &[String]) -> Option<&str> {
     match args.get(1).map(String::as_str) {
-        Some("-h" | "--help" | "help") => Some(EarlyCommand::Help),
-        Some("-V" | "--version" | "version") => Some(EarlyCommand::Version),
+        Some(command @ ("serve" | "migrate" | "healthcheck" | "help" | "version")) => Some(command),
         _ => None,
     }
+}
+
+fn delegates_argv(args: &[String]) -> bool {
+    matches!(
+        args.get(1).map(String::as_str),
+        Some("create-token" | "revoke-token")
+    )
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
-    match early_command(&args) {
-        Some(EarlyCommand::Help) => {
-            print!("{HELP}");
-            Ok(())
-        }
-        Some(EarlyCommand::Version) => {
-            println!("zed-api-server {}", env!("CARGO_PKG_VERSION"));
-            Ok(())
-        }
-        None => server::run().await,
+    if delegates_argv(&args) {
+        flags::process_environment_only().map_err(anyhow::Error::msg)?;
+    } else if let Some(output) =
+        flags::process_control(contract_command(&args)).map_err(anyhow::Error::msg)?
+    {
+        print!("{output}");
+        return Ok(());
     }
+    server::run().await
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{EarlyCommand, early_command};
+    use super::{contract_command, delegates_argv};
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
     }
 
     #[test]
-    fn help_and_version_are_zero_io_early_commands() {
-        for flag in ["-h", "--help", "help"] {
+    fn contract_commands_are_identified_without_consuming_token_options() {
+        for command in ["serve", "migrate", "healthcheck", "help", "version"] {
             assert_eq!(
-                early_command(&args(&["zed-api-server", flag])),
-                Some(EarlyCommand::Help)
+                contract_command(&args(&["zed-api-server", command])),
+                Some(command)
             );
         }
-        for flag in ["-V", "--version", "version"] {
-            assert_eq!(
-                early_command(&args(&["zed-api-server", flag])),
-                Some(EarlyCommand::Version)
-            );
-        }
+        assert_eq!(contract_command(&args(&["zed-api-server", "--help"])), None);
     }
 
     #[test]
-    fn operational_commands_still_enter_the_server_dispatcher() {
-        for command in [
-            "serve",
-            "migrate",
-            "healthcheck",
-            "create-token",
-            "revoke-token",
-        ] {
-            assert_eq!(early_command(&args(&["zed-api-server", command])), None);
+    fn token_subcommands_retain_their_private_argument_parsers() {
+        for command in ["create-token", "revoke-token"] {
+            assert!(delegates_argv(&args(&[
+                "zed-api-server",
+                command,
+                "--name",
+                "ci"
+            ])));
         }
+        assert!(!delegates_argv(&args(&["zed-api-server", "serve"])));
     }
 }

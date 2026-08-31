@@ -33,7 +33,7 @@ pub const MAX_SERVED_FILE_BYTES: u64 = 25 * 1024 * 1024;
 const DEFAULT_MAX_INFLATED_BYTES: u64 = 512 * 1024 * 1024;
 
 pub fn max_inflated_bytes() -> u64 {
-    std::env::var("ZED_MAX_INFLATED_BYTES")
+    crate::flags::var("ZED_MAX_INFLATED_BYTES")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0)
