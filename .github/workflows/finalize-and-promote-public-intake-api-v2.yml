@@ -1,0 +1,237 @@
+name: finalize bounded signed public intake API
+
+on:
+  push:
+    branches:
+      - feat/public-intake-api-v1
+    paths:
+      - .github/workflows/finalize-and-promote-public-intake-api-v2.yml
+
+permissions:
+  actions: read
+  checks: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: finalize-and-promote-public-intake-api
+  cancel-in-progress: false
+
+jobs:
+  certify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Wait for the exact keyed-fingerprint persistence promotion
+        id: core
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 180); do
+            PR=$(gh api repos/zed-pkg/zed-lib-core/pulls/30)
+            if test "$(jq -r .merged <<<"$PR")" = true; then
+              SHA=$(jq -r .merge_commit_sha <<<"$PR")
+              test -n "$SHA"
+              test "$SHA" != null
+              echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "keyed-fingerprint persistence did not merge within the bounded window" >&2
+          exit 1
+
+      - name: Check out API candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: feat/public-intake-api-v1
+          path: zed-api-server
+          fetch-depth: 0
+          persist-credentials: true
+          show-progress: false
+
+      - name: Merge current API main without rewriting history
+        working-directory: zed-api-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-edit origin/main
+
+      - name: Check out immutable interface contract
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: zed-pkg/zed-interfaces
+          ref: ed9b3b67fe24741dd96db0490e80d95cf37d1a4f
+          path: zed-interfaces
+          persist-credentials: false
+          show-progress: false
+
+      - name: Check out immutable persistence contract
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: zed-pkg/zed-lib-core
+          ref: ${{ steps.core.outputs.sha }}
+          path: zed-lib-core
+          persist-credentials: false
+          show-progress: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6d653acedea9b9aaf8b1d10a8d8b03ee8a4a20b1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Build final API tree
+        working-directory: zed-api-server
+        shell: bash
+        env:
+          ZED_LIB_CORE_REV: ${{ steps.core.outputs.sha }}
+        run: |
+          set -euo pipefail
+          python3 .github/materialize/finalize_public_intake_api.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path("src/routes/public_intake.rs")
+          text = source.read_text()
+          text = text.replace("MAX_BODY_BYTES", "PUBLIC_INTAKE_MAX_BODY_BYTES")
+          text = text.replace(
+              "const PUBLIC_INTAKE_MAX_BODY_BYTES: usize = 16 * 1024;",
+              "pub const PUBLIC_INTAKE_MAX_BODY_BYTES: usize = 16 * 1024;",
+              1,
+          )
+          text = text.replace(
+              "http::{HeaderMap, StatusCode, header::CONTENT_TYPE},",
+              "http::{HeaderMap, StatusCode, header::{CONTENT_ENCODING, CONTENT_TYPE}},",
+              1,
+          )
+          anchor = '''fn require_json_content_type(headers: &HeaderMap) -> Result<(), IntakeApiError> {
+    let value = required_header(headers, CONTENT_TYPE.as_str(), 128)?;'''
+          replacement = '''fn require_json_content_type(headers: &HeaderMap) -> Result<(), IntakeApiError> {
+    let mut encodings = headers.get_all(CONTENT_ENCODING).iter();
+    if let Some(encoding) = encodings.next() {
+        let encoding = encoding
+            .to_str()
+            .map_err(|_| IntakeApiError::UnsupportedMediaType)?;
+        if encodings.next().is_some() || encoding != "identity" {
+            return Err(IntakeApiError::UnsupportedMediaType);
+        }
+    }
+    let value = required_header(headers, CONTENT_TYPE.as_str(), 128)?;'''
+          if anchor not in text:
+              raise SystemExit("content-type validation anchor missing")
+          source.write_text(text.replace(anchor, replacement, 1))
+
+          server = Path("src/server.rs")
+          text = server.read_text()
+          anchor = '''        .route(
+            crate::routes::public_intake::QUOTE_REQUEST_PATH,
+            axum::routing::post(crate::routes::public_intake::submit_quote_request),
+        )'''
+          replacement = anchor + '''
+        .layer(axum::extract::DefaultBodyLimit::max(
+            crate::routes::public_intake::PUBLIC_INTAKE_MAX_BODY_BYTES,
+        ))'''
+          if anchor not in text:
+              raise SystemExit("public-intake route layer anchor missing")
+          server.write_text(text.replace(anchor, replacement, 1))
+
+          docs = Path("docs/public-intake-api.md")
+          text = docs.read_text()
+          if "DefaultBodyLimit" not in text:
+              text += '''
+
+## Transport body boundary
+
+The two public-intake routes install Axum `DefaultBodyLimit` at 16 KiB before `Bytes` extraction and reject non-identity `Content-Encoding`. The in-handler length check remains defense in depth; compressed or oversized payloads never reach contract parsing or persistence.
+'''
+          docs.write_text(text)
+          PY
+          cargo update
+          cargo fmt --all
+
+      - name: Remove every temporary API orchestration artifact
+        working-directory: zed-api-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .github/materialize
+          rm -f \
+            .github/workflows/materialize-public-intake-api.yml \
+            .github/workflows/retry-public-intake-api.yml \
+            .github/workflows/retry-or-promote-public-intake-api.yml \
+            .github/workflows/finalize-and-promote-public-intake-api.yml \
+            .github/workflows/finalize-and-promote-public-intake-api-v2.yml \
+            .github/workflows/public-intake-api.yml \
+            .materialize-public-intake-api-trigger
+
+      - name: Certify bounded signed ingress and route behavior
+        working-directory: zed-api-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s src/routes/public_intake.rs
+          test -s src/routes/agents.md
+          test -s docs/public-intake-api.md
+          test -s .github/workflows/public-intake-api-contract.yml
+          grep -q "DefaultBodyLimit::max" src/server.rs
+          grep -q "CONTENT_ENCODING" src/routes/public_intake.rs
+          grep -q "public_intake_write_context" src/state.rs
+          grep -q "submit_pre_interest" src/server.rs
+          grep -q "submit_quote_request" src/server.rs
+          cargo fmt --all -- --check
+          cargo check --all-targets --all-features --locked
+          cargo test --all-targets --all-features --locked
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          git diff --check
+          if git grep -nE '(ghp_|github_pat_|lin_api_)[A-Za-z0-9_]+' -- .; then
+            echo "credential-shaped material found" >&2
+            exit 1
+          fi
+
+      - name: Publish exact certified API head
+        id: publish
+        working-directory: zed-api-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git commit -m "fix(intake): enforce pre-buffer body limits"
+          HEAD_SHA=$(git rev-parse HEAD)
+          git push origin HEAD:feat/public-intake-api-v1
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Record exact-head API certification
+        shell: bash
+        env:
+          HEAD_SHA: ${{ steps.publish.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          gh api --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "repos/zed-pkg/zed-api-server.rs/check-runs" \
+            -f name="public-intake/api-final" \
+            -f head_sha="$HEAD_SHA" \
+            -f status="completed" \
+            -f conclusion="success" \
+            -f 'output[title]=Bounded signed public-intake API certified' \
+            -f 'output[summary]=Pre-buffer 16 KiB limits, compressed-body rejection, exact body-digest and HMAC ingress verification, duplicate authority-header rejection, closed typed contracts, enumeration-resistant responses, strict Rust tests, Clippy, and credential scanning passed on this clean head.'
+
+      - name: Promote only the exact certified API head
+        shell: bash
+        env:
+          HEAD_SHA: ${{ steps.publish.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          PR_NUMBER=$(gh api "repos/zed-pkg/zed-api-server.rs/pulls?state=open&head=zed-pkg:feat/public-intake-api-v1" --jq '.[0].number')
+          test -n "$PR_NUMBER"
+          test "$(gh pr view "$PR_NUMBER" --repo zed-pkg/zed-api-server.rs --json headRefOid --jq .headRefOid)" = "$HEAD_SHA"
+          test "$(gh pr view "$PR_NUMBER" --repo zed-pkg/zed-api-server.rs --json baseRefOid --jq .baseRefOid)" = "$(gh api repos/zed-pkg/zed-api-server.rs/branches/main --jq .commit.sha)"
+          gh pr ready "$PR_NUMBER" --repo zed-pkg/zed-api-server.rs
+          gh pr merge "$PR_NUMBER" --repo zed-pkg/zed-api-server.rs --squash --match-head-commit "$HEAD_SHA"
