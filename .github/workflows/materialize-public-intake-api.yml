@@ -1,0 +1,309 @@
+name: materialize signed public intake API
+
+on:
+  push:
+    branches:
+      - feat/public-intake-api-v1
+    paths:
+      - .materialize-public-intake-api-trigger
+      - .github/workflows/materialize-public-intake-api.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-public-intake-api-v1
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: zed_public_intake_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d zed_public_intake_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      PUBLIC_INTAKE_REQUIRE_POSTGRES: "1"
+      PUBLIC_INTAKE_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/zed_public_intake_test
+
+    steps:
+      - name: Check out API branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: feat/public-intake-api-v1
+          path: zed-api-server
+          fetch-depth: 0
+          persist-credentials: true
+          show-progress: false
+
+      - name: Check out exact interface contract
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: zed-pkg/zed-interfaces
+          ref: 71db90c83b9113d91c3b5b862d0e4c497d4a646a
+          path: zed-interfaces
+          persist-credentials: false
+          show-progress: false
+
+      - name: Check out persistence candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: zed-pkg/zed-lib-core
+          ref: feat/public-intake-persistence-clean
+          path: zed-lib-core
+          persist-credentials: false
+          show-progress: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6d653acedea9b9aaf8b1d10a8d8b03ee8a4a20b1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Materialize route and repository wiring
+        working-directory: zed-api-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s .github/materialize/public_intake.rs
+          if test -e ../zed-lib-core/.github/workflows/finalize-public-intake-persistence.yml \
+            || test -e ../zed-lib-core/.github/workflows/materialize-public-intake-persistence.yml; then
+            echo "persistence candidate is not finalized" >&2
+            exit 1
+          fi
+          test -s ../zed-lib-core/src/rust-orm/public_intake.rs
+          grep -q "insert_public_intake_submission" ../zed-lib-core/src/rust-orm/write.rs
+
+          cp .github/materialize/public_intake.rs src/routes/public_intake.rs
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          def section_insert(text: str, heading: str, lines: list[str]) -> str:
+              match = re.search(rf"(?m)^\[{re.escape(heading)}\]\s*$", text)
+              if not match:
+                  suffix = "" if text.endswith("\n") else "\n"
+                  return text + suffix + f"\n[{heading}]\n" + "\n".join(lines) + "\n"
+              next_heading = re.search(r"(?m)^\[[^\n]+\]\s*$", text[match.end():])
+              end = match.end() + (next_heading.start() if next_heading else len(text) - match.end())
+              body = text[match.end():end]
+              additions = [line for line in lines if not re.search(rf"(?m)^{re.escape(line.split('=', 1)[0].strip())}\s*=", body)]
+              if not additions:
+                  return text
+              return text[:end].rstrip() + "\n" + "\n".join(additions) + "\n\n" + text[end:].lstrip("\n")
+
+          source = Path("src/routes/public_intake.rs")
+          text = source.read_text()
+          text = text.replace(
+              "const COMMON_FIELDS: &[&str] = &[",
+              "#[cfg(test)]\nconst COMMON_FIELDS: &[&str] = &[",
+              1,
+          )
+          text = text.replace(
+              "serde_json::from_value(value)\n",
+              "serde_json::from_value(value.clone())\n",
+          )
+          text = text.replace(
+              "fn common_field_inventory_is a subset of every request shape()",
+              "fn common_field_inventory_is_a_subset_of_every_request_shape()",
+              1,
+          )
+          source.write_text(text)
+
+          cargo = Path("Cargo.toml")
+          text = cargo.read_text()
+          text = section_insert(text, "dependencies", [
+              'base64 = "0.22"',
+              'hex = "0.4"',
+              'hmac = "0.12"',
+              'sha2 = "0.10"',
+              'zeroize = "1"',
+              'zed-interfaces = { path = "../zed-interfaces/src/rust" }',
+          ])
+          cargo.write_text(text)
+
+          routes = Path("src/routes/mod.rs")
+          text = routes.read_text()
+          if "pub mod public_intake;" not in text:
+              text = text.rstrip() + "\n\npub mod public_intake;\n"
+          routes.write_text(text)
+
+          state = Path("src/state.rs")
+          text = state.read_text()
+          if "public_intake_write_context" not in text:
+              structure = re.search(r"pub struct AppState\s*\{(?P<body>[\s\S]*?)\n\}", text)
+              if not structure:
+                  raise SystemExit("cannot locate AppState")
+              field = re.search(
+                  r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?:std::sync::Arc<|Arc<)?(?:zed_orm_core::)?WriteContext>?\s*,?\s*$",
+                  structure.group("body"),
+              )
+              if not field:
+                  raise SystemExit("cannot locate AppState WriteContext field")
+              name = field.group(1)
+              text += f'''\nimpl AppState {{
+              /// Opaque public-intake persistence authority. Routes never receive
+              /// the underlying database connection or ORM entities.
+              pub fn public_intake_write_context(&self) -> &zed_orm_core::WriteContext {{
+                  &self.{name}
+              }}
+          }}
+          '''
+          state.write_text(text)
+
+          server = Path("src/server.rs")
+          text = server.read_text()
+          if "submit_pre_interest" not in text:
+              marker = "Router::new()"
+              index = text.find(marker)
+              if index < 0:
+                  raise SystemExit("cannot locate root Router::new()")
+              insertion = '''Router::new()
+                  .route(
+                      crate::routes::public_intake::PRE_INTEREST_PATH,
+                      axum::routing::post(crate::routes::public_intake::submit_pre_interest),
+                  )
+                  .route(
+                      crate::routes::public_intake::QUOTE_REQUEST_PATH,
+                      axum::routing::post(crate::routes::public_intake::submit_quote_request),
+                  )'''
+              text = text[:index] + insertion + text[index + len(marker):]
+          server.write_text(text)
+          PY
+
+          cargo update -p zed-interfaces -p zed-orm-core -p zed-lib-core || cargo update
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo check --all-targets --all-features
+          cargo test --all-targets --all-features
+          cargo clippy --all-targets --all-features -- -D warnings
+          git diff --check
+          if git grep -nE '(ghp_|github_pat_|lin_api_)[A-Za-z0-9_]+' -- .; then
+            echo "credential-shaped material found" >&2
+            exit 1
+          fi
+
+          CORE_REV=$(git -C ../zed-lib-core rev-parse HEAD)
+          INTERFACES_REV=$(git -C ../zed-interfaces rev-parse HEAD)
+          cat > .github/workflows/public-intake-api.yml <<'YAML'
+          name: public intake API
+
+          on:
+            pull_request:
+              paths:
+                - "src/routes/public_intake.rs"
+                - "src/routes/mod.rs"
+                - "src/state.rs"
+                - "src/server.rs"
+                - "Cargo.toml"
+                - "Cargo.lock"
+                - ".github/workflows/public-intake-api.yml"
+            push:
+              branches: [main]
+              paths:
+                - "src/routes/public_intake.rs"
+                - "src/routes/mod.rs"
+                - "src/state.rs"
+                - "src/server.rs"
+                - "Cargo.toml"
+                - "Cargo.lock"
+                - ".github/workflows/public-intake-api.yml"
+
+          permissions:
+            contents: read
+
+          concurrency:
+            group: public-intake-api-${{ github.workflow }}-${{ github.ref }}
+            cancel-in-progress: true
+
+          jobs:
+            verify:
+              runs-on: ubuntu-24.04
+              timeout-minutes: 40
+              services:
+                postgres:
+                  image: postgres:17
+                  env:
+                    POSTGRES_DB: zed_public_intake_test
+                    POSTGRES_PASSWORD: postgres
+                    POSTGRES_USER: postgres
+                  ports:
+                    - 5432:5432
+                  options: >-
+                    --health-cmd "pg_isready -U postgres -d zed_public_intake_test"
+                    --health-interval 5s
+                    --health-timeout 5s
+                    --health-retries 12
+              env:
+                PUBLIC_INTAKE_REQUIRE_POSTGRES: "1"
+                PUBLIC_INTAKE_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/zed_public_intake_test
+              steps:
+                - name: Check out API
+                  uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+                  with:
+                    path: zed-api-server
+                    persist-credentials: false
+                    show-progress: false
+
+                - name: Check out exact interface contract
+                  uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+                  with:
+                    repository: zed-pkg/zed-interfaces
+                    ref: __INTERFACES_REV__
+                    path: zed-interfaces
+                    persist-credentials: false
+                    show-progress: false
+
+                - name: Check out exact persistence contract
+                  uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+                  with:
+                    repository: zed-pkg/zed-lib-core
+                    ref: __CORE_REV__
+                    path: zed-lib-core
+                    persist-credentials: false
+                    show-progress: false
+
+                - name: Install Rust toolchain
+                  uses: dtolnay/rust-toolchain@6d653acedea9b9aaf8b1d10a8d8b03ee8a4a20b1
+                  with:
+                    toolchain: stable
+                    components: rustfmt, clippy
+
+                - name: Verify signed ingress and repository contracts
+                  working-directory: zed-api-server
+                  run: |
+                    cargo fmt --all -- --check
+                    cargo test --all-targets --all-features --locked
+                    cargo clippy --all-targets --all-features --locked -- -D warnings
+                    git diff --check
+          YAML
+          sed -i "s/__CORE_REV__/$CORE_REV/g; s/__INTERFACES_REV__/$INTERFACES_REV/g" \
+            .github/workflows/public-intake-api.yml
+
+      - name: Remove materializer and publish verified source
+        working-directory: zed-api-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .github/materialize
+          rm -f \
+            .github/workflows/materialize-public-intake-api.yml \
+            .materialize-public-intake-api-trigger
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "feat(intake): add signed public intake API"
+          git push origin HEAD:feat/public-intake-api-v1
