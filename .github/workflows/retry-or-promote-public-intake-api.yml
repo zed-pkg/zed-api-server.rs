@@ -1,0 +1,163 @@
+name: retry or promote signed public intake API
+
+on:
+  push:
+    branches:
+      - feat/public-intake-api-v1
+    paths:
+      - .github/workflows/retry-or-promote-public-intake-api.yml
+
+permissions:
+  actions: read
+  checks: read
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: promote-public-intake-api-v1
+  cancel-in-progress: false
+
+jobs:
+  retry-or-promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out API candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: feat/public-intake-api-v1
+          fetch-depth: 0
+          persist-credentials: true
+          show-progress: false
+
+      - name: Decide retry or promotion
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          CORE_PR=$(gh api "repos/zed-pkg/zed-lib-core/pulls/30")
+          CORE_MERGED=$(jq -r .merged <<<"$CORE_PR")
+          CORE_MERGE_SHA=$(jq -r '.merge_commit_sha // empty' <<<"$CORE_PR")
+
+          if test -e .github/workflows/materialize-public-intake-api.yml; then
+            if test "$CORE_MERGED" = true; then
+              printf '%s\n' "$(date -u +%FT%TZ)" > .materialize-public-intake-api-trigger
+            fi
+            rm -f \
+              .github/workflows/retry-public-intake-api.yml \
+              .github/workflows/retry-or-promote-public-intake-api.yml
+            git add -A
+            git diff --cached --check
+            git commit -m "ci(intake): reconcile signed API retry state"
+            git push origin HEAD:feat/public-intake-api-v1
+            echo "mode=retry" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if test "$CORE_MERGED" != true || test -z "$CORE_MERGE_SHA"; then
+            rm -f \
+              .github/workflows/retry-public-intake-api.yml \
+              .github/workflows/retry-or-promote-public-intake-api.yml
+            git add -A
+            git diff --cached --check
+            git commit -m "ci(intake): keep API draft until persistence merges"
+            git push origin HEAD:feat/public-intake-api-v1
+            echo "mode=blocked" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          test -s src/routes/public_intake.rs
+          test -s .github/workflows/public-intake-api.yml
+          test ! -e .github/materialize
+          grep -q "public_intake_write_context" src/state.rs
+          grep -q "submit_pre_interest" src/server.rs
+
+          python3 - "$CORE_MERGE_SHA" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          core_sha = sys.argv[1]
+          interfaces_sha = "ed9b3b67fe24741dd96db0490e80d95cf37d1a4f"
+          path = Path(".github/workflows/public-intake-api.yml")
+          text = path.read_text()
+          text, interface_count = re.subn(
+              r'(repository: zed-pkg/zed-interfaces\n\s+ref:) [0-9a-f]{40}',
+              rf'\1 {interfaces_sha}',
+              text,
+              count=1,
+          )
+          text, core_count = re.subn(
+              r'(repository: zed-pkg/zed-lib-core\n\s+ref:) [0-9a-f]{40}',
+              rf'\1 {core_sha}',
+              text,
+              count=1,
+          )
+          if interface_count != 1 or core_count != 1:
+              raise SystemExit("cannot repin exact dependency commits")
+          path.write_text(text)
+          PY
+
+          rm -f \
+            .github/workflows/retry-public-intake-api.yml \
+            .github/workflows/retry-or-promote-public-intake-api.yml
+          git add -A
+          git diff --cached --check
+          git commit -m "ci(intake): pin promoted contract and persistence commits"
+          git push origin HEAD:feat/public-intake-api-v1
+          echo "mode=promote" >> "$GITHUB_OUTPUT"
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Stop after retry or dependency gate
+        if: steps.prepare.outputs.mode != 'promote'
+        run: echo "API promotion was intentionally deferred."
+
+      - name: Verify API base has not moved
+        if: steps.prepare.outputs.mode == 'promote'
+        id: pr
+        shell: bash
+        run: |
+          set -euo pipefail
+          PR_NUMBER=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?state=open&head=zed-pkg:feat/public-intake-api-v1" --jq '.[0].number')
+          test -n "$PR_NUMBER"
+          BASE_SHA=$(gh pr view "$PR_NUMBER" --json baseRefOid --jq .baseRefOid)
+          MAIN_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/branches/main" --jq .commit.sha)
+          test "$BASE_SHA" = "$MAIN_SHA"
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for exact clean-head API checks
+        if: steps.prepare.outputs.mode == 'promote'
+        shell: bash
+        env:
+          CLEAN_HEAD: ${{ steps.prepare.outputs.head }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 80); do
+            JSON=$(gh api -H 'Accept: application/vnd.github+json' "repos/${GITHUB_REPOSITORY}/commits/${CLEAN_HEAD}/check-runs?per_page=100")
+            EXPECTED=$(jq '[.check_runs[] | select(.name == "verify")] | length' <<<"$JSON")
+            EXPECTED_OK=$(jq '[.check_runs[] | select(.name == "verify" and .status == "completed" and .conclusion == "success")] | length' <<<"$JSON")
+            BAD=$(jq '[.check_runs[] | select(.status == "completed" and (.conclusion | IN("failure", "cancelled", "timed_out", "action_required", "stale", "startup_failure")))] | length' <<<"$JSON")
+            PENDING=$(jq '[.check_runs[] | select(.status != "completed")] | length' <<<"$JSON")
+            if test "$EXPECTED" -ge 1 && test "$EXPECTED_OK" -ge 1 && test "$BAD" -eq 0 && test "$PENDING" -eq 0; then
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "Exact API checks did not reach an all-green terminal state" >&2
+          exit 1
+
+      - name: Mark ready and merge exact API head
+        if: steps.prepare.outputs.mode == 'promote'
+        shell: bash
+        env:
+          CLEAN_HEAD: ${{ steps.prepare.outputs.head }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          gh pr ready "$PR_NUMBER"
+          gh pr merge "$PR_NUMBER" --squash --match-head-commit "$CLEAN_HEAD"
