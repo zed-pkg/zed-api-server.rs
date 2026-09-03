@@ -129,7 +129,11 @@ pub(crate) async fn run() -> Result<()> {
         ));
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     tracing::info!("zed-api-server listening on {}", cfg.bind_addr);
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        ores_middleware::frameworks::axum::install_from_env(app, env!("CARGO_PKG_NAME"))?,
+    )
+    .await?;
     Ok(())
 }
 
