@@ -1,0 +1,13 @@
+name: adaptive ores-middleware verification
+on:
+  push:
+    branches: [feat/ores-middleware-v1]
+permissions:
+  contents: write
+jobs:
+  rollout:
+    uses: ORESoftware/ores-middleware/.github/workflows/rust-server-rollout-v2.yml@feat/cross-language-middleware-contract-v1
+    with:
+      source: src/server.rs
+      manifest: Cargo.toml
+      middleware_revision: 3dad4211247051d5f1c64eb898a6432df7d99a51
