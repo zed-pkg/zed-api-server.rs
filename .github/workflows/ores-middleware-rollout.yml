@@ -1,0 +1,17 @@
+name: ores-middleware rollout
+
+on:
+  push:
+    branches: [feat/ores-middleware-v1]
+
+permissions:
+  contents: write
+
+jobs:
+  rollout:
+    if: github.actor != 'github-actions[bot]'
+    uses: ORESoftware/ores-middleware/.github/workflows/rust-server-rollout.yml@a7184454564ef17aa8685fa6393c96b85852056b
+    with:
+      source: src/server.rs
+      manifest: Cargo.toml
+      middleware_revision: a7184454564ef17aa8685fa6393c96b85852056b
