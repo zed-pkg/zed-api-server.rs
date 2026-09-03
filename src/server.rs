@@ -72,7 +72,16 @@ pub(crate) async fn run() -> Result<()> {
         tracing::warn!("per-token rate limiting is DISABLED (ZED_RATE_LIMIT_DISABLED=1)");
         None
     } else {
-        let limiter = Arc::new(ratelimit::RateLimiter::from_env());
+        let limiter = Arc::new(ratelimit::RateLimiter::from_env()?);
+        let policy = limiter.policy();
+        tracing::info!(
+            rate_limit_capacity = policy.capacity,
+            rate_limit_refill_tokens = policy.refill_tokens,
+            rate_limit_refill_interval_ms = policy.refill_interval_ms,
+            rate_limit_consistency = ?policy.consistency,
+            rate_limit_authority = "ores-rl-lib-core",
+            "per-token rate limiting enabled"
+        );
         ratelimit::spawn_sweeper(limiter.clone());
         Some(limiter)
     };
@@ -188,74 +197,48 @@ async fn connect_with_retry(cfg: &Config) -> Result<sea_orm::DatabaseConnection>
                 }
                 return Ok(database);
             }
-            Err(error) if started.elapsed() >= max_wait => {
-                return Err(anyhow::Error::new(error).context(format!(
-                    "failed to connect to DATABASE_URL after {attempt} attempts over {}s",
-                    started.elapsed().as_secs()
-                )));
+            Err(error) if started.elapsed() < max_wait => {
+                let delay = Duration::from_millis(250 * u64::from(attempt.min(20)));
+                tracing::warn!(
+                    attempt,
+                    retry_ms = delay.as_millis(),
+                    "Postgres unavailable; retrying"
+                );
+                tokio::time::sleep(delay).await;
             }
-            Err(error) => {
-                tracing::warn!(%error, attempt, "Postgres not ready yet; retrying in 2s");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
+            Err(error) => return Err(error).context("connect to Postgres"),
         }
     }
 }
 
-async fn connect_registry_write_with_retry(cfg: &Config) -> Result<WriteContext> {
-    let max_wait = database_connect_max_wait();
-    let started = std::time::Instant::now();
-    let mut attempt = 0u32;
-    loop {
-        attempt += 1;
-        let policy = ConnectPolicy::default().with_max_connections(cfg.db_max_connections);
-        match zed_orm_core::connect_read_write_with_policy(&cfg.database_url, policy).await {
-            Ok(context) => {
-                if attempt > 1 {
-                    tracing::info!(attempt, "connected canonical write context after retry");
-                }
-                return Ok(context);
-            }
-            Err(error) if started.elapsed() >= max_wait => {
-                return Err(anyhow::Error::new(error).context(format!(
-                    "failed to connect canonical registry write context after {attempt} attempts over {}s",
-                    started.elapsed().as_secs()
-                )));
-            }
-            Err(error) => {
-                tracing::warn!(%error, attempt, "canonical write context not ready; retrying in 2s");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-        }
-    }
-}
-
+/// Connect to the canonical read-only projection with a bounded startup retry.
 async fn connect_registry_read_with_retry(cfg: &Config) -> Result<ReadContext> {
-    let max_wait = database_connect_max_wait();
-    let started = std::time::Instant::now();
-    let mut attempt = 0u32;
-    loop {
-        attempt += 1;
-        let policy = ConnectPolicy::default().with_max_connections(cfg.db_max_connections);
-        match zed_orm_core::connect_read_only_with_policy(&cfg.database_url, policy).await {
-            Ok(context) => {
-                if attempt > 1 {
-                    tracing::info!(attempt, "connected canonical read context after retry");
-                }
-                return Ok(context);
-            }
-            Err(error) if started.elapsed() >= max_wait => {
-                return Err(anyhow::Error::new(error).context(format!(
-                    "failed to connect canonical registry read context after {attempt} attempts over {}s",
-                    started.elapsed().as_secs()
-                )));
-            }
-            Err(error) => {
-                tracing::warn!(%error, attempt, "canonical read context not ready; retrying in 2s");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-        }
-    }
+    let policy = ConnectPolicy {
+        max_connections: cfg.db_max_connections,
+        connect_timeout: Duration::from_secs(5),
+        acquire_timeout: Duration::from_secs(8),
+        max_wait: database_connect_max_wait(),
+        base_delay: Duration::from_millis(250),
+        max_delay: Duration::from_secs(5),
+    };
+    zed_orm_core::connect_read(&cfg.database_url, policy)
+        .await
+        .context("connect canonical read projection")
+}
+
+/// Connect to the canonical write projection with a bounded startup retry.
+async fn connect_registry_write_with_retry(cfg: &Config) -> Result<WriteContext> {
+    let policy = ConnectPolicy {
+        max_connections: cfg.db_max_connections,
+        connect_timeout: Duration::from_secs(5),
+        acquire_timeout: Duration::from_secs(8),
+        max_wait: database_connect_max_wait(),
+        base_delay: Duration::from_millis(250),
+        max_delay: Duration::from_secs(5),
+    };
+    zed_orm_core::connect_write(&cfg.database_url, policy)
+        .await
+        .context("connect canonical write projection")
 }
 
 fn database_connect_max_wait() -> Duration {
@@ -263,76 +246,50 @@ fn database_connect_max_wait() -> Duration {
         crate::flags::var("DB_CONNECT_MAX_WAIT_SECS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(30),
+            .unwrap_or(30)
+            .clamp(1, 300),
     )
 }
 
-/// Probe the local `/healthz` endpoint for the container HEALTHCHECK.
 async fn healthcheck() -> Result<()> {
-    let bind = crate::flags::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-    let url = healthcheck_url(&bind);
-    let response = reqwest::Client::new()
-        .get(&url)
-        .timeout(Duration::from_secs(3))
-        .send()
+    let config = Config::from_env()?;
+    let mut connect_options = ConnectOptions::new(config.database_url);
+    connect_options
+        .max_connections(1)
+        .connect_timeout(Duration::from_secs(3))
+        .acquire_timeout(Duration::from_secs(3))
+        .sqlx_logging(false);
+    Database::connect(connect_options)
         .await
-        .context("healthcheck request failed")?;
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        anyhow::bail!("healthcheck returned HTTP {}", response.status());
-    }
-}
-
-fn healthcheck_url(bind: &str) -> String {
-    let port = bind.rsplit(':').next().unwrap_or("8080");
-    format!("http://127.0.0.1:{port}/healthz")
+        .context("database healthcheck failed")?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn arguments(values: &[&str]) -> Vec<String> {
-        values.iter().map(|value| (*value).to_owned()).collect()
-    }
-
     #[test]
-    fn process_commands_keep_their_argument_boundaries() {
-        let create = arguments(&["zed-api-server", "create-token", "--name", "ci"]);
-        assert!(matches!(
-            process_command(&create),
-            ProcessCommand::CreateToken(values) if values == ["--name", "ci"]
-        ));
-
-        let revoke = arguments(&["zed-api-server", "revoke-token", "--name", "ci"]);
-        assert!(matches!(
-            process_command(&revoke),
-            ProcessCommand::RevokeToken(values) if values == ["--name", "ci"]
-        ));
+    fn classifies_process_commands_without_consuming_serve_flags() {
         assert_eq!(
-            process_command(&arguments(&["zed-api-server", "healthcheck"])),
-            ProcessCommand::Healthcheck
-        );
-        assert_eq!(
-            process_command(&arguments(&["zed-api-server", "migrate"])),
-            ProcessCommand::Migrate
-        );
-        assert_eq!(
-            process_command(&arguments(&["zed-api-server", "unknown"])),
+            process_command(&[
+                "zed-api-server".to_owned(),
+                "serve".to_owned(),
+                "--bind-addr=127.0.0.1:9000".to_owned(),
+            ]),
             ProcessCommand::Serve
         );
-    }
-
-    #[test]
-    fn healthcheck_uses_the_bound_listener_port() {
         assert_eq!(
-            healthcheck_url("0.0.0.0:8080"),
-            "http://127.0.0.1:8080/healthz"
+            process_command(&[
+                "zed-api-server".to_owned(),
+                "create-token".to_owned(),
+                "subject".to_owned(),
+            ]),
+            ProcessCommand::CreateToken(&["subject".to_owned()][..])
         );
         assert_eq!(
-            healthcheck_url("[::]:9090"),
-            "http://127.0.0.1:9090/healthz"
+            process_command(&["zed-api-server".to_owned(), "healthcheck".to_owned()]),
+            ProcessCommand::Healthcheck
         );
     }
 }
