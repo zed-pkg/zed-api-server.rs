@@ -2775,6 +2775,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "ores-rl-lib-core"
+version = "0.2.0"
+source = "git+https://github.com/ores-rate-limit/ores-rl-lib-core.git?rev=32e65d27893695acd2c2372658918edde1a55ce4#32e65d27893695acd2c2372658918edde1a55ce4"
+
+[[package]]
 name = "ouroboros"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5337,6 +5342,7 @@ dependencies = [
  "http-body 1.1.0",
  "migration",
  "ores-middleware",
+ "ores-rl-lib-core",
  "percent-encoding",
  "reqwest",
  "sea-orm",

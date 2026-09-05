@@ -23,12 +23,14 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use ores_rl_lib_core::{
-    transition, Decision as CoreDecision, LimitPolicy, LimitState, PolicyError,
+    Decision as CoreDecision, LimitPolicy, LimitState, PolicyError, transition,
 };
 
-/// Buckets idle for longer than this are dropped by the sweep, so the map
-/// cannot grow without bound as tokens come and go.
+/// Buckets idle for longer than this are dropped when their state is safe to
+/// forget. The hard capacity below bounds memory even when callers never go
+/// idle long enough to regain a full bucket.
 const IDLE_EVICTION: Duration = Duration::from_secs(600);
+const MAX_BUCKETS: usize = 100_000;
 const DEFAULT_BURST: &str = "60";
 const DEFAULT_RATE_PER_SECOND: &str = "10.0";
 const RATE_SETTING: &str = "ZED_RATE_LIMIT_PER_SECOND";
@@ -74,6 +76,7 @@ impl std::error::Error for RateLimitConfigError {}
 /// identity. Raw tokens and other personal identifiers never enter this type.
 pub struct RateLimiter {
     buckets: Mutex<HashMap<String, Bucket>>,
+    clock: Mutex<Instant>,
     policy: LimitPolicy,
     epoch: Instant,
 }
@@ -84,7 +87,9 @@ pub enum Decision {
     Allow,
     /// Rejected; retry after roughly this many seconds (never 0, so a client
     /// honoring `Retry-After` always backs off).
-    Deny { retry_after_secs: u64 },
+    Deny {
+        retry_after_secs: u64,
+    },
 }
 
 impl RateLimiter {
@@ -97,10 +102,12 @@ impl RateLimiter {
         let policy = LimitPolicy::token_bucket(capacity, refill_tokens, refill_interval_ms)
             .validate()
             .map_err(RateLimitConfigError::InvalidPolicy)?;
+        let epoch = Instant::now();
         Ok(Self {
             buckets: Mutex::new(HashMap::new()),
+            clock: Mutex::new(epoch),
             policy,
-            epoch: Instant::now(),
+            epoch,
         })
     }
 
@@ -112,8 +119,7 @@ impl RateLimiter {
             &crate::flags::var(BURST_SETTING).unwrap_or_else(|_| DEFAULT_BURST.to_owned()),
         )?;
         let refill = parse_refill_rate(
-            &crate::flags::var(RATE_SETTING)
-                .unwrap_or_else(|_| DEFAULT_RATE_PER_SECOND.to_owned()),
+            &crate::flags::var(RATE_SETTING).unwrap_or_else(|_| DEFAULT_RATE_PER_SECOND.to_owned()),
         )?;
         Self::new(capacity, refill.tokens, refill.interval_ms)
     }
@@ -127,6 +133,14 @@ impl RateLimiter {
     /// is testable without sleeping. Any impossible clock or state transition
     /// fails closed without replacing the last valid bucket state.
     pub fn check_at(&self, key: &str, now: Instant) -> Decision {
+        let mut clock = self.clock.lock().unwrap_or_else(|error| error.into_inner());
+        if now < *clock {
+            tracing::error!("rate-limit monotonic clock moved backwards; denying");
+            return Decision::Deny {
+                retry_after_secs: 1,
+            };
+        }
+        *clock = now;
         let Some(elapsed) = now.checked_duration_since(self.epoch) else {
             tracing::error!("rate-limit monotonic clock preceded the limiter epoch; denying");
             return Decision::Deny {
@@ -141,7 +155,16 @@ impl RateLimiter {
         };
 
         let transition_result = {
-            let mut buckets = self.buckets.lock().unwrap_or_else(|error| error.into_inner());
+            let mut buckets = self
+                .buckets
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !buckets.contains_key(key) && buckets.len() >= MAX_BUCKETS {
+                tracing::error!("rate-limit bucket capacity reached; denying new identity");
+                return Decision::Deny {
+                    retry_after_secs: 1,
+                };
+            }
             let bucket = buckets.entry(key.to_owned()).or_insert(Bucket {
                 state: LimitState::Empty,
                 last_seen: now,
@@ -155,10 +178,7 @@ impl RateLimiter {
         };
 
         match transition_result {
-            Ok((_, CoreDecision::Allow { .. } | CoreDecision::Bypass { .. })) => Decision::Allow,
-            Ok((_, CoreDecision::Deny { retry_after_ms, .. })) => Decision::Deny {
-                retry_after_secs: retry_after_ms.div_ceil(1_000).max(1),
-            },
+            Ok((_, decision)) => decision_from_core(decision),
             Err(error) => {
                 tracing::error!(error = %error, "rate-limit transition failed closed");
                 Decision::Deny {
@@ -175,15 +195,72 @@ impl RateLimiter {
     /// Drop buckets untouched for [`IDLE_EVICTION`]. A full bucket carries no
     /// state worth keeping, so eviction can never punish a returning caller.
     pub fn sweep_at(&self, now: Instant) {
-        let mut buckets = self.buckets.lock().unwrap_or_else(|error| error.into_inner());
+        let mut clock = self.clock.lock().unwrap_or_else(|error| error.into_inner());
+        if now < *clock {
+            tracing::error!("rate-limit sweep clock moved backwards; retaining buckets");
+            return;
+        }
+        *clock = now;
+        let Some(elapsed) = now.checked_duration_since(self.epoch) else {
+            tracing::error!("rate-limit sweep preceded the limiter epoch; retaining buckets");
+            return;
+        };
+        let Ok(now_ms) = u64::try_from(elapsed.as_millis()) else {
+            tracing::error!("rate-limit sweep exceeded the supported range; retaining buckets");
+            return;
+        };
+        let mut buckets = self
+            .buckets
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         buckets.retain(|_, bucket| {
             now.saturating_duration_since(bucket.last_seen) < IDLE_EVICTION
+                || !is_safe_to_evict(self.policy, bucket.state, now_ms)
         });
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
         self.buckets.lock().unwrap().len()
+    }
+}
+
+fn decision_from_core(decision: CoreDecision) -> Decision {
+    match decision {
+        CoreDecision::Allow { .. } => Decision::Allow,
+        CoreDecision::Deny { retry_after_ms, .. } => Decision::Deny {
+            retry_after_secs: retry_after_ms.div_ceil(1_000).max(1),
+        },
+        CoreDecision::Bypass { reason } => {
+            tracing::error!(reason, "rate-limit core requested a bypass; denying");
+            Decision::Deny {
+                retry_after_secs: 1,
+            }
+        }
+    }
+}
+
+fn is_safe_to_evict(policy: LimitPolicy, state: LimitState, now_ms: u64) -> bool {
+    match (policy.algorithm, state) {
+        (ores_rl_lib_core::Algorithm::TokenBucket, LimitState::TokenBucket(value)) => {
+            let capacity_micros = u128::from(policy.capacity).saturating_mul(1_000_000);
+            if now_ms < value.last_refill_ms {
+                return false;
+            }
+            let refill = u128::from(now_ms - value.last_refill_ms)
+                .saturating_mul(u128::from(policy.refill_tokens))
+                .saturating_mul(1_000_000)
+                / u128::from(policy.refill_interval_ms);
+            u128::from(value.tokens_micros)
+                .saturating_add(refill)
+                .min(capacity_micros)
+                >= capacity_micros
+        }
+        // Other algorithms retain a time-dependent watermark whose safe
+        // eviction boundary is not represented by this adapter. Retaining
+        // them is conservative if the shared core later exposes another
+        // constructor.
+        _ => false,
     }
 }
 
@@ -322,13 +399,13 @@ pub fn spawn_sweeper(limiter: std::sync::Arc<RateLimiter>) {
 mod tests {
     use super::*;
 
-    fn limiter(capacity: u64, refill_tokens: u64, refill_interval_ms: u64) -> RateLimiter {
+    fn make_limiter(capacity: u64, refill_tokens: u64, refill_interval_ms: u64) -> RateLimiter {
         RateLimiter::new(capacity, refill_tokens, refill_interval_ms).expect("valid policy")
     }
 
     #[test]
     fn burst_is_allowed_then_the_bucket_empties() {
-        let limiter = limiter(3, 1, 1_000);
+        let limiter = make_limiter(3, 1, 1_000);
         let now = Instant::now();
         for index in 0..3 {
             assert_eq!(
@@ -345,7 +422,7 @@ mod tests {
 
     #[test]
     fn the_bucket_refills_over_time() {
-        let limiter = limiter(2, 10, 1_000);
+        let limiter = make_limiter(2, 10, 1_000);
         let start = Instant::now();
         assert_eq!(limiter.check_at("tok", start), Decision::Allow);
         assert_eq!(limiter.check_at("tok", start), Decision::Allow);
@@ -363,7 +440,7 @@ mod tests {
 
     #[test]
     fn refill_never_exceeds_the_burst_ceiling() {
-        let limiter = limiter(5, 1_000, 1_000);
+        let limiter = make_limiter(5, 1_000, 1_000);
         let start = Instant::now();
         let much_later = start + Duration::from_secs(3_600);
         for _ in 0..5 {
@@ -377,7 +454,7 @@ mod tests {
 
     #[test]
     fn callers_are_isolated_from_each_other() {
-        let limiter = limiter(1, 1, 1_000_000);
+        let limiter = make_limiter(1, 1, 1_000_000);
         let now = Instant::now();
         assert_eq!(limiter.check_at("alice", now), Decision::Allow);
         assert!(matches!(
@@ -389,7 +466,7 @@ mod tests {
 
     #[test]
     fn retry_after_reflects_the_refill_rate_and_is_never_zero() {
-        let limiter = limiter(1, 1, 2_000);
+        let limiter = make_limiter(1, 1, 2_000);
         let now = Instant::now();
         assert_eq!(limiter.check_at("tok", now), Decision::Allow);
         assert_eq!(
@@ -399,7 +476,8 @@ mod tests {
             }
         );
 
-        let fast = limiter(1, 1_000, 1_000);
+        let fast = make_limiter(1, 1_000, 1_000);
+        let now = fast.epoch;
         assert_eq!(fast.check_at("tok", now), Decision::Allow);
         assert_eq!(
             fast.check_at("tok", now),
@@ -411,12 +489,11 @@ mod tests {
 
     #[test]
     fn the_sweep_evicts_only_idle_buckets() {
-        let limiter = limiter(5, 1, 1_000);
+        let limiter = make_limiter(5, 1, 1_000);
         let start = Instant::now();
         limiter.check_at("old", start);
         limiter.check_at("fresh", start + IDLE_EVICTION);
         assert_eq!(limiter.len(), 2);
-
         limiter.sweep_at(start + IDLE_EVICTION + Duration::from_secs(1));
         assert_eq!(limiter.len(), 1, "the idle bucket is dropped");
         assert_eq!(
@@ -430,6 +507,18 @@ mod tests {
         assert!(RateLimiter::new(0, 1, 1_000).is_err());
         assert!(RateLimiter::new(1, 0, 1_000).is_err());
         assert!(RateLimiter::new(1, 1, 0).is_err());
+    }
+
+    #[test]
+    fn a_core_bypass_is_not_an_allowance_at_the_enforcement_boundary() {
+        assert_eq!(
+            decision_from_core(CoreDecision::Bypass {
+                reason: "policy-disabled"
+            }),
+            Decision::Deny {
+                retry_after_secs: 1
+            }
+        );
     }
 
     #[test]
@@ -476,7 +565,7 @@ mod tests {
 
     #[test]
     fn a_backwards_clock_transition_is_denied_without_replacing_state() {
-        let limiter = limiter(2, 1, 1_000);
+        let limiter = make_limiter(2, 1, 1_000);
         let later = limiter.epoch + Duration::from_secs(1);
         assert_eq!(limiter.check_at("tok", later), Decision::Allow);
         assert!(matches!(
@@ -484,5 +573,66 @@ mod tests {
             Decision::Deny { .. }
         ));
         assert_eq!(limiter.check_at("tok", later), Decision::Allow);
+    }
+
+    #[test]
+    fn idle_eviction_never_restores_unearned_capacity() {
+        let limiter = make_limiter(1, 1, 1_000_000);
+        let start = limiter.epoch;
+        assert_eq!(limiter.check_at("slow", start), Decision::Allow);
+        limiter.sweep_at(start + IDLE_EVICTION);
+        assert_eq!(limiter.len(), 1, "the idle bucket is not yet full");
+        assert_eq!(
+            limiter.check_at("slow", start + IDLE_EVICTION),
+            Decision::Deny {
+                retry_after_secs: 400
+            }
+        );
+    }
+
+    #[test]
+    fn backwards_submillisecond_clock_preserves_capacity() {
+        let limiter = make_limiter(2, 1, 1_000);
+        let later = limiter.epoch + Duration::from_nanos(900);
+        assert_eq!(limiter.check_at("tok", later), Decision::Allow);
+        assert!(matches!(
+            limiter.check_at("tok", limiter.epoch),
+            Decision::Deny { .. }
+        ));
+        assert_eq!(limiter.check_at("tok", later), Decision::Allow);
+    }
+
+    #[test]
+    fn eviction_does_not_erase_the_clock_watermark() {
+        let limiter = make_limiter(1, 1, 1_000);
+        let start = limiter.epoch;
+        assert_eq!(limiter.check_at("tok", start), Decision::Allow);
+        limiter.sweep_at(start + IDLE_EVICTION);
+        assert_eq!(limiter.len(), 0);
+        assert!(matches!(
+            limiter.check_at("tok", start),
+            Decision::Deny { .. }
+        ));
+        assert_eq!(limiter.len(), 0, "stale requests cannot allocate a bucket");
+    }
+
+    #[test]
+    fn new_identities_are_rejected_at_the_memory_ceiling() {
+        let limiter = make_limiter(1, 1, 1_000);
+        let now = limiter.epoch;
+        for index in 0..MAX_BUCKETS {
+            assert_eq!(
+                limiter.check_at(&format!("key-{index}"), now),
+                Decision::Allow
+            );
+        }
+        assert_eq!(limiter.len(), MAX_BUCKETS);
+        assert_eq!(
+            limiter.check_at("one-too-many", now),
+            Decision::Deny {
+                retry_after_secs: 1
+            }
+        );
+        assert_eq!(limiter.len(), MAX_BUCKETS);
     }
 }

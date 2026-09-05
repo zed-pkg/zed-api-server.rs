@@ -5,6 +5,26 @@ Zed registry. The repository owns the behavioral model and its assumptions;
 the shared `fmctl` runner owns manifest discovery, bounded execution, tool
 pinning, normalized artifacts, and CI exit behavior.
 
+## Rate-limit adapter boundary
+
+`rate_limit_adapter.qnt`, configured by `rate_limit_adapter.fm.toml`, is the
+small refinement model for `src/ratelimit.rs`. The private, pinned
+`ores-rl-lib-core` dependency remains the authority for the exact fixed-point
+token-bucket transition; this repository models the adapter obligations around
+that call:
+
+1. the observed clock never moves backwards;
+2. a partially refilled bucket is retained past the idle threshold;
+3. only a bucket that would be full at sweep time may be evicted;
+4. a request older than the global watermark cannot recreate an evicted burst.
+
+The finite Quint/TLC run covers the state space of the adapter abstraction and
+the Rust tests cover the concrete fixed-point boundary and the adapter's
+100,000-identity memory-ceiling trace. This model intentionally does not claim
+to prove the shared core's other algorithms, Redis authority, authentication,
+or the unbounded production key population; those remain the core repository's
+formal obligations and the service's integration-test boundary.
+
 ## Tooling lineage
 
 There are two existing ORESoftware implementations with different roles:

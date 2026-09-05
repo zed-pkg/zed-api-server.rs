@@ -1,0 +1,39 @@
+# The adapter model is intentionally smaller than the shared core's complete
+# algorithm suite. The pinned ores-rl-lib-core revision owns fixed-point token
+# transitions and its own TLA models; this manifest checks the Zed-specific
+# storage, clock, eviction, and fail-closed boundary.
+schema_version = 1
+project = "zed-api-server"
+model = "rate-limit-adapter"
+language = "quint"
+spec = "formal/rate_limit_adapter.qnt"
+main = "rate_limit_adapter"
+init = "init"
+step = "step"
+invariants = ["adapter_safety"]
+witnesses = [
+  "denial_reached",
+  "slow_refill_reached",
+  "full_idle_eviction_reached",
+  "late_request_reached",
+]
+
+[toolchain]
+quint = "0.32.0"
+java = ">=17"
+node = "22"
+npx = "npx"
+
+[execution]
+timeout_seconds = 600
+max_output_bytes = 8388608
+artifacts_dir = ".formal-artifacts/rate-limit-adapter"
+
+[simulation]
+backend = "typescript"
+max_samples = 5000
+max_steps = 12
+
+[verification]
+backend = "tlc"
+exhaustive_finite_model = true
