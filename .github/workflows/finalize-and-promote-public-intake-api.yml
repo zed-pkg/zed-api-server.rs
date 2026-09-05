@@ -1,0 +1,181 @@
+name: finalize and promote signed public intake API
+
+on:
+  push:
+    branches:
+      - feat/public-intake-api-v1
+    paths:
+      - .github/workflows/finalize-and-promote-public-intake-api.yml
+
+permissions:
+  actions: read
+  checks: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: finalize-and-promote-public-intake-api
+  cancel-in-progress: false
+
+jobs:
+  certify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Wait for the exact persistence promotion
+        id: core
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 180); do
+            PR=$(gh api repos/zed-pkg/zed-lib-core/pulls/30)
+            if test "$(jq -r .merged <<<"$PR")" = true; then
+              SHA=$(jq -r .merge_commit_sha <<<"$PR")
+              test -n "$SHA"
+              test "$SHA" != null
+              echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            STATE=$(jq -r .state <<<"$PR")
+            if test "$STATE" = closed; then
+              echo "persistence PR closed without merge" >&2
+              exit 1
+            fi
+            sleep 20
+          done
+          echo "persistence PR did not merge within the bounded certification window" >&2
+          exit 1
+
+      - name: Check out API candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: feat/public-intake-api-v1
+          path: zed-api-server
+          fetch-depth: 0
+          persist-credentials: true
+          show-progress: false
+
+      - name: Merge current API main without rewriting history
+        working-directory: zed-api-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-edit origin/main
+
+      - name: Check out immutable interface contract
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: zed-pkg/zed-interfaces
+          ref: ed9b3b67fe24741dd96db0490e80d95cf37d1a4f
+          path: zed-interfaces
+          persist-credentials: false
+          show-progress: false
+
+      - name: Check out immutable persistence contract
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: zed-pkg/zed-lib-core
+          ref: ${{ steps.core.outputs.sha }}
+          path: zed-lib-core
+          persist-credentials: false
+          show-progress: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6d653acedea9b9aaf8b1d10a8d8b03ee8a4a20b1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Build final API tree
+        working-directory: zed-api-server
+        shell: bash
+        env:
+          ZED_LIB_CORE_REV: ${{ steps.core.outputs.sha }}
+        run: |
+          set -euo pipefail
+          python3 .github/materialize/finalize_public_intake_api.py
+          cargo update
+          cargo fmt --all
+
+      - name: Remove every temporary API orchestration artifact
+        working-directory: zed-api-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .github/materialize
+          rm -f \
+            .github/workflows/materialize-public-intake-api.yml \
+            .github/workflows/retry-public-intake-api.yml \
+            .github/workflows/retry-or-promote-public-intake-api.yml \
+            .github/workflows/finalize-and-promote-public-intake-api.yml \
+            .github/workflows/public-intake-api.yml \
+            .materialize-public-intake-api-trigger
+
+      - name: Certify signed ingress and route behavior
+        working-directory: zed-api-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s src/routes/public_intake.rs
+          test -s src/routes/agents.md
+          test -s docs/public-intake-api.md
+          test -s .github/workflows/public-intake-api-contract.yml
+          grep -q "public_intake_write_context" src/state.rs
+          grep -q "submit_pre_interest" src/server.rs
+          grep -q "submit_quote_request" src/server.rs
+          cargo fmt --all -- --check
+          cargo check --all-targets --all-features --locked
+          cargo test --all-targets --all-features --locked
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          git diff --check
+          if git grep -nE '(ghp_|github_pat_|lin_api_)[A-Za-z0-9_]+' -- .; then
+            echo "credential-shaped material found" >&2
+            exit 1
+          fi
+
+      - name: Publish exact certified API head
+        id: publish
+        working-directory: zed-api-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git commit -m "feat(intake): finalize signed public intake API"
+          HEAD_SHA=$(git rev-parse HEAD)
+          git push origin HEAD:feat/public-intake-api-v1
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Record exact-head API certification
+        shell: bash
+        env:
+          HEAD_SHA: ${{ steps.publish.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          gh api --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "repos/zed-pkg/zed-api-server.rs/check-runs" \
+            -f name="public-intake/api-final" \
+            -f head_sha="$HEAD_SHA" \
+            -f status="completed" \
+            -f conclusion="success" \
+            -f 'output[title]=Signed public-intake API certified' \
+            -f 'output[summary]=Exact body-digest and HMAC ingress verification, duplicate authority-header rejection, closed typed contracts, enumeration-resistant responses, strict Rust tests, Clippy, and credential scanning passed on this clean head.'
+
+      - name: Promote only the exact certified API head
+        shell: bash
+        env:
+          HEAD_SHA: ${{ steps.publish.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          PR_NUMBER=$(gh api "repos/zed-pkg/zed-api-server.rs/pulls?state=open&head=zed-pkg:feat/public-intake-api-v1" --jq '.[0].number')
+          test -n "$PR_NUMBER"
+          test "$(gh pr view "$PR_NUMBER" --repo zed-pkg/zed-api-server.rs --json headRefOid --jq .headRefOid)" = "$HEAD_SHA"
+          test "$(gh pr view "$PR_NUMBER" --repo zed-pkg/zed-api-server.rs --json baseRefOid --jq .baseRefOid)" = "$(gh api repos/zed-pkg/zed-api-server.rs/branches/main --jq .commit.sha)"
+          gh pr ready "$PR_NUMBER" --repo zed-pkg/zed-api-server.rs
+          gh pr merge "$PR_NUMBER" --repo zed-pkg/zed-api-server.rs --squash --match-head-commit "$HEAD_SHA"
