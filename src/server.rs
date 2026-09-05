@@ -72,7 +72,16 @@ pub(crate) async fn run() -> Result<()> {
         tracing::warn!("per-token rate limiting is DISABLED (ZED_RATE_LIMIT_DISABLED=1)");
         None
     } else {
-        let limiter = Arc::new(ratelimit::RateLimiter::from_env());
+        let limiter = Arc::new(ratelimit::RateLimiter::from_env()?);
+        let policy = limiter.policy();
+        tracing::info!(
+            rate_limit_capacity = policy.capacity,
+            rate_limit_refill_tokens = policy.refill_tokens,
+            rate_limit_refill_interval_ms = policy.refill_interval_ms,
+            rate_limit_consistency = ?policy.consistency,
+            rate_limit_authority = "ores-rl-lib-core",
+            "per-token rate limiting enabled"
+        );
         ratelimit::spawn_sweeper(limiter.clone());
         Some(limiter)
     };
@@ -304,7 +313,6 @@ mod tests {
             process_command(&create),
             ProcessCommand::CreateToken(values) if values == ["--name", "ci"]
         ));
-
         let revoke = arguments(&["zed-api-server", "revoke-token", "--name", "ci"]);
         assert!(matches!(
             process_command(&revoke),
@@ -333,6 +341,30 @@ mod tests {
         assert_eq!(
             healthcheck_url("[::]:9090"),
             "http://127.0.0.1:9090/healthz"
+        );
+    }
+
+    #[test]
+    fn classifies_process_commands_without_consuming_serve_flags() {
+        assert_eq!(
+            process_command(&[
+                "zed-api-server".to_owned(),
+                "serve".to_owned(),
+                "--bind-addr=127.0.0.1:9000".to_owned(),
+            ]),
+            ProcessCommand::Serve
+        );
+        assert_eq!(
+            process_command(&[
+                "zed-api-server".to_owned(),
+                "create-token".to_owned(),
+                "subject".to_owned(),
+            ]),
+            ProcessCommand::CreateToken(&["subject".to_owned()][..])
+        );
+        assert_eq!(
+            process_command(&["zed-api-server".to_owned(), "healthcheck".to_owned()]),
+            ProcessCommand::Healthcheck
         );
     }
 }

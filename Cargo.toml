@@ -11,6 +11,7 @@ members = [".", "migration"]
 
 [dependencies]
 ores-middleware = { git = "https://github.com/ORESoftware/ores-middleware", rev = "a7184454564ef17aa8685fa6393c96b85852056b", features = ["axum"] }
+ores-rl-lib-core = { git = "https://github.com/ores-rate-limit/ores-rl-lib-core.git", rev = "32e65d27893695acd2c2372658918edde1a55ce4" }
 # Keep every cross-repository boundary immutable and independently reviewable.
 # This revision includes the account/audit and dependency-graph contracts, the
 # additive graph export route/media contract (zed-interfaces#63), and the

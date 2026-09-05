@@ -453,7 +453,10 @@ mod tests {
     #[tokio::test]
     async fn exhausted_token_gets_429_with_retry_after() {
         // One request, then effectively no refill for the test's duration.
-        let state = rate_limited_state(crate::ratelimit::RateLimiter::new(1, 0.001)).await;
+        let state = rate_limited_state(
+            crate::ratelimit::RateLimiter::new(1, 1, 1_000_000).expect("valid slow refill"),
+        )
+        .await;
         let app = router(state, 1024 * 1024);
 
         let first = app
@@ -492,7 +495,10 @@ mod tests {
     /// limiting); an exhausted token must not spill over onto them.
     #[tokio::test]
     async fn anonymous_requests_are_not_token_limited() {
-        let state = rate_limited_state(crate::ratelimit::RateLimiter::new(1, 0.001)).await;
+        let state = rate_limited_state(
+            crate::ratelimit::RateLimiter::new(1, 1, 1_000_000).expect("valid slow refill"),
+        )
+        .await;
         let app = router(state, 1024 * 1024);
 
         // Exhaust a token, then confirm anonymous traffic still flows.

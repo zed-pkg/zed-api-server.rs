@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   registry-safety:
-    name: fmctl + Quint registry safety
+    name: fmctl + Quint registry and limiter safety
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -70,7 +70,8 @@ jobs:
           mkdir -p \
             .formal-artifacts/fmctl \
             .formal-artifacts/latest-selection \
-            .formal-artifacts/dependency-resolution
+            .formal-artifacts/dependency-resolution \
+            .formal-artifacts/rate-limit-adapter
           "$FMCTL" --format json validate \
             | tee .formal-artifacts/fmctl/validate.json
           "$FMCTL" \
@@ -83,6 +84,11 @@ jobs:
             --format json \
             validate \
             | tee .formal-artifacts/dependency-resolution/validate.json
+          "$FMCTL" \
+            --manifest formal/rate_limit_adapter.fm.toml \
+            --format json \
+            validate \
+            | tee .formal-artifacts/rate-limit-adapter/validate.json
 
       - name: Record and validate the formal toolchain
         run: |
@@ -94,18 +100,21 @@ jobs:
           "$FMCTL" check
           "$FMCTL" --manifest formal/latest_selection.fm.toml check
           "$FMCTL" --manifest formal/dependency_resolution.fm.toml check
+          "$FMCTL" --manifest formal/rate_limit_adapter.fm.toml check
 
       - name: Reach every configured registry witness
         run: |
           "$FMCTL" simulate
           "$FMCTL" --manifest formal/latest_selection.fm.toml simulate
           "$FMCTL" --manifest formal/dependency_resolution.fm.toml simulate
+          "$FMCTL" --manifest formal/rate_limit_adapter.fm.toml simulate
 
       - name: Exhaust all finite registry state graphs
         run: |
           "$FMCTL" verify
           "$FMCTL" --manifest formal/latest_selection.fm.toml verify
           "$FMCTL" --manifest formal/dependency_resolution.fm.toml verify
+          "$FMCTL" --manifest formal/rate_limit_adapter.fm.toml verify
 
       - name: Upload model-checker evidence
         if: always()
@@ -117,9 +126,11 @@ jobs:
             formal/fm.toml
             formal/latest_selection.fm.toml
             formal/dependency_resolution.fm.toml
+            formal/rate_limit_adapter.fm.toml
             formal/dependency_resolution.qnt
             formal/latest_selection.qnt
             formal/package_publication.qnt
+            formal/rate_limit_adapter.qnt
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
