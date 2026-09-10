@@ -73,7 +73,9 @@ jobs:
           )
           assert re.fullmatch(r"[0-9a-f]{40}", flags2env["rev"]), flags2env["rev"]
 
-          assert cli["identity"]["service"] == package["name"]
+          # Service/package identity belongs to Cargo/Zed package metadata;
+          # current flags2env does not define an [identity] table.
+          assert "identity" not in cli, "unsupported .cli-flags.toml [identity] table"
           assert cli["parse"]["allow_unknown"] is False
 
           canonical_types = {"array", "bool", "double", "integer", "json", "map", "string"}
