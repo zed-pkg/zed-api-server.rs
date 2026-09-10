@@ -16,7 +16,7 @@ permissions:
 jobs:
   contracts:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     env:
       EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
@@ -30,8 +30,10 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
 
       - name: Cross-check Cargo, Zed package, and flags2env contracts
+        id: contracts
         shell: python
         run: |
+          import os
           import re
           import tomllib
           from pathlib import Path
@@ -133,9 +135,36 @@ jobs:
                       assert isinstance(values, list) and values, (name, key, values)
                       assert all(isinstance(value, str) and value for value in values), (name, key, values)
 
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"flags2env_rev={flags2env['rev']}", file=output)
+
           print(
               f"admitted Cargo {package['name']}@{package['version']} / "
               f"Zed {zed['org']}/{zed['name']}@{zed['version']} with "
               f"{len(env_owners)} unique CLI env bindings and "
               f"{len(alias_owners)} public aliases"
           )
+
+      - name: Check out exact Cargo-pinned flags2env
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: flags-2-env/flags-2-env
+          ref: ${{ steps.contracts.outputs.flags2env_rev }}
+          persist-credentials: false
+          path: flags2env
+
+      - name: Build exact Cargo-pinned native parser
+        working-directory: flags2env
+        run: make all
+
+      - name: Audit repository CLI contract with exact native parser
+        run: flags2env/build/flags2env audit .cli-flags.toml
+
+      - name: Prove native audit did not mutate source contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code HEAD
+          # `make all` refreshes tracked compatibility outputs under build/;
+          # the native audit must leave parser source/config untouched.
+          git -C flags2env diff --exit-code HEAD -- . ':(exclude)build/**'
