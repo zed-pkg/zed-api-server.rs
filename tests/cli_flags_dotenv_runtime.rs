@@ -23,7 +23,7 @@ fn working_directory_dotenv_is_ignored_by_api_flags_contract() {
             "working-directory .env must not override the declared bind default"
         );
         assert!(
-            parsed.dotenv.get("BIND_ADDR").is_none(),
+            !parsed.dotenv.contains_key("BIND_ADDR"),
             "working-directory .env must not enter the parser dotenv layer"
         );
         return;
