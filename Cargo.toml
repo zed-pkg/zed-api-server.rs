@@ -1,6 +1,6 @@
 [package]
 name = "zed-api-server"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "zed-pkg registry REST API: Postgres metadata, S3/R2 artifacts"
 license = "MIT"
