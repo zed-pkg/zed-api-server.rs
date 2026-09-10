@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - Cargo.toml
+      - Cargo.lock
       - .zpkg.toml
       - .cli-flags.toml
       - .github/workflows/zed-contract-parity.yml
@@ -36,6 +37,7 @@ jobs:
           from pathlib import Path
 
           cargo = tomllib.loads(Path("Cargo.toml").read_text())
+          lock = tomllib.loads(Path("Cargo.lock").read_text())
           zpkg = tomllib.loads(Path(".zpkg.toml").read_text())
           cli = tomllib.loads(Path(".cli-flags.toml").read_text())
 
@@ -44,13 +46,24 @@ jobs:
           repo = zed["repository"]["url"].removesuffix(".git").rstrip("/")
           cargo_repo = package["repository"].removesuffix(".git").rstrip("/")
 
+          # Cargo and the Zed registry have independent release histories. In
+          # particular, Zed v0.1.1 was created to preserve the immutable legacy
+          # v0.1.0 coordinate, so do not force its version to equal Cargo's.
           assert zed["org"] == "zed-pkg", zed
           assert zed["name"] == package["name"], (zed["name"], package["name"])
-          assert zed["version"] == package["version"], (
-              zed["version"],
+          assert repo == cargo_repo, (repo, cargo_repo)
+          assert re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}", zed["version"]), zed["version"]
+
+          root_packages = [
+              entry
+              for entry in lock["package"]
+              if entry["name"] == package["name"] and "source" not in entry
+          ]
+          assert len(root_packages) == 1, root_packages
+          assert root_packages[0]["version"] == package["version"], (
+              root_packages[0]["version"],
               package["version"],
           )
-          assert repo == cargo_repo, (repo, cargo_repo)
 
           flags2env = cargo["dependencies"]["flags2env"]
           assert flags2env["git"].removesuffix(".git").rstrip("/") == (
@@ -76,6 +89,7 @@ jobs:
                   )
 
           print(
-              f"admitted {zed['org']}/{zed['name']}@{zed['version']} with "
+              f"admitted Cargo {package['name']}@{package['version']} / "
+              f"Zed {zed['org']}/{zed['name']}@{zed['version']} with "
               f"{len(env_owners)} unique CLI env bindings"
           )
