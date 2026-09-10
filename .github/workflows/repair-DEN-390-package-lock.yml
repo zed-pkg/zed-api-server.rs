@@ -57,6 +57,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GIT_TERMINAL_PROMPT: '0'
         run: |
           set -euo pipefail
           rm .github/workflows/repair-DEN-390-package-lock.yml
@@ -65,5 +66,6 @@ jobs:
           git add Cargo.lock .github/workflows/repair-DEN-390-package-lock.yml
           git diff --cached --check
           git commit -m 'fix(DEN-390): align root Cargo.lock package version'
-          git -c http.https://github.com/.extraheader="AUTHORIZATION: bearer ${GH_TOKEN}" \
-            push origin HEAD:fix/DEN-390-package-version-parity-20260910
+          git -c credential.helper='!f() { echo username=x-access-token; echo password=$GH_TOKEN; }; f' \
+            push https://github.com/zed-pkg/zed-api-server.rs.git \
+            HEAD:fix/DEN-390-package-version-parity-20260910
