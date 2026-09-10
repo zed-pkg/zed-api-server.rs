@@ -281,6 +281,17 @@ mod tests {
         ];
 
         let contract = toml::from_str::<toml::Value>(CONTRACT).expect("contract");
+        let dotenv_files = contract
+            .get("env")
+            .and_then(toml::Value::as_table)
+            .and_then(|env| env.get("files"))
+            .and_then(toml::Value::as_array)
+            .expect("[env].files must explicitly control dotenv loading");
+        assert!(
+            dotenv_files.is_empty(),
+            "API runtime must not implicitly load working-directory dotenv files"
+        );
+
         let flags = contract["flags"].as_table().expect("flags table");
         for (name, flag) in flags {
             let flag = flag.as_table().unwrap_or_else(|| panic!("flag {name}"));
