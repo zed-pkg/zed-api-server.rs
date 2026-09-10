@@ -1,0 +1,50 @@
+schemaVersion = "ores.rate-limit.config.v1"
+layout = "server-only"
+defaultPolicyId = "api-default"
+
+[server]
+root = "."
+backend = "redis"
+enforcementLayer = "service"
+redisUrlEnv = "REDIS_URL"
+keyHmacEnv = "ORES_RL_HMAC_KEY"
+
+[[policies]]
+policyId = "api-default"
+clientVisible = false
+algorithm = "token-bucket"
+identityScope = "anonymous-ip"
+capacity = 120
+windowMs = 0
+refillTokens = 120
+refillIntervalMs = 60000
+requestCost = 1
+enforcementMode = "enforce"
+consistencyMode = "strict"
+backendFailureMode = "fail-closed"
+denyCacheMode = "redis-strict-blocks"
+denyCacheCapacity = 2048
+maxOvershoot = 0
+maxBlockTtlMs = 60000
+keyVersion = "v1"
+policyVersion = 1
+
+[[policies]]
+policyId = "authenticated-default"
+clientVisible = false
+algorithm = "token-bucket"
+identityScope = "authenticated-tenant-subject"
+capacity = 600
+windowMs = 0
+refillTokens = 600
+refillIntervalMs = 60000
+requestCost = 1
+enforcementMode = "enforce"
+consistencyMode = "strict"
+backendFailureMode = "fail-closed"
+denyCacheMode = "redis-strict-blocks"
+denyCacheCapacity = 2048
+maxOvershoot = 0
+maxBlockTtlMs = 60000
+keyVersion = "v1"
+policyVersion = 1
