@@ -1,0 +1,64 @@
+name: flags2env forward compatibility
+
+on:
+  pull_request:
+    paths:
+      - '.cli-flags.toml'
+      - 'Cargo.toml'
+      - 'src/flags.rs'
+      - '.github/workflows/flags2env-forward-canary.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.cli-flags.toml'
+      - 'Cargo.toml'
+      - 'src/flags.rs'
+      - '.github/workflows/flags2env-forward-canary.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flags2env-forward-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit-latest-reviewed-flags2env:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact API candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: zed-api-server
+
+      - name: Verify exact reviewed API head
+        working-directory: zed-api-server
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Check out latest reviewed flags2env compatibility target
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: flags-2-env/flags-2-env
+          ref: 333c2ace93c362d274171ab0e0edf613d96a8e59
+          persist-credentials: false
+          path: flags-2-env
+
+      - name: Build latest reviewed native parser
+        working-directory: flags-2-env
+        run: make all
+
+      - name: Audit API CLI contract against forward parser
+        run: flags-2-env/build/flags2env audit zed-api-server/.cli-flags.toml
+
+      - name: Prove forward audit did not mutate source
+        run: |
+          set -euo pipefail
+          git -C zed-api-server diff --exit-code HEAD
+          # make all may refresh compatibility artifacts under build/; source/config must remain immutable.
+          git -C flags-2-env diff --exit-code HEAD -- . ':(exclude)build/**'
