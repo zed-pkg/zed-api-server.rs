@@ -1,7 +1,3 @@
-[identity]
-service = "zed-api-server"
-type_name = "RuntimeEnv"
-
 [help]
 url = "https://github.com/flags-2-env/flags-2-env"
 columns = ["options", "env", "type", "default", "description"]
