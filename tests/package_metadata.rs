@@ -4,8 +4,8 @@ use std::path::PathBuf;
 #[test]
 fn cargo_and_zpkg_release_identity_match() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let source = fs::read_to_string(root.join(".zpkg.toml"))
-        .expect("read repository-owned .zpkg.toml");
+    let source =
+        fs::read_to_string(root.join(".zpkg.toml")).expect("read repository-owned .zpkg.toml");
     let manifest: toml::Value = toml::from_str(&source).expect("parse .zpkg.toml");
 
     let package = manifest
