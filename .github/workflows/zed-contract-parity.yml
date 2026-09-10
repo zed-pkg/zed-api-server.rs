@@ -1,0 +1,81 @@
+name: Zed contract parity
+
+on:
+  pull_request:
+    paths:
+      - Cargo.toml
+      - .zpkg.toml
+      - .cli-flags.toml
+      - .github/workflows/zed-contract-parity.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.EXPECTED_HEAD }}
+          persist-credentials: false
+
+      - name: Verify exact reviewed head
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+
+      - name: Cross-check Cargo, Zed package, and flags2env contracts
+        shell: python
+        run: |
+          import re
+          import tomllib
+          from pathlib import Path
+
+          cargo = tomllib.loads(Path("Cargo.toml").read_text())
+          zpkg = tomllib.loads(Path(".zpkg.toml").read_text())
+          cli = tomllib.loads(Path(".cli-flags.toml").read_text())
+
+          package = cargo["package"]
+          zed = zpkg["package"]
+          repo = zed["repository"]["url"].removesuffix(".git").rstrip("/")
+          cargo_repo = package["repository"].removesuffix(".git").rstrip("/")
+
+          assert zed["org"] == "zed-pkg", zed
+          assert zed["name"] == package["name"], (zed["name"], package["name"])
+          assert zed["version"] == package["version"], (
+              zed["version"],
+              package["version"],
+          )
+          assert repo == cargo_repo, (repo, cargo_repo)
+
+          flags2env = cargo["dependencies"]["flags2env"]
+          assert flags2env["git"].removesuffix(".git").rstrip("/") == (
+              "https://github.com/flags-2-env/flags-2-env"
+          )
+          assert re.fullmatch(r"[0-9a-f]{40}", flags2env["rev"]), flags2env["rev"]
+
+          assert cli["identity"]["service"] == package["name"]
+          assert cli["parse"]["allow_unknown"] is False
+
+          env_owners = {}
+          for name, definition in cli["flags"].items():
+              env = definition["env"]
+              value_type = definition["type"]
+              assert env and isinstance(env, str), name
+              assert value_type in {"string", "boolean", "integer"}, (name, value_type)
+              previous = env_owners.setdefault(env, name)
+              assert previous == name, (env, previous, name)
+              if "long" in definition:
+                  assert definition["long"] == name.replace("_", "-"), (
+                      name,
+                      definition["long"],
+                  )
+
+          print(
+              f"admitted {zed['org']}/{zed['name']}@{zed['version']} with "
+              f"{len(env_owners)} unique CLI env bindings"
+          )
