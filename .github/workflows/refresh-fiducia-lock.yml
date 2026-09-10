@@ -1,0 +1,71 @@
+name: Refresh Fiducia lock evidence
+
+on:
+  push:
+    branches:
+      - fix/pin-fiducia-client-20260910
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/refresh-fiducia-lock.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh-fiducia-lock-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact branch head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify exact branch head
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Install pinned repository toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.98.1
+
+      - name: Generate canonical Fiducia lock source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp Cargo.lock Cargo.lock.before
+          cargo update -p fiducia-client --precise d8df52a8fc4451e6b358d4085eb30ba8eb46d6d7
+          python3 - <<'PY'
+          from pathlib import Path
+
+          sha = "d8df52a8fc4451e6b358d4085eb30ba8eb46d6d7"
+          repository = "https://github.com/fiducia-cloud/fiducia-clients.git"
+          old = f'source = "git+{repository}#{sha}"'
+          new = f'source = "git+{repository}?rev={sha}#{sha}"'
+
+          before = Path("Cargo.lock.before").read_text()
+          after = Path("Cargo.lock").read_text()
+          assert before.count(old) == 1, "expected one mutable-source lock entry"
+          expected = before.replace(old, new, 1)
+          assert after == expected, "Cargo changed more than the one reviewed source identity"
+          assert after.count(new) == 1, "expected one immutable-source lock entry"
+          PY
+          cargo metadata --locked --format-version 1 >/dev/null
+          git diff --exit-code -- Cargo.toml
+          git diff -- Cargo.lock
+
+      - name: Upload reviewed lockfile
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fiducia-cargo-lock
+          path: Cargo.lock
+          if-no-files-found: error
+          retention-days: 1
