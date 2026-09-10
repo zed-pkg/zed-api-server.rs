@@ -1,0 +1,74 @@
+name: one-shot Cargo lock repair
+
+on:
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/one-shot-cargo-lock-repair.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: one-shot-cargo-lock-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    if: >-
+      github.repository == 'zed-pkg/zed-api-server.rs' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'fix/cargo-zpkg-version-parity-20260910'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out guarded PR branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: fix/cargo-zpkg-version-parity-20260910
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install repository Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: '1.98.1'
+
+      - name: Regenerate and constrain resolver output
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --format-version 1 >/dev/null
+          python3 - <<'PY'
+          import subprocess
+
+          status = subprocess.check_output(['git', 'status', '--porcelain'], text=True).splitlines()
+          changed = [line[3:] for line in status if line]
+          if changed != ['Cargo.lock']:
+              raise SystemExit(f'expected Cargo.lock to be the only resolver mutation, got: {changed}')
+
+          diff = subprocess.check_output(['git', 'diff', '--unified=0', '--', 'Cargo.lock'], text=True)
+          edits = [
+              line for line in diff.splitlines()
+              if line.startswith(('+', '-')) and not line.startswith(('+++', '---'))
+          ]
+          expected = ['-version = "0.1.0"', '+version = "0.1.1"']
+          if edits != expected:
+              raise SystemExit(f'unexpected Cargo.lock delta: {edits!r}')
+          PY
+          cargo metadata --locked --format-version 1 >/dev/null
+          git diff --check
+
+      - name: Commit resolver-owned lock and remove one-shot writer
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/one-shot-cargo-lock-repair.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Cargo.lock .github/workflows/one-shot-cargo-lock-repair.yml
+          git commit -m 'fix: regenerate Cargo.lock for package version 0.1.1'
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:fix/cargo-zpkg-version-parity-20260910
