@@ -67,11 +67,46 @@ jobs:
               package["version"],
           )
 
+          # A committed lockfile makes a floating Git dependency reproducible
+          # only until the next resolution. Require the manifest itself to pin
+          # every direct Git boundary, and prove Cargo.lock resolved that same
+          # repository/revision pair.
+          lock_sources = [
+              entry.get("source", "")
+              for entry in lock["package"]
+              if entry.get("source", "").startswith("git+")
+          ]
+
+          dependency_tables = []
+          for section in ("dependencies", "dev-dependencies", "build-dependencies"):
+              dependency_tables.append((section, cargo.get(section, {})))
+          for target_name, target in cargo.get("target", {}).items():
+              for section in ("dependencies", "dev-dependencies", "build-dependencies"):
+                  dependency_tables.append(
+                      (f"target.{target_name}.{section}", target.get(section, {}))
+                  )
+
+          for section, dependencies in dependency_tables:
+              for dependency_name, definition in dependencies.items():
+                  if not isinstance(definition, dict) or "git" not in definition:
+                      continue
+                  revision = definition.get("rev")
+                  assert isinstance(revision, str) and re.fullmatch(
+                      r"[0-9a-f]{40}", revision
+                  ), f"{section}.{dependency_name} must pin git with an immutable 40-char rev"
+                  dependency_repo = definition["git"].removesuffix(".git").rstrip("/")
+                  assert any(
+                      dependency_repo in source and source.endswith(f"#{revision}")
+                      for source in lock_sources
+                  ), (
+                      f"Cargo.lock does not resolve {section}.{dependency_name} "
+                      f"at {dependency_repo}@{revision}"
+                  )
+
           flags2env = cargo["dependencies"]["flags2env"]
           assert flags2env["git"].removesuffix(".git").rstrip("/") == (
               "https://github.com/flags-2-env/flags-2-env"
           )
-          assert re.fullmatch(r"[0-9a-f]{40}", flags2env["rev"]), flags2env["rev"]
 
           assert cli["identity"]["service"] == package["name"]
           assert cli["parse"]["allow_unknown"] is False
