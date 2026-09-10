@@ -234,19 +234,16 @@ fn help_table() -> Result<String, String> {
         .and_then(toml::Value::as_table)
         .ok_or_else(|| "flags-2-env contract has no flags table".to_owned())?;
     let mut output = format!("Usage: {} [OPTIONS]\n\nOptions:\n", env!("CARGO_PKG_NAME"));
-    for flag in flags.values() {
+    for (name, flag) in flags {
         let Some(flag) = flag.as_table() else {
             continue;
         };
-        let long = flag.get("long").and_then(toml::Value::as_str).or_else(|| {
-            flag.get("aliases")
-                .and_then(toml::Value::as_array)
-                .and_then(|aliases| aliases.first())
-                .and_then(toml::Value::as_str)
-        });
-        let Some(long) = long else {
-            continue;
-        };
+        let long = flag
+            .get("aliases")
+            .and_then(toml::Value::as_array)
+            .and_then(|aliases| aliases.first())
+            .and_then(toml::Value::as_str)
+            .unwrap_or(name);
         let short = flag.get("short").and_then(toml::Value::as_str);
         let value_type = flag
             .get("type")
@@ -256,7 +253,7 @@ fn help_table() -> Result<String, String> {
             || format!("--{long}"),
             |short| format!("-{short}, --{long}"),
         );
-        if !matches!(value_type, "bool" | "boolean") {
+        if value_type != "bool" {
             option.push_str(" <VALUE>");
         }
         let description = flag
@@ -278,6 +275,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn contract_uses_canonical_flags2env_schema() {
+        const CANONICAL_TYPES: &[&str] = &[
+            "array", "bool", "double", "integer", "json", "map", "string",
+        ];
+
+        let contract = toml::from_str::<toml::Value>(CONTRACT).expect("contract");
+        let flags = contract["flags"].as_table().expect("flags table");
+        for (name, flag) in flags {
+            let flag = flag.as_table().unwrap_or_else(|| panic!("flag {name}"));
+            assert!(flag.get("long").is_none(), "{name} uses legacy `long`");
+            assert!(flag.get("switch").is_none(), "{name} uses legacy `switch`");
+            let value_type = flag
+                .get("type")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("string");
+            assert!(
+                CANONICAL_TYPES.contains(&value_type),
+                "{name} uses noncanonical type {value_type}"
+            );
+            let aliases = flag
+                .get("aliases")
+                .and_then(toml::Value::as_array)
+                .expect("canonical aliases");
+            assert!(
+                aliases.iter().any(|alias| alias.as_str() == Some(name)),
+                "{name} must retain its canonical public spelling"
+            );
+        }
+
+        resolve_from(&["zed-api-server".to_owned()], std::iter::empty())
+            .expect("canonical contract must audit and coerce");
+    }
+
+    #[test]
     fn unknown_options_fail_closed_without_echoing_values() {
         let error = resolve_from(
             &[
@@ -297,14 +328,21 @@ mod tests {
         let flag = contract["flags"]
             .as_table()
             .and_then(|flags| {
-                flags.values().find_map(|flag| {
+                flags.iter().find_map(|(name, flag)| {
                     let flag = flag.as_table()?;
                     let value_type = flag.get("type")?.as_str()?;
-                    if matches!(value_type, "bool" | "boolean") {
+                    if value_type == "bool" {
                         return None;
                     }
+                    let option_name = flag
+                        .get("aliases")
+                        .and_then(toml::Value::as_array)
+                        .and_then(|aliases| aliases.first())
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or(name)
+                        .to_owned();
                     Some((
-                        flag.get("long")?.as_str()?.to_owned(),
+                        option_name,
                         flag.get("env")?.as_str()?.to_owned(),
                         value_type.to_owned(),
                     ))

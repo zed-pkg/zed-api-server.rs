@@ -1,0 +1,172 @@
+name: Zed contract parity
+
+on:
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .zpkg.toml
+      - .cli-flags.toml
+      - .github/workflows/zed-contract-parity.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.EXPECTED_HEAD }}
+          persist-credentials: false
+
+      - name: Verify exact reviewed head
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+
+      - name: Cross-check Cargo, Zed package, and flags2env contracts
+        id: contracts
+        shell: python
+        run: |
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          cargo = tomllib.loads(Path("Cargo.toml").read_text())
+          lock = tomllib.loads(Path("Cargo.lock").read_text())
+          zpkg = tomllib.loads(Path(".zpkg.toml").read_text())
+          cli = tomllib.loads(Path(".cli-flags.toml").read_text())
+
+          package = cargo["package"]
+          zed = zpkg["package"]
+          repo = zed["repository"]["url"].removesuffix(".git").rstrip("/")
+          cargo_repo = package["repository"].removesuffix(".git").rstrip("/")
+
+          # Cargo and the Zed registry have independent immutable release
+          # histories. Cross-check identity and repository ownership, but do
+          # not invent a requirement that their published versions be equal.
+          assert zed["org"] == "zed-pkg", zed
+          assert zed["name"] == package["name"], (zed["name"], package["name"])
+          assert repo == cargo_repo, (repo, cargo_repo)
+          assert isinstance(zed["version"], str) and zed["version"], zed["version"]
+
+          root_packages = [
+              entry
+              for entry in lock["package"]
+              if entry["name"] == package["name"] and "source" not in entry
+          ]
+          assert len(root_packages) == 1, root_packages
+          assert root_packages[0]["version"] == package["version"], (
+              root_packages[0]["version"],
+              package["version"],
+          )
+
+          flags2env = cargo["dependencies"]["flags2env"]
+          assert flags2env["git"].removesuffix(".git").rstrip("/") == (
+              "https://github.com/flags-2-env/flags-2-env"
+          )
+          assert re.fullmatch(r"[0-9a-f]{40}", flags2env["rev"]), flags2env["rev"]
+
+          # Service/package identity belongs to Cargo/Zed package metadata;
+          # current flags2env does not define an [identity] table.
+          assert "identity" not in cli, "unsupported .cli-flags.toml [identity] table"
+          assert cli["parse"]["allow_unknown"] is False
+
+          canonical_types = {"array", "bool", "double", "integer", "json", "map", "string"}
+          env_owners = {}
+          alias_owners = {}
+          short_owners = {}
+
+          def assert_default_type(name, value_type, value):
+              if value_type == "bool":
+                  assert isinstance(value, bool), (name, value_type, value)
+              elif value_type == "integer":
+                  assert isinstance(value, int) and not isinstance(value, bool), (name, value_type, value)
+              elif value_type == "double":
+                  assert isinstance(value, (int, float)) and not isinstance(value, bool), (name, value_type, value)
+              elif value_type == "string":
+                  assert isinstance(value, str), (name, value_type, value)
+              elif value_type == "array":
+                  assert isinstance(value, list), (name, value_type, value)
+              elif value_type == "map":
+                  assert isinstance(value, dict), (name, value_type, value)
+
+          for name, definition in cli["flags"].items():
+              assert isinstance(definition, dict), name
+              assert "long" not in definition, f"{name} uses legacy `long`; use aliases"
+              assert "switch" not in definition, f"{name} uses legacy `switch`"
+
+              env = definition["env"]
+              value_type = definition.get("type", "string")
+              aliases = definition.get("aliases")
+
+              assert isinstance(env, str) and env, name
+              assert value_type in canonical_types, (name, value_type)
+              assert isinstance(aliases, list) and aliases, f"{name} must declare aliases"
+              assert all(isinstance(alias, str) and alias for alias in aliases), (name, aliases)
+
+              public_name = name.replace("_", "-")
+              assert public_name in aliases, (name, public_name, aliases)
+
+              previous = env_owners.setdefault(env, name)
+              assert previous == name, ("duplicate env", env, previous, name)
+
+              for alias in aliases:
+                  previous = alias_owners.setdefault(alias, name)
+                  assert previous == name, ("duplicate alias", alias, previous, name)
+
+              short = definition.get("short")
+              if short is not None:
+                  assert isinstance(short, str) and len(short) == 1, (name, short)
+                  previous = short_owners.setdefault(short, name)
+                  assert previous == name, ("duplicate short", short, previous, name)
+
+              if "default" in definition:
+                  assert_default_type(name, value_type, definition["default"])
+
+              for key in ("true_aliases", "false_aliases"):
+                  if key in definition:
+                      assert value_type == "bool", (name, key, value_type)
+                      values = definition[key]
+                      assert isinstance(values, list) and values, (name, key, values)
+                      assert all(isinstance(value, str) and value for value in values), (name, key, values)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"flags2env_rev={flags2env['rev']}", file=output)
+
+          print(
+              f"admitted Cargo {package['name']}@{package['version']} / "
+              f"Zed {zed['org']}/{zed['name']}@{zed['version']} with "
+              f"{len(env_owners)} unique CLI env bindings and "
+              f"{len(alias_owners)} public aliases"
+          )
+
+      - name: Check out exact Cargo-pinned flags2env
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: flags-2-env/flags-2-env
+          ref: ${{ steps.contracts.outputs.flags2env_rev }}
+          persist-credentials: false
+          path: flags2env
+
+      - name: Build exact Cargo-pinned native parser
+        working-directory: flags2env
+        run: make all
+
+      - name: Audit repository CLI contract with exact native parser
+        run: flags2env/build/flags2env audit .cli-flags.toml
+
+      - name: Prove native audit did not mutate source contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code HEAD
+          # `make all` refreshes tracked compatibility outputs under build/;
+          # the native audit must leave parser source/config untouched.
+          git -C flags2env diff --exit-code HEAD -- . ':(exclude)build/**'
