@@ -36,7 +36,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
           test -z "$(git status --porcelain)"
 
-      - name: Narrow injected-time hooks to tests
+      - name: Narrow injected-time hooks and fix monotonic fixture
         shell: bash
         run: |
           set -euo pipefail
@@ -51,6 +51,8 @@ jobs:
                   '    #[cfg(test)]\n    fn check_at(&self, key: &str, now: Instant) -> Decision {',
               '    pub fn sweep_at(&self, now: Instant) {':
                   '    #[cfg(test)]\n    fn sweep_at(&self, now: Instant) {',
+              '''        let fast = RateLimiter::new(1, 1_000.0);\n        assert_eq!(fast.check_at("t", now), Decision::Allow);\n        match fast.check_at("t", now) {''':
+                  '''        let fast = RateLimiter::new(1, 1_000.0);\n        let fast_now = Instant::now();\n        assert_eq!(fast.check_at("t", fast_now), Decision::Allow);\n        match fast.check_at("t", fast_now) {''',
           }
           for old, new in replacements.items():
               count = text.count(old)
@@ -81,6 +83,7 @@ jobs:
           changed="$(git status --porcelain | awk '{print $2}')"
           test "$changed" = "src/ratelimit.rs"
           grep -F '#[cfg(test)]' src/ratelimit.rs >/dev/null
+          grep -F 'let fast_now = Instant::now();' src/ratelimit.rs >/dev/null
 
       - name: Commit reviewed limiter repair
         shell: bash
