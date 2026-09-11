@@ -129,12 +129,30 @@ pub(crate) async fn run() -> Result<()> {
         ));
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     tracing::info!("zed-api-server listening on {}", cfg.bind_addr);
+    let middleware_config =
+        registry_transport_config(ores_middleware::config_from_env(env!("CARGO_PKG_NAME"))?);
+    let middleware_stack = Arc::new(
+        ores_middleware::MiddlewareStack::new(middleware_config).map_err(|issues| {
+            anyhow::anyhow!("invalid registry middleware configuration: {issues:?}")
+        })?,
+    );
     axum::serve(
         listener,
-        ores_middleware::frameworks::axum::install_from_env(app, env!("CARGO_PKG_NAME"))?,
+        ores_middleware::frameworks::axum::install(app, middleware_stack),
     )
     .await?;
     Ok(())
+}
+
+/// The registry's artifact endpoints expose the exact representation length as
+/// part of their immutable download contract. Keep the shared middleware stack,
+/// but disable transfer compression at this application boundary so it cannot
+/// remove or rewrite the handler-provided `Content-Length`.
+fn registry_transport_config(
+    mut config: ores_middleware::MiddlewareConfig,
+) -> ores_middleware::MiddlewareConfig {
+    config.settings.compression.enabled = false;
+    config
 }
 
 fn process_command(args: &[String]) -> ProcessCommand<'_> {
@@ -322,6 +340,16 @@ mod tests {
             process_command(&arguments(&["zed-api-server", "unknown"])),
             ProcessCommand::Serve
         );
+    }
+
+    #[test]
+    fn registry_transport_keeps_artifact_representation_length_stable() {
+        let defaults = ores_middleware::default_config("zed-api-server-test");
+        assert!(defaults.settings.compression.enabled);
+
+        let registry = registry_transport_config(defaults);
+        assert!(!registry.settings.compression.enabled);
+        assert!(registry.settings.security_headers.enabled);
     }
 
     #[test]
