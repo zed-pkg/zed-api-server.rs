@@ -20,8 +20,19 @@ metadata:
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # The app can identify authenticated credentials but, behind ingress-nginx,
+    # it cannot safely treat the upstream socket address as the original client.
+    # Keep an ingress-owned IP abuse ceiling for anonymous/read traffic as a
+    # separate layer from the application's per-token limiter.
     nginx.ingress.kubernetes.io/limit-rps: "50"
-    nginx.ingress.kubernetes.io/proxy-body-size: 110m
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "5"
+    nginx.ingress.kubernetes.io/limit-connections: "50"
+    # Keep slow clients from retaining ingress/upstream resources indefinitely.
+    # These remain above the application's 30-second request timeout so normal
+    # application timeout/error behavior wins before the proxy gives up.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-body-size: "110m"
 spec:
   ingressClassName: nginx
   tls:
