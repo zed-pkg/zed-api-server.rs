@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.zpkg.toml'
+      - '.ores-rl.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -19,6 +20,7 @@ on:
   pull_request:
     paths:
       - '.zpkg.toml'
+      - '.ores-rl.toml'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -43,10 +45,9 @@ concurrency:
 env:
   # The image tag names the API commit. Pin every cross-repository source too so
   # that tag always identifies the complete source graph used by the build.
-  # Keep these synchronized with the Rust CI pins; source-graph drift previously
-  # made the debug test build pass while the release container could not compile.
   ZED_INTERFACES_SHA: 4b87e425b04777b0ee413971dc1df805d24f295f
   ZED_LIB_CORE_SHA: c3d486a1519381276fbec02aa25247f542924443
+  ORES_RL_CORE_SHA: f7506f94b5c28ebd3c026fe184434602dd056491
 
 jobs:
   image:
@@ -54,9 +55,6 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        # Migration m20260726_000007_embeddings_and_tags creates the vector
-        # extension. A plain postgres image cannot satisfy that production
-        # schema, so test the container against the exact bootstrap capability.
         image: pgvector/pgvector:0.8.6-pg16-bookworm@sha256:84a355869251af1a3379cfc9fa7b4dbf962c03f642a4bb7b339a203925071c43
         env:
           POSTGRES_USER: zed
@@ -69,6 +67,15 @@ jobs:
           --health-interval 3s
           --health-timeout 3s
           --health-retries 30
+      redis:
+        image: redis:7.4-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
     steps:
       - name: Checkout API source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -92,6 +99,14 @@ jobs:
           path: zed-lib-core
           persist-credentials: false
 
+      - name: Checkout pinned canonical rate-limit runtime
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ores-rate-limit/ores-rl-lib-core
+          ref: ${{ env.ORES_RL_CORE_SHA }}
+          path: ores-rl-lib-core
+          persist-credentials: false
+
       - name: Verify the complete source graph
         shell: bash
         run: |
@@ -99,6 +114,7 @@ jobs:
           test "$(git -C zed-api-server.rs rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(git -C zed-interfaces rev-parse HEAD)" = "$ZED_INTERFACES_SHA"
           test "$(git -C zed-lib-core rev-parse HEAD)" = "$ZED_LIB_CORE_SHA"
+          test "$(git -C ores-rl-lib-core rev-parse HEAD)" = "$ORES_RL_CORE_SHA"
           test "$(sed -n 's/^  ZED_INTERFACES_SHA: //p' zed-api-server.rs/.github/workflows/ci.yml)" = "$ZED_INTERFACES_SHA"
           test "$(sed -n 's/^  ZED_LIB_CORE_SHA: //p' zed-api-server.rs/.github/workflows/ci.yml)" = "$ZED_LIB_CORE_SHA"
           python3 - <<'PY'
@@ -117,6 +133,10 @@ jobs:
               "zed-orm-core": (
                   "https://github.com/zed-pkg/zed-lib-core.git",
                   os.environ["ZED_LIB_CORE_SHA"],
+              ),
+              "ores-rl-lib-core": (
+                  "https://github.com/ores-rate-limit/ores-rl-lib-core",
+                  os.environ["ORES_RL_CORE_SHA"],
               ),
           }
 
@@ -157,13 +177,14 @@ jobs:
             ZED_API_REVISION=${{ github.sha }}
             ZED_INTERFACES_REVISION=${{ env.ZED_INTERFACES_SHA }}
             ZED_LIB_CORE_REVISION=${{ env.ZED_LIB_CORE_SHA }}
+            ORES_RL_CORE_REVISION=${{ env.ORES_RL_CORE_SHA }}
           tags: |
             ghcr.io/zed-pkg/zed-api-server:${{ github.sha }}
             ghcr.io/zed-pkg/zed-api-server:main
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Verify embedded image provenance
+      - name: Verify embedded image provenance and rate-limit contract
         shell: bash
         run: |
           set -euo pipefail
@@ -171,8 +192,11 @@ jobs:
           test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
           test "$(docker image inspect "$image" --format '{{ index .Config.Labels "io.zpkg.interfaces.revision" }}')" = "$ZED_INTERFACES_SHA"
           test "$(docker image inspect "$image" --format '{{ index .Config.Labels "io.zpkg.lib-core.revision" }}')" = "$ZED_LIB_CORE_SHA"
+          test "$(docker image inspect "$image" --format '{{ index .Config.Labels "io.ores.rate-limit-core.revision" }}')" = "$ORES_RL_CORE_SHA"
+          docker run --rm --entrypoint /bin/sh "$image" -c \
+            'test -f /app/.ores-rl.toml && grep -F "defaultPolicyId = \"authenticated-default\"" /app/.ores-rl.toml'
 
-      - name: Start the API image against Postgres and bounded process memory
+      - name: Start the API image against Postgres, Redis, and bounded process memory
         shell: bash
         run: |
           set -euo pipefail
@@ -185,26 +209,32 @@ jobs:
             -e PUBLIC_BASE_URL=http://127.0.0.1:48080 \
             -e ZED_REGISTRY_ID=registry:zpkg-container-smoke \
             -e ZED_AUTH_DISABLED=1 \
-            -e ZED_RATE_LIMIT_DISABLED=1 \
             -e ZED_VERIFY_TAGS=off \
+            -e REDIS_URL=redis://127.0.0.1:6379/ \
+            -e ORES_RL_HMAC_KEY=synthetic-container-smoke-hmac-key \
             "ghcr.io/zed-pkg/zed-api-server:${GITHUB_SHA}"
 
-      - name: Wait for migrations, process-memory storage, and health
+      - name: Wait for migrations, canonical rate-limit admission, and health
         shell: bash
         run: |
           set -euo pipefail
           for _ in $(seq 1 60); do
             if ! docker ps --format '{{.Names}}' | grep -qx zed-api-smoke; then
               echo 'registry container exited before becoming healthy' >&2
+              docker logs zed-api-smoke >&2 || true
               exit 1
             fi
             if curl -fsS http://127.0.0.1:48080/healthz; then
               docker inspect zed-api-smoke --format '{{range .Config.Env}}{{println .}}{{end}}' \
                 | grep -qx 'STORAGE_BACKEND=memory'
               docker inspect zed-api-smoke --format '{{range .Config.Env}}{{println .}}{{end}}' \
-                | grep -qx 'STORAGE_MEMORY_MAX_BYTES=268435456'
-              return_code=0
-              exit "$return_code"
+                | grep -qx 'REDIS_URL=redis://127.0.0.1:6379/'
+              if docker inspect zed-api-smoke --format '{{range .Config.Env}}{{println .}}{{end}}' \
+                | grep -q '^ZED_RATE_LIMIT_'; then
+                echo 'legacy rate-limit policy env leaked into deployable smoke' >&2
+                exit 1
+              fi
+              exit 0
             fi
             sleep 2
           done
@@ -222,8 +252,8 @@ jobs:
           docker image inspect "ghcr.io/zed-pkg/zed-api-server:${GITHUB_SHA}" \
             > smoke-diagnostics/image-inspect.json 2>&1
           docker ps -a > smoke-diagnostics/docker-ps.txt 2>&1
-          printf 'api_revision=%s\ninterfaces_revision=%s\nlib_core_revision=%s\nstorage_backend=memory\n' \
-            "$GITHUB_SHA" "$ZED_INTERFACES_SHA" "$ZED_LIB_CORE_SHA" \
+          printf 'api_revision=%s\ninterfaces_revision=%s\nlib_core_revision=%s\nrate_limit_core_revision=%s\nstorage_backend=memory\n' \
+            "$GITHUB_SHA" "$ZED_INTERFACES_SHA" "$ZED_LIB_CORE_SHA" "$ORES_RL_CORE_SHA" \
             > smoke-diagnostics/source-revisions.txt
           sed -n '1,240p' smoke-diagnostics/container.log
 
@@ -240,20 +270,15 @@ jobs:
           immutable="ghcr.io/zed-pkg/zed-api-server:${GITHUB_SHA}"
           immutable_log="smoke-diagnostics/immutable-push.log"
           compatibility_log="smoke-diagnostics/main-push.log"
-
-          # Docker may write progress and the final digest to stderr. Preserve
-          # the complete stream while retaining pipefail so a denied/failed push
-          # cannot be mistaken for successful evidence collection.
           docker push "$immutable" 2>&1 | tee "$immutable_log"
           digest="$(sed -nE 's/.*digest: (sha256:[0-9a-f]{64}).*/\1/p' "$immutable_log" | tail -n 1)"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
             echo 'could not recover a strict sha256 digest from the immutable push' >&2
             exit 1
           }
-
           docker push ghcr.io/zed-pkg/zed-api-server:main 2>&1 | tee "$compatibility_log"
-          printf 'image=%s@%s\napi_revision=%s\ninterfaces_revision=%s\nlib_core_revision=%s\n' \
-            'ghcr.io/zed-pkg/zed-api-server' "$digest" "$GITHUB_SHA" "$ZED_INTERFACES_SHA" "$ZED_LIB_CORE_SHA" \
+          printf 'image=%s@%s\napi_revision=%s\ninterfaces_revision=%s\nlib_core_revision=%s\nrate_limit_core_revision=%s\n' \
+            'ghcr.io/zed-pkg/zed-api-server' "$digest" "$GITHUB_SHA" "$ZED_INTERFACES_SHA" "$ZED_LIB_CORE_SHA" "$ORES_RL_CORE_SHA" \
             > smoke-diagnostics/published-image.txt
 
       - name: Upload API smoke and provenance evidence
