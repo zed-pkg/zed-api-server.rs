@@ -10,11 +10,12 @@ repository = "https://github.com/zed-pkg/zed-api-server.rs"
 members = [".", "migration"]
 
 [dependencies]
-# Artifact/file routes publish an explicit representation Content-Length and a
-# route-specific CSP. Keep the Axum adapter pinned to the revision that composes
-# CSP policies, and opt out of ores-middleware's default compression feature so
-# transfer transforms cannot erase the handler's byte-length contract.
-ores-middleware = { git = "https://github.com/ORESoftware/ores-middleware", rev = "6b4a3ef2a822ba98a140c3a1c4f8e5d2036e8dce", default-features = false, features = ["axum"] }
+# Artifact routes publish an explicit representation Content-Length. The pinned
+# middleware revision defaults transport compression on, so opt out explicitly:
+# a transfer transform must not erase the registry's byte-length contract.
+# Keep the git revision unchanged here; advancing ores-middleware is a separate
+# dependency/lockfile migration and must not be smuggled into this feature fix.
+ores-middleware = { git = "https://github.com/ORESoftware/ores-middleware", rev = "a7184454564ef17aa8685fa6393c96b85852056b", default-features = false, features = ["axum"] }
 # Keep every cross-repository boundary immutable and independently reviewable.
 # This revision includes the account/audit and dependency-graph contracts, the
 # additive graph export route/media contract (zed-interfaces#63), and the
