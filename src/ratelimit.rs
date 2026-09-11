@@ -104,7 +104,8 @@ impl RateLimiter {
     /// Charge one request against `key` using an injected timestamp. This is
     /// primarily the deterministic policy/test surface: a backwards timestamp
     /// fails closed and leaves all bucket state untouched.
-    pub fn check_at(&self, key: &str, now: Instant) -> Decision {
+    #[cfg(test)]
+    fn check_at(&self, key: &str, now: Instant) -> Decision {
         let mut clock = self.clock.lock().unwrap_or_else(|error| error.into_inner());
         self.check_serialized(key, now, &mut clock)
     }
@@ -165,7 +166,8 @@ impl RateLimiter {
 
     /// Drop only inactive buckets whose projected balance is already full.
     /// Evicting a partially refilled bucket would restore a fresh burst early.
-    pub fn sweep_at(&self, now: Instant) {
+    #[cfg(test)]
+    fn sweep_at(&self, now: Instant) {
         let mut clock = self.clock.lock().unwrap_or_else(|error| error.into_inner());
         self.sweep_serialized(now, &mut clock);
     }
@@ -280,10 +282,16 @@ mod tests {
         let start = Instant::now();
         assert_eq!(limiter.check_at("tok", start), Decision::Allow);
         assert_eq!(limiter.check_at("tok", start), Decision::Allow);
-        assert!(matches!(limiter.check_at("tok", start), Decision::Deny { .. }));
+        assert!(matches!(
+            limiter.check_at("tok", start),
+            Decision::Deny { .. }
+        ));
         let later = start + Duration::from_millis(150);
         assert_eq!(limiter.check_at("tok", later), Decision::Allow);
-        assert!(matches!(limiter.check_at("tok", later), Decision::Deny { .. }));
+        assert!(matches!(
+            limiter.check_at("tok", later),
+            Decision::Deny { .. }
+        ));
     }
 
     #[test]
@@ -294,7 +302,10 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(limiter.check_at("tok", much_later), Decision::Allow);
         }
-        assert!(matches!(limiter.check_at("tok", much_later), Decision::Deny { .. }));
+        assert!(matches!(
+            limiter.check_at("tok", much_later),
+            Decision::Deny { .. }
+        ));
     }
 
     #[test]
@@ -302,7 +313,10 @@ mod tests {
         let limiter = RateLimiter::new(1, 0.001);
         let now = Instant::now();
         assert_eq!(limiter.check_at("alice", now), Decision::Allow);
-        assert!(matches!(limiter.check_at("alice", now), Decision::Deny { .. }));
+        assert!(matches!(
+            limiter.check_at("alice", now),
+            Decision::Deny { .. }
+        ));
         assert_eq!(limiter.check_at("bob", now), Decision::Allow);
     }
 
@@ -316,8 +330,9 @@ mod tests {
             other => panic!("expected Deny, got {other:?}"),
         }
         let fast = RateLimiter::new(1, 1_000.0);
-        assert_eq!(fast.check_at("t", now), Decision::Allow);
-        match fast.check_at("t", now) {
+        let fast_now = Instant::now();
+        assert_eq!(fast.check_at("t", fast_now), Decision::Allow);
+        match fast.check_at("t", fast_now) {
             Decision::Deny { retry_after_secs } => assert_eq!(retry_after_secs, 1),
             other => panic!("expected Deny, got {other:?}"),
         }
