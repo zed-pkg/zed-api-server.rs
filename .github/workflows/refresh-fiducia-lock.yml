@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: refresh-fiducia-lock-${{ github.ref }}
@@ -26,7 +26,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          persist-credentials: false
+          persist-credentials: true
 
       - name: Verify exact branch head
         shell: bash
@@ -38,6 +38,7 @@ jobs:
           toolchain: 1.98.1
 
       - name: Generate canonical Fiducia lock source
+        id: normalize
         shell: bash
         run: |
           set -euo pipefail
@@ -53,14 +54,31 @@ jobs:
 
           before = Path("Cargo.lock.before").read_text()
           after = Path("Cargo.lock").read_text()
-          assert before.count(old) == 1, "expected one mutable-source lock entry"
-          expected = before.replace(old, new, 1)
-          assert after == expected, "Cargo changed more than the one reviewed source identity"
+          assert before.count(old) + before.count(new) == 1, "expected exactly one Fiducia lock source"
+          expected = before.replace(old, new, 1) if old in before else before
+          assert after == expected, "Cargo changed more than the reviewed source identity"
           assert after.count(new) == 1, "expected one immutable-source lock entry"
           PY
           cargo metadata --locked --format-version 1 >/dev/null
           git diff --exit-code -- Cargo.toml
-          git diff -- Cargo.lock
+          if git diff --quiet -- Cargo.lock; then
+            echo "lock_changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "lock_changed=true" >> "$GITHUB_OUTPUT"
+            git diff -- Cargo.lock
+          fi
+
+      - name: Commit reviewed lockfile delta
+        if: steps.normalize.outputs.lock_changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Cargo.lock
+          test "$(git diff --cached --name-only)" = "Cargo.lock"
+          git commit -m 'fix: sync Fiducia lock source identity'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
 
       - name: Upload reviewed lockfile
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
