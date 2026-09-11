@@ -65,17 +65,10 @@ pub(crate) async fn run() -> Result<()> {
             None => fiducia_client::FiduciaClient::new(&configuration.url),
         })
     });
-    let rate_limiter = if matches!(
-        crate::flags::var("ZED_RATE_LIMIT_DISABLED").as_deref(),
-        Ok("1" | "true")
-    ) {
-        tracing::warn!("per-token rate limiting is DISABLED (ZED_RATE_LIMIT_DISABLED=1)");
-        None
-    } else {
-        let limiter = Arc::new(ratelimit::RateLimiter::from_env());
-        ratelimit::spawn_sweeper(limiter.clone());
-        Some(limiter)
-    };
+    // Rate-limit admission is a startup dependency: the checked-in contract,
+    // named runtime secrets, and Redis connection must all be valid before the
+    // process opens its listener. There is no parallel argv/env policy engine.
+    let rate_limiter = Some(Arc::new(ratelimit::RateLimiter::load(".").await?));
     let shared_auth = cfg.shared_auth.as_ref().map(|configuration| {
         Arc::new(
             SharedAuthClient::new(&configuration.url)
