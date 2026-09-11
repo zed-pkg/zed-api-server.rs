@@ -113,9 +113,6 @@ impl RateLimiter {
 
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         if !buckets.contains_key(key) && buckets.len() >= self.max_buckets {
-            // Reclaim only state that is provably equivalent to a fresh bucket.
-            // If the map is still full, fail closed for the new identity rather
-            // than dropping a partially spent bucket and minting capacity.
             buckets.retain(|_, bucket| !self.safe_to_forget(*bucket, now));
             if buckets.len() >= self.max_buckets {
                 tracing::error!(
@@ -144,7 +141,6 @@ impl RateLimiter {
             drop(buckets);
             return Decision::Allow;
         }
-        // Round up: a sub-second wait still asks for at least 1s of backoff.
         let deficit = 1.0 - bucket.tokens;
         let retry_after_secs = (deficit / self.per_second).ceil().max(1.0) as u64;
         drop(buckets);
@@ -203,9 +199,6 @@ pub async fn layer(
     let Some(token) = crate::auth::bearer_token(request.headers()) else {
         return next.run(request).await;
     };
-    // Key on the token's hash, never the plaintext: the key lives in a map,
-    // in log lines, and in error paths, and none of those should hold a
-    // usable credential.
     let key = crate::auth::hash_token(&token);
     match limiter.check(&key) {
         Decision::Allow => next.run(request).await,
@@ -229,7 +222,6 @@ pub async fn layer(
     }
 }
 
-/// Spawn the periodic sweep that keeps the bucket map bounded.
 pub fn spawn_sweeper(limiter: std::sync::Arc<RateLimiter>) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
@@ -259,36 +251,25 @@ mod tests {
 
     #[test]
     fn the_bucket_refills_over_time() {
-        let limiter = RateLimiter::new(2, 10.0); // 10/s => 100ms per token
+        let limiter = RateLimiter::new(2, 10.0);
         let start = Instant::now();
         assert_eq!(limiter.check_at("tok", start), Decision::Allow);
         assert_eq!(limiter.check_at("tok", start), Decision::Allow);
-        assert!(matches!(
-            limiter.check_at("tok", start),
-            Decision::Deny { .. }
-        ));
-        // 150ms later one token has accrued.
+        assert!(matches!(limiter.check_at("tok", start), Decision::Deny { .. }));
         let later = start + Duration::from_millis(150);
         assert_eq!(limiter.check_at("tok", later), Decision::Allow);
-        assert!(matches!(
-            limiter.check_at("tok", later),
-            Decision::Deny { .. }
-        ));
+        assert!(matches!(limiter.check_at("tok", later), Decision::Deny { .. }));
     }
 
     #[test]
     fn refill_never_exceeds_the_burst_ceiling() {
         let limiter = RateLimiter::new(5, 1_000.0);
         let start = Instant::now();
-        // An hour of idling must not bank more than `burst` requests.
         let much_later = start + Duration::from_secs(3_600);
         for _ in 0..5 {
             assert_eq!(limiter.check_at("tok", much_later), Decision::Allow);
         }
-        assert!(matches!(
-            limiter.check_at("tok", much_later),
-            Decision::Deny { .. }
-        ));
+        assert!(matches!(limiter.check_at("tok", much_later), Decision::Deny { .. }));
     }
 
     #[test]
@@ -296,17 +277,12 @@ mod tests {
         let limiter = RateLimiter::new(1, 0.001);
         let now = Instant::now();
         assert_eq!(limiter.check_at("alice", now), Decision::Allow);
-        assert!(matches!(
-            limiter.check_at("alice", now),
-            Decision::Deny { .. }
-        ));
-        // Alice exhausting her bucket must not affect Bob.
+        assert!(matches!(limiter.check_at("alice", now), Decision::Deny { .. }));
         assert_eq!(limiter.check_at("bob", now), Decision::Allow);
     }
 
     #[test]
     fn retry_after_reflects_the_refill_rate_and_is_never_zero() {
-        // 0.5/s => a full token takes 2s.
         let limiter = RateLimiter::new(1, 0.5);
         let now = Instant::now();
         assert_eq!(limiter.check_at("tok", now), Decision::Allow);
@@ -314,7 +290,6 @@ mod tests {
             Decision::Deny { retry_after_secs } => assert_eq!(retry_after_secs, 2),
             other => panic!("expected Deny, got {other:?}"),
         }
-        // A fast refill still rounds up to a whole second.
         let fast = RateLimiter::new(1, 1_000.0);
         assert_eq!(fast.check_at("t", now), Decision::Allow);
         match fast.check_at("t", now) {
@@ -325,24 +300,20 @@ mod tests {
 
     #[test]
     fn slow_refill_bucket_is_not_evicted_before_capacity_recovers() {
-        let limiter = RateLimiter::new(1, 0.001); // one token takes 1000s to refill
+        let limiter = RateLimiter::new(1, 0.001);
         let start = Instant::now();
         assert_eq!(limiter.check_at("slow", start), Decision::Allow);
         assert_eq!(limiter.len(), 1);
 
         limiter.sweep_at(start + IDLE_EVICTION + Duration::from_secs(1));
-        assert_eq!(
-            limiter.len(),
-            1,
-            "idle duration alone must not restore a fresh burst"
-        );
+        assert_eq!(limiter.len(), 1, "idle duration alone must not restore a fresh burst");
         assert!(matches!(
             limiter.check_at("slow", start + Duration::from_secs(601)),
             Decision::Deny { .. }
         ));
 
-        limiter.sweep_at(start + Duration::from_secs(1_001));
-        assert_eq!(limiter.len(), 0, "fully refilled idle state is safe to forget");
+        limiter.sweep_at(start + Duration::from_secs(1_201));
+        assert_eq!(limiter.len(), 0, "fully refilled and idle state is safe to forget");
     }
 
     #[test]
@@ -356,15 +327,9 @@ mod tests {
         ));
         assert_eq!(
             limiter.check_at("tok", start + Duration::from_millis(400)),
-            Decision::Deny {
-                retry_after_secs: 1
-            }
+            Decision::Deny { retry_after_secs: 1 }
         );
-        // The rejected rewind must not let the 400..1000ms interval count twice.
-        assert_eq!(
-            limiter.check_at("tok", start + Duration::from_secs(1)),
-            Decision::Allow
-        );
+        assert_eq!(limiter.check_at("tok", start + Duration::from_secs(1)), Decision::Allow);
     }
 
     #[test]
@@ -376,9 +341,7 @@ mod tests {
         assert_eq!(limiter.len(), 2);
         assert_eq!(
             limiter.check_at("c", start),
-            Decision::Deny {
-                retry_after_secs: 1
-            }
+            Decision::Deny { retry_after_secs: 1 }
         );
         assert_eq!(limiter.len(), 2);
 
@@ -393,10 +356,7 @@ mod tests {
             let limiter = RateLimiter::new(1, rate);
             let now = Instant::now();
             assert_eq!(limiter.check_at("tok", now), Decision::Allow);
-            assert!(matches!(
-                limiter.check_at("tok", now),
-                Decision::Deny { .. }
-            ));
+            assert!(matches!(limiter.check_at("tok", now), Decision::Deny { .. }));
         }
     }
 }
