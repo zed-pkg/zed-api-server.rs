@@ -1,5 +1,5 @@
-# Pin the toolchain so CI cache keys stay stable and every machine builds the
-# same way (zed-docs issue #8).
+# Keep host, CI, and container builds on one exact reviewed compiler.
+# Dockerfile and CI machine-check this value before compiling.
 [toolchain]
-channel = "stable"
+channel = "1.97.1"
 components = ["rustfmt", "clippy"]
