@@ -19,8 +19,10 @@
 //!
 //! This process-local adapter is transitional while the canonical strict Redis
 //! authority is not yet consumable by this public repository. It still fails
-//! closed on backwards time, bounds tracked identities, and never evicts spent
-//! capacity before the bucket would have fully refilled.
+//! closed on backwards injected time, bounds tracked identities, and never
+//! evicts spent capacity before the bucket would have fully refilled. Runtime
+//! timestamps are sampled only after acquiring the global clock serializer so
+//! normal thread scheduling cannot manufacture a false clock rewind.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -45,6 +47,7 @@ pub struct RateLimiter {
     buckets: Mutex<HashMap<String, Bucket>>,
     /// Global monotonic watermark. Injected test clocks must never rewind one
     /// bucket and later collect the same elapsed interval a second time.
+    /// Production callers also use this mutex as the time-sampling serializer.
     clock: Mutex<Instant>,
     burst: f64,
     per_second: f64,
@@ -98,11 +101,26 @@ impl RateLimiter {
         Self::new(burst, per_second)
     }
 
-    /// Charge one request against `key`. Uses an injected `now` so the policy
-    /// is testable without sleeping. A backwards timestamp fails closed and
-    /// leaves all bucket state untouched.
+    /// Charge one request against `key` using an injected timestamp. This is
+    /// primarily the deterministic policy/test surface: a backwards timestamp
+    /// fails closed and leaves all bucket state untouched.
     pub fn check_at(&self, key: &str, now: Instant) -> Decision {
         let mut clock = self.clock.lock().unwrap_or_else(|error| error.into_inner());
+        self.check_serialized(key, now, &mut clock)
+    }
+
+    /// Charge one production request. The timestamp is deliberately sampled
+    /// *after* the clock mutex is acquired. Sampling before the mutex would let
+    /// two concurrent threads obtain t1 < t2 but acquire the mutex in the
+    /// opposite order, falsely interpreting scheduler reordering as clock
+    /// rewind and denying a valid request.
+    pub fn check(&self, key: &str) -> Decision {
+        let mut clock = self.clock.lock().unwrap_or_else(|error| error.into_inner());
+        let now = Instant::now();
+        self.check_serialized(key, now, &mut clock)
+    }
+
+    fn check_serialized(&self, key: &str, now: Instant, clock: &mut Instant) -> Decision {
         if now < *clock {
             tracing::error!("rate-limit monotonic clock moved backwards; denying");
             return Decision::Deny {
@@ -138,23 +156,30 @@ impl RateLimiter {
 
         if bucket.tokens >= 1.0 {
             bucket.tokens -= 1.0;
-            drop(buckets);
             return Decision::Allow;
         }
         let deficit = 1.0 - bucket.tokens;
         let retry_after_secs = (deficit / self.per_second).ceil().max(1.0) as u64;
-        drop(buckets);
         Decision::Deny { retry_after_secs }
-    }
-
-    pub fn check(&self, key: &str) -> Decision {
-        self.check_at(key, Instant::now())
     }
 
     /// Drop only inactive buckets whose projected balance is already full.
     /// Evicting a partially refilled bucket would restore a fresh burst early.
     pub fn sweep_at(&self, now: Instant) {
         let mut clock = self.clock.lock().unwrap_or_else(|error| error.into_inner());
+        self.sweep_serialized(now, &mut clock);
+    }
+
+    /// Production sweep counterpart to [`Self::sweep_at`]. As with `check`,
+    /// sample the timestamp after clock serialization so a concurrent request
+    /// cannot be rejected merely because its pre-lock sample was older.
+    fn sweep(&self) {
+        let mut clock = self.clock.lock().unwrap_or_else(|error| error.into_inner());
+        let now = Instant::now();
+        self.sweep_serialized(now, &mut clock);
+    }
+
+    fn sweep_serialized(&self, now: Instant, clock: &mut Instant) {
         if now < *clock {
             tracing::error!("rate-limit sweep clock moved backwards; retaining buckets");
             return;
@@ -227,7 +252,7 @@ pub fn spawn_sweeper(limiter: std::sync::Arc<RateLimiter>) {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
         loop {
             ticker.tick().await;
-            limiter.sweep_at(Instant::now());
+            limiter.sweep();
         }
     });
 }
@@ -306,14 +331,22 @@ mod tests {
         assert_eq!(limiter.len(), 1);
 
         limiter.sweep_at(start + IDLE_EVICTION + Duration::from_secs(1));
-        assert_eq!(limiter.len(), 1, "idle duration alone must not restore a fresh burst");
+        assert_eq!(
+            limiter.len(),
+            1,
+            "idle duration alone must not restore a fresh burst"
+        );
         assert!(matches!(
             limiter.check_at("slow", start + Duration::from_secs(601)),
             Decision::Deny { .. }
         ));
 
         limiter.sweep_at(start + Duration::from_secs(1_201));
-        assert_eq!(limiter.len(), 0, "fully refilled and idle state is safe to forget");
+        assert_eq!(
+            limiter.len(),
+            0,
+            "fully refilled and idle state is safe to forget"
+        );
     }
 
     #[test]
@@ -327,9 +360,39 @@ mod tests {
         ));
         assert_eq!(
             limiter.check_at("tok", start + Duration::from_millis(400)),
-            Decision::Deny { retry_after_secs: 1 }
+            Decision::Deny {
+                retry_after_secs: 1
+            }
         );
-        assert_eq!(limiter.check_at("tok", start + Duration::from_secs(1)), Decision::Allow);
+        assert_eq!(
+            limiter.check_at("tok", start + Duration::from_secs(1)),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn production_clock_is_sampled_after_serialization() {
+        let limiter = std::sync::Arc::new(RateLimiter::new_with_limit(1, 1.0, 2));
+        let mut clock = limiter
+            .clock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker = std::sync::Arc::clone(&limiter);
+        let handle = std::thread::spawn(move || {
+            started_tx.send(()).expect("announce worker start");
+            worker.check("tok")
+        });
+
+        started_rx.recv().expect("worker started");
+        // Keep the serializer long enough for the worker to reach the lock,
+        // then advance the watermark. An implementation that sampled before
+        // locking would now carry an older timestamp and falsely deny it.
+        std::thread::sleep(Duration::from_millis(20));
+        *clock = Instant::now();
+        drop(clock);
+
+        assert_eq!(handle.join().expect("worker joins"), Decision::Allow);
     }
 
     #[test]
@@ -341,13 +404,19 @@ mod tests {
         assert_eq!(limiter.len(), 2);
         assert_eq!(
             limiter.check_at("c", start),
-            Decision::Deny { retry_after_secs: 1 }
+            Decision::Deny {
+                retry_after_secs: 1
+            }
         );
         assert_eq!(limiter.len(), 2);
 
         let later = start + IDLE_EVICTION + Duration::from_secs(1);
         assert_eq!(limiter.check_at("c", later), Decision::Allow);
-        assert_eq!(limiter.len(), 1, "safe full idle buckets are reclaimed first");
+        assert_eq!(
+            limiter.len(),
+            1,
+            "safe full idle buckets are reclaimed first"
+        );
     }
 
     #[test]
@@ -356,7 +425,10 @@ mod tests {
             let limiter = RateLimiter::new(1, rate);
             let now = Instant::now();
             assert_eq!(limiter.check_at("tok", now), Decision::Allow);
-            assert!(matches!(limiter.check_at("tok", now), Decision::Deny { .. }));
+            assert!(matches!(
+                limiter.check_at("tok", now),
+                Decision::Deny { .. }
+            ));
         }
     }
 }
