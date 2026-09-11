@@ -5,6 +5,7 @@
 #   docker build -f zed-api-server.rs/Dockerfile \
 #     --build-arg ZED_INTERFACES_REVISION=4b87e425b04777b0ee413971dc1df805d24f295f \
 #     --build-arg ZED_LIB_CORE_REVISION=c3d486a1519381276fbec02aa25247f542924443 \
+#     --build-arg ORES_RL_CORE_REVISION=f7506f94b5c28ebd3c026fe184434602dd056491 \
 #     -t ghcr.io/zed-pkg/zed-api-server:dev .
 #
 # The toolchain must satisfy the crate's `edition = "2024"` (>= 1.85) and the
@@ -15,6 +16,7 @@
 FROM rust:1.97-slim-bookworm AS build
 ARG ZED_INTERFACES_REVISION
 ARG ZED_LIB_CORE_REVISION
+ARG ORES_RL_CORE_REVISION
 ENV RUSTUP_TOOLCHAIN=1.97.1
 WORKDIR /work
 COPY zed-interfaces ./zed-interfaces
@@ -23,23 +25,28 @@ COPY zed-api-server.rs ./zed-api-server.rs
 WORKDIR /work/zed-api-server.rs
 RUN test -n "$ZED_INTERFACES_REVISION" \
     && test -n "$ZED_LIB_CORE_REVISION" \
+    && test -n "$ORES_RL_CORE_REVISION" \
     && grep -F "rev = \"$ZED_INTERFACES_REVISION\"" Cargo.toml \
     && grep -F "?rev=$ZED_INTERFACES_REVISION#$ZED_INTERFACES_REVISION" Cargo.lock \
     && grep -F "rev = \"$ZED_LIB_CORE_REVISION\"" Cargo.toml \
     && grep -F "?rev=$ZED_LIB_CORE_REVISION#$ZED_LIB_CORE_REVISION" Cargo.lock \
+    && grep -F "rev = \"$ORES_RL_CORE_REVISION\"" Cargo.toml \
+    && grep -F "?rev=$ORES_RL_CORE_REVISION#$ORES_RL_CORE_REVISION" Cargo.lock \
     && cargo build --release --locked
 
 FROM debian:12-slim
 ARG ZED_API_REVISION=unknown
 ARG ZED_INTERFACES_REVISION=unknown
 ARG ZED_LIB_CORE_REVISION=unknown
+ARG ORES_RL_CORE_REVISION=unknown
 LABEL org.opencontainers.image.title="Zed registry API" \
       org.opencontainers.image.description="Zed package registry API server" \
       org.opencontainers.image.source="https://github.com/zed-pkg/zed-api-server.rs" \
       org.opencontainers.image.revision="$ZED_API_REVISION" \
       org.opencontainers.image.licenses="MIT" \
       io.zpkg.interfaces.revision="$ZED_INTERFACES_REVISION" \
-      io.zpkg.lib-core.revision="$ZED_LIB_CORE_REVISION"
+      io.zpkg.lib-core.revision="$ZED_LIB_CORE_REVISION" \
+      io.ores.rate-limit-core.revision="$ORES_RL_CORE_REVISION"
 # The AWS SDK and reqwest both need a system trust store for HTTPS S3-compatible
 # endpoints. Debian slim does not include one, so Cloudflare R2 and AWS S3 fail
 # during TLS setup even though plaintext local MinIO remains healthy.
@@ -47,7 +54,9 @@ RUN apt-get update \
     && apt-get install --no-install-recommends -y ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 zed
+WORKDIR /app
 COPY --from=build /work/zed-api-server.rs/target/release/zed-api-server /usr/local/bin/zed-api-server
+COPY --chmod=0644 zed-api-server.rs/.ores-rl.toml /app/.ores-rl.toml
 USER zed
 ENV BIND_ADDR=0.0.0.0:8080
 EXPOSE 8080
