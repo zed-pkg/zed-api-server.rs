@@ -8,7 +8,7 @@ allow_unknown = false
 [env]
 dotenv = false
 files = []
-ignore = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "DATABASE_URL", "FIDUCIA_INTERNAL_SECRET", "GITHUB_TOKEN", "SHARED_AUTH_SERVICE_CREDENTIAL"]
+ignore = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "DATABASE_URL", "FIDUCIA_INTERNAL_SECRET", "GITHUB_TOKEN", "ORES_RL_HMAC_KEY", "REDIS_URL", "SHARED_AUTH_SERVICE_CREDENTIAL"]
 
 [flags.help]
 env = "CLI_HELP_REQUESTED"
@@ -187,27 +187,6 @@ aliases = ["fiducia-org-id"]
 type = "string"
 default = "zed-registry"
 help = "Fiducia organization identifier."
-
-[flags.rate-limit-disabled]
-env = "ZED_RATE_LIMIT_DISABLED"
-aliases = ["rate-limit-disabled"]
-type = "bool"
-default = false
-help = "Disable application token rate limiting."
-
-[flags.rate-limit-burst]
-env = "ZED_RATE_LIMIT_BURST"
-aliases = ["rate-limit-burst"]
-type = "integer"
-default = 60
-help = "Immediate per-token request burst."
-
-[flags.rate-limit-per-second]
-env = "ZED_RATE_LIMIT_PER_SECOND"
-aliases = ["rate-limit-per-second"]
-type = "string"
-default = "10.0"
-help = "Continuous per-token request refill rate."
 
 [flags.max-inflated-bytes]
 env = "ZED_MAX_INFLATED_BYTES"
