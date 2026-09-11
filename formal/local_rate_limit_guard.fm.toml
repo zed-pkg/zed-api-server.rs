@@ -1,0 +1,36 @@
+schema_version = 1
+project = "zed-api-server"
+model = "local-rate-limit-guard"
+language = "quint"
+spec = "formal/local_rate_limit_guard.qnt"
+main = "local_rate_limit_guard"
+init = "init"
+step = "step"
+invariants = ["adapter_safety"]
+witnesses = [
+  "denial_reached",
+  "slow_refill_retained_reached",
+  "full_idle_eviction_reached",
+  "late_request_reached",
+  "capacity_denial_reached",
+]
+
+[toolchain]
+quint = "0.32.0"
+java = ">=17"
+node = "22"
+npx = "npx"
+
+[execution]
+timeout_seconds = 600
+max_output_bytes = 8388608
+artifacts_dir = ".formal-artifacts/local-rate-limit-guard"
+
+[simulation]
+backend = "typescript"
+max_samples = 5000
+max_steps = 16
+
+[verification]
+backend = "tlc"
+exhaustive_finite_model = true
