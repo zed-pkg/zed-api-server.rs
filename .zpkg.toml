@@ -11,21 +11,6 @@ language = "rust"
 vcs = "git"
 url = "https://github.com/zed-pkg/zed-api-server.rs"
 
-# Keep the Zed package graph aligned with the cross-repository sources actually
-# admitted by Cargo.toml. Git SHAs remain the native Rust lock authority; these
-# ranges make producer/consumer topology visible to `zed deps` and fleet audits.
-[dependencies]
-"flags-2-env/flags-2-env" = "=0.3.0"
-"fiducia-cloud/fiducia-clients" = "^0.1.0"
-"zed-pkg/zed-interfaces" = "^0.1.0"
-# zed-lib-core is the package authority and exports the zed-orm-core Rust crate.
-"zed-pkg/zed-lib-core" = "^0.1.0"
-
-# ORESoftware/ores-middleware is still consumed by immutable Cargo Git SHA.
-# It does not yet expose a package coordinate on its default branch, so do not
-# invent a Zed dependency name here. The Cargo pin remains fail-closed until the
-# producer's package-manifest work is admitted.
-
 [publish]
 include_readme = true
 tag_format = "v{version}"
