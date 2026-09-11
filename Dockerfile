@@ -8,11 +8,10 @@
 #     -t ghcr.io/zed-pkg/zed-api-server:dev .
 #
 # The toolchain must satisfy the crate's `edition = "2024"` (>= 1.85) and the
-# aws-sdk-* crates' MSRV (>= 1.94.1), so the base is pinned to 1.97.1.
-# RUSTUP_TOOLCHAIN overrides the repo's floating rust-toolchain.toml channel so
-# the build uses the toolchain already present in the image.
+# aws-sdk-* crates' MSRV (>= 1.94.1). Keep this exact compiler synchronized
+# with rust-toolchain.toml and CI; do not use a patch-floating image tag.
 # `-bookworm` keeps the build glibc compatible with the Debian 12 runtime stage.
-FROM rust:1.97-slim-bookworm AS build
+FROM rust:1.97.1-slim-bookworm AS build
 ARG ZED_INTERFACES_REVISION
 ARG ZED_LIB_CORE_REVISION
 ENV RUSTUP_TOOLCHAIN=1.97.1
