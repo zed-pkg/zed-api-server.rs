@@ -181,7 +181,7 @@ jobs:
           report: ${{ runner.temp }}/zed-api-toolchain-tjsv-report.json
           sarif: ''
           output_dir: ${{ runner.temp }}/zed-api-toolchain-tjsv-generated
-          quiet: 'true'
+          quiet: 'false'
 
       - name: Verify deterministic TJSV receipt
         shell: python
