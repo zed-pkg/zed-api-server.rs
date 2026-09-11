@@ -11,6 +11,10 @@ members = [".", "migration"]
 
 [dependencies]
 ores-middleware = { git = "https://github.com/ORESoftware/ores-middleware", rev = "c759246bbd207841aa8fe9150214ee922c751b94", features = ["axum"] }
+# Canonical rate-limit configuration/runtime. This exact revision contains the
+# TJSV-admitted environment declaration model, runtime env resolver, and Redis
+# token-bucket adapter exercised by the live Redis/formal CI lanes.
+ores-rl-lib-core = { git = "https://github.com/ores-rate-limit/ores-rl-lib-core", rev = "f7506f94b5c28ebd3c026fe184434602dd056491", features = ["config-toml", "redis-backend"] }
 # Keep every cross-repository boundary immutable and independently reviewable.
 # This revision includes the account/audit and dependency-graph contracts, the
 # additive graph export route/media contract (zed-interfaces#63), and the
@@ -48,6 +52,7 @@ chrono = { version = "0.4", features = ["serde"] }
 flags2env = { version = "0.1.0", git = "https://github.com/flags-2-env/flags-2-env", rev = "d7bad9ea7dfc657653368237e08903514cdca1ec" }
 flate2 = "1"
 hex = "0.4"
+hmac = "0.12"
 http-body = "1"
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
