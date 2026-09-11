@@ -106,6 +106,14 @@ pub async fn publish(
 
     let key = artifact_key(&actual_sha, meta.format.extension());
     let artifact_len = artifact.len() as i64;
+    let alias_keys = crate::storage::guessable_alias_keys(
+        &org_slug,
+        &name,
+        &ver,
+        &meta.vcs_tag,
+        meta.format.extension(),
+        &m.repository.url,
+    );
 
     // Immutability is checked BEFORE any metadata mutation. An identical retry
     // also repairs a possible legacy-only partial commit before returning the
@@ -149,8 +157,21 @@ pub async fn publish(
     // the version row records it after the put.
     state
         .store
-        .put(&key, artifact, meta.format.content_type())
+        .put(&key, artifact.clone(), meta.format.content_type())
         .await?;
+    if let Err(error) = state
+        .store
+        .put_public_aliases(&alias_keys, artifact, meta.format.content_type())
+        .await
+    {
+        tracing::warn!(
+            org = %org_slug,
+            name = %name,
+            version = %ver,
+            error = %error,
+            "public R2 alias write failed; content-addressed object is stored"
+        );
+    }
 
     // Upsert the package metadata and insert the version atomically: a failed
     // version insert must never leave the package metadata rewritten (M1).
