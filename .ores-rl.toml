@@ -9,6 +9,20 @@ enforcementLayer = "service"
 redisUrlEnv = "REDIS_URL"
 keyHmacEnv = "ORES_RL_HMAC_KEY"
 
+[[env]]
+key = "ORES_RL_HMAC_KEY"
+kind = "string"
+required = true
+secret = true
+purpose = "HMAC key used to derive opaque rate-limit identity keys"
+
+[[env]]
+key = "REDIS_URL"
+kind = "url"
+required = true
+secret = true
+purpose = "Redis connection URL for authoritative distributed rate-limit state"
+
 [[policies]]
 policyId = "api-default"
 clientVisible = false
