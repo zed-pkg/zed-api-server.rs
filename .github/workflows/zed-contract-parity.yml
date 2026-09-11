@@ -7,6 +7,8 @@ on:
       - Cargo.lock
       - .zpkg.toml
       - .cli-flags.toml
+      - contracts/toolchain/**
+      - scripts/render-toolchain-contract.py
       - .github/workflows/zed-contract-parity.yml
   workflow_dispatch:
 
@@ -16,7 +18,7 @@ permissions:
 jobs:
   contracts:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
@@ -77,6 +79,19 @@ jobs:
           # current flags2env does not define an [identity] table.
           assert "identity" not in cli, "unsupported .cli-flags.toml [identity] table"
           assert cli["parse"]["allow_unknown"] is False
+          assert cli["env"]["dotenv"] is False
+          assert cli["env"]["files"] == []
+
+          required_secret_env = {
+              "AWS_ACCESS_KEY_ID",
+              "AWS_SECRET_ACCESS_KEY",
+              "AWS_SESSION_TOKEN",
+              "DATABASE_URL",
+              "FIDUCIA_INTERNAL_SECRET",
+              "GITHUB_TOKEN",
+              "SHARED_AUTH_SERVICE_CREDENTIAL",
+          }
+          assert required_secret_env.issubset(set(cli["env"].get("ignore", [])))
 
           canonical_types = {"array", "bool", "double", "integer", "json", "map", "string"}
           env_owners = {}
@@ -146,6 +161,45 @@ jobs:
               f"{len(env_owners)} unique CLI env bindings and "
               f"{len(alias_owners)} public aliases"
           )
+
+      - name: Render exact API TOML tuple as TJSV instance evidence
+        run: |
+          set -euo pipefail
+          instance_dir="$RUNNER_TEMP/zed-api-toolchain-instances/ZedApiToolchainContract/valid"
+          mkdir -p "$instance_dir"
+          python3 scripts/render-toolchain-contract.py \
+            --root . \
+            --output "$instance_dir/current.json"
+          test -s "$instance_dir/current.json"
+
+      - name: Admit independent TypeSpec and Draft 2020-12 authorities with TJSV
+        uses: ORESoftware/typespec-json-schema-validator@8bf7ebda4e35c0d11b5b5e5f865867bee4fc3085
+        with:
+          typespec: contracts/toolchain/main.tsp
+          schema: contracts/toolchain/authored.schema.json
+          instances: ${{ runner.temp }}/zed-api-toolchain-instances
+          report: ${{ runner.temp }}/zed-api-toolchain-tjsv-report.json
+          sarif: ''
+          output_dir: ${{ runner.temp }}/zed-api-toolchain-tjsv-generated
+          quiet: 'true'
+
+      - name: Verify deterministic TJSV receipt
+        shell: python
+        env:
+          REPORT_PATH: ${{ runner.temp }}/zed-api-toolchain-tjsv-report.json
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          report = json.loads(Path(os.environ["REPORT_PATH"]).read_text(encoding="utf-8"))
+          assert report.get("schema") == "ores.typespec-json-schema-validator.report/v1", report.get("schema")
+          assert report.get("status") == "passed", report.get("status")
+          assert report.get("zeroUnexplainedFindings") is True, report.get("zeroUnexplainedFindings")
+          assert report.get("findings") == [], report.get("findings")
+          differential = report.get("differential", {})
+          assert differential.get("disabled") is not True, differential
+          print(f"TJSV receipt admitted: runId={report.get('runId')} status={report.get('status')}")
 
       - name: Check out exact Cargo-pinned flags2env
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
