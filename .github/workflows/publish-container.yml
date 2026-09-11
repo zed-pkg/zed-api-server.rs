@@ -233,7 +233,7 @@ jobs:
           docker inspect zed-api-smoke > smoke-diagnostics/container-inspect.json 2>&1
           docker image inspect "ghcr.io/zed-pkg/zed-api-server:${EXPECTED_HEAD}" \
             > smoke-diagnostics/image-inspect.json 2>&1
-          docker ps -a > smoke-diagnostics/docker-ps.txt
+          docker ps -a > smoke-diagnostics/docker-ps.txt 2>&1
           printf 'api_revision=%s\ninterfaces_revision=%s\nlib_core_revision=%s\nstorage_backend=memory\n' \
             "$EXPECTED_HEAD" "$ZED_INTERFACES_SHA" "$ZED_LIB_CORE_SHA" \
             > smoke-diagnostics/source-revisions.txt
