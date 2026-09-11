@@ -129,9 +129,8 @@ pub(crate) async fn run() -> Result<()> {
         ));
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     tracing::info!("zed-api-server listening on {}", cfg.bind_addr);
-    let middleware_config = registry_transport_config(ores_middleware::config_from_env(
-        env!("CARGO_PKG_NAME"),
-    )?);
+    let middleware_config =
+        registry_transport_config(ores_middleware::config_from_env(env!("CARGO_PKG_NAME"))?);
     let middleware_stack = Arc::new(
         ores_middleware::MiddlewareStack::new(middleware_config).map_err(|issues| {
             anyhow::anyhow!("invalid registry middleware configuration: {issues:?}")
