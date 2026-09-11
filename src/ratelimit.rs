@@ -16,18 +16,26 @@
 //! back-to-back, refilling at `per_second`. That suits a package registry,
 //! where a CI job legitimately fires a burst of installs and then goes quiet,
 //! better than a fixed window would.
+//!
+//! This process-local adapter is transitional while the canonical strict Redis
+//! authority is not yet consumable by this public repository. It still fails
+//! closed on backwards time, bounds tracked identities, and never evicts spent
+//! capacity before the bucket would have fully refilled.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Buckets idle for longer than this are dropped by the sweep, so the map
-/// cannot grow without bound as tokens come and go.
+/// Buckets may be considered for eviction after this much inactivity, but only
+/// once their token balance would already have refilled to the burst ceiling.
 const IDLE_EVICTION: Duration = Duration::from_secs(600);
+/// Bound process memory even when many distinct valid credentials arrive faster
+/// than their spent capacity can safely be forgotten.
+const MAX_BUCKETS: usize = 100_000;
 
 #[derive(Debug, Clone, Copy)]
 struct Bucket {
-    /// Tokens available right now (fractional: refill is continuous).
+    /// Tokens available at `last_seen` (fractional: refill is continuous).
     tokens: f64,
     last_seen: Instant,
 }
@@ -35,8 +43,12 @@ struct Bucket {
 /// A token-bucket rate limiter keyed by opaque credential identity.
 pub struct RateLimiter {
     buckets: Mutex<HashMap<String, Bucket>>,
+    /// Global monotonic watermark. Injected test clocks must never rewind one
+    /// bucket and later collect the same elapsed interval a second time.
+    clock: Mutex<Instant>,
     burst: f64,
     per_second: f64,
+    max_buckets: usize,
 }
 
 /// Outcome of a rate-limit check.
@@ -53,10 +65,21 @@ pub enum Decision {
 impl RateLimiter {
     /// `burst` requests immediately available, refilling at `per_second`.
     pub fn new(burst: u32, per_second: f64) -> Self {
+        Self::new_with_limit(burst, per_second, MAX_BUCKETS)
+    }
+
+    fn new_with_limit(burst: u32, per_second: f64, max_buckets: usize) -> Self {
+        let clock = Instant::now();
         Self {
             buckets: Mutex::new(HashMap::new()),
+            clock: Mutex::new(clock),
             burst: f64::from(burst.max(1)),
-            per_second: if per_second > 0.0 { per_second } else { 1.0 },
+            per_second: if per_second.is_finite() && per_second > 0.0 {
+                per_second
+            } else {
+                1.0
+            },
+            max_buckets: max_buckets.max(1),
         }
     }
 
@@ -76,16 +99,42 @@ impl RateLimiter {
     }
 
     /// Charge one request against `key`. Uses an injected `now` so the policy
-    /// is testable without sleeping.
+    /// is testable without sleeping. A backwards timestamp fails closed and
+    /// leaves all bucket state untouched.
     pub fn check_at(&self, key: &str, now: Instant) -> Decision {
+        let mut clock = self.clock.lock().unwrap_or_else(|error| error.into_inner());
+        if now < *clock {
+            tracing::error!("rate-limit monotonic clock moved backwards; denying");
+            return Decision::Deny {
+                retry_after_secs: 1,
+            };
+        }
+        *clock = now;
+
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        if !buckets.contains_key(key) && buckets.len() >= self.max_buckets {
+            // Reclaim only state that is provably equivalent to a fresh bucket.
+            // If the map is still full, fail closed for the new identity rather
+            // than dropping a partially spent bucket and minting capacity.
+            buckets.retain(|_, bucket| !self.safe_to_forget(*bucket, now));
+            if buckets.len() >= self.max_buckets {
+                tracing::error!(
+                    max_buckets = self.max_buckets,
+                    "rate-limit bucket capacity reached; denying new identity"
+                );
+                return Decision::Deny {
+                    retry_after_secs: 1,
+                };
+            }
+        }
+
         let bucket = buckets.entry(key.to_string()).or_insert(Bucket {
             tokens: self.burst,
             last_seen: now,
         });
-        // Continuous refill since the last charge, capped at the burst size.
         let elapsed = now
-            .saturating_duration_since(bucket.last_seen)
+            .checked_duration_since(bucket.last_seen)
+            .expect("global monotonic watermark prevents backwards bucket time")
             .as_secs_f64();
         bucket.tokens = (bucket.tokens + elapsed * self.per_second).min(self.burst);
         bucket.last_seen = now;
@@ -106,11 +155,29 @@ impl RateLimiter {
         self.check_at(key, Instant::now())
     }
 
-    /// Drop buckets untouched for [`IDLE_EVICTION`]. A full bucket carries no
-    /// state worth keeping, so eviction can never punish a returning caller.
+    /// Drop only inactive buckets whose projected balance is already full.
+    /// Evicting a partially refilled bucket would restore a fresh burst early.
     pub fn sweep_at(&self, now: Instant) {
+        let mut clock = self.clock.lock().unwrap_or_else(|error| error.into_inner());
+        if now < *clock {
+            tracing::error!("rate-limit sweep clock moved backwards; retaining buckets");
+            return;
+        }
+        *clock = now;
+
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
-        buckets.retain(|_, b| now.saturating_duration_since(b.last_seen) < IDLE_EVICTION);
+        buckets.retain(|_, bucket| !self.safe_to_forget(*bucket, now));
+    }
+
+    fn safe_to_forget(&self, bucket: Bucket, now: Instant) -> bool {
+        let Some(idle) = now.checked_duration_since(bucket.last_seen) else {
+            return false;
+        };
+        if idle < IDLE_EVICTION {
+            return false;
+        }
+        let projected = bucket.tokens + idle.as_secs_f64() * self.per_second;
+        projected >= self.burst
     }
 
     #[cfg(test)]
@@ -257,28 +324,79 @@ mod tests {
     }
 
     #[test]
-    fn the_sweep_evicts_only_idle_buckets() {
-        let limiter = RateLimiter::new(5, 1.0);
+    fn slow_refill_bucket_is_not_evicted_before_capacity_recovers() {
+        let limiter = RateLimiter::new(1, 0.001); // one token takes 1000s to refill
         let start = Instant::now();
-        limiter.check_at("old", start);
-        limiter.check_at("fresh", start + IDLE_EVICTION);
-        assert_eq!(limiter.len(), 2);
+        assert_eq!(limiter.check_at("slow", start), Decision::Allow);
+        assert_eq!(limiter.len(), 1);
 
         limiter.sweep_at(start + IDLE_EVICTION + Duration::from_secs(1));
-        assert_eq!(limiter.len(), 1, "the idle bucket is dropped");
-        // The surviving caller keeps its allowance.
         assert_eq!(
-            limiter.check_at("fresh", start + IDLE_EVICTION + Duration::from_secs(1)),
+            limiter.len(),
+            1,
+            "idle duration alone must not restore a fresh burst"
+        );
+        assert!(matches!(
+            limiter.check_at("slow", start + Duration::from_secs(601)),
+            Decision::Deny { .. }
+        ));
+
+        limiter.sweep_at(start + Duration::from_secs(1_001));
+        assert_eq!(limiter.len(), 0, "fully refilled idle state is safe to forget");
+    }
+
+    #[test]
+    fn backwards_time_fails_closed_without_rewinding_bucket_state() {
+        let limiter = RateLimiter::new(1, 1.0);
+        let start = Instant::now();
+        assert_eq!(limiter.check_at("tok", start), Decision::Allow);
+        assert!(matches!(
+            limiter.check_at("tok", start + Duration::from_millis(500)),
+            Decision::Deny { .. }
+        ));
+        assert_eq!(
+            limiter.check_at("tok", start + Duration::from_millis(400)),
+            Decision::Deny {
+                retry_after_secs: 1
+            }
+        );
+        // The rejected rewind must not let the 400..1000ms interval count twice.
+        assert_eq!(
+            limiter.check_at("tok", start + Duration::from_secs(1)),
             Decision::Allow
         );
     }
 
     #[test]
-    fn degenerate_settings_fall_back_to_something_usable() {
-        // A zero burst would deny everything forever; a zero rate would never
-        // refill. Both are clamped rather than bricking the server.
-        let limiter = RateLimiter::new(0, 0.0);
-        let now = Instant::now();
-        assert_eq!(limiter.check_at("tok", now), Decision::Allow);
+    fn bucket_cardinality_fails_closed_until_safe_state_can_be_reclaimed() {
+        let limiter = RateLimiter::new_with_limit(1, 1.0, 2);
+        let start = Instant::now();
+        assert_eq!(limiter.check_at("a", start), Decision::Allow);
+        assert_eq!(limiter.check_at("b", start), Decision::Allow);
+        assert_eq!(limiter.len(), 2);
+        assert_eq!(
+            limiter.check_at("c", start),
+            Decision::Deny {
+                retry_after_secs: 1
+            }
+        );
+        assert_eq!(limiter.len(), 2);
+
+        let later = start + IDLE_EVICTION + Duration::from_secs(1);
+        assert_eq!(limiter.check_at("c", later), Decision::Allow);
+        assert_eq!(limiter.len(), 1, "safe full idle buckets are reclaimed first");
+    }
+
+    #[test]
+    fn invalid_non_finite_rates_do_not_disable_the_ceiling() {
+        for rate in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+            let limiter = RateLimiter::new(1, rate);
+            let now = Instant::now();
+            assert_eq!(limiter.check_at("tok", now), Decision::Allow);
+            assert!(matches!(
+                limiter.check_at("tok", now),
+                Decision::Deny { .. }
+            ));
+        }
     }
 }
