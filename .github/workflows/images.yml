@@ -6,7 +6,23 @@ name: images
 on:
   push:
     branches: [main]
-    paths: ["Dockerfile", "Dockerfile.*.dkf", "src/**", "Cargo.*", "package*.json", "pubspec.*", "go.*", "gleam.toml", "manifest.toml"]
+    paths:
+      - ".cli-flags.toml"
+      - ".ores-rl.toml"
+      - ".zpkg.toml"
+      - ".zpkg.lock"
+      - "env/**"
+      - "scripts/sops-entrypoint.sh"
+      - "Dockerfile"
+      - "Dockerfile.*.dkf"
+      - "src/**"
+      - "Cargo.*"
+      - "package*.json"
+      - "pubspec.*"
+      - "go.*"
+      - "gleam.toml"
+      - "manifest.toml"
+      - ".github/workflows/images.yml"
   workflow_dispatch:
 permissions:
   contents: read
