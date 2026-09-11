@@ -20,12 +20,10 @@ fn repository_root() -> PathBuf {
 
 fn parse_root_toml(name: &str) -> (String, Value) {
     let path = repository_root().join(name);
-    let source = fs::read_to_string(&path).unwrap_or_else(|error| {
-        panic!("failed to read {}: {error}", path.display())
-    });
-    let document = toml::from_str(&source).unwrap_or_else(|error| {
-        panic!("failed to parse {}: {error}", path.display())
-    });
+    let source = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let document = toml::from_str(&source)
+        .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
     (source, document)
 }
 
@@ -110,10 +108,7 @@ fn rate_limit_server_env_references_are_declared_required_secrets() {
     assert_eq!(server.get("backend").and_then(Value::as_str), Some("redis"));
 
     let declarations = env_declarations(&config);
-    let expected = [
-        ("REDIS_URL", "url"),
-        ("ORES_RL_HMAC_KEY", "string"),
-    ];
+    let expected = [("REDIS_URL", "url"), ("ORES_RL_HMAC_KEY", "string")];
     assert_eq!(declarations.len(), expected.len());
 
     for (key, kind) in expected {
@@ -156,7 +151,11 @@ fn rate_limit_secret_keys_are_env_only_in_flags2env_contract() {
         .and_then(Value::as_array)
         .expect(".cli-flags.toml [env].ignore must be an array")
         .iter()
-        .map(|value| value.as_str().expect("[env].ignore entries must be strings"))
+        .map(|value| {
+            value
+                .as_str()
+                .expect("[env].ignore entries must be strings")
+        })
         .collect::<Vec<_>>();
     let ignored_set = ignored.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
