@@ -86,8 +86,27 @@ jobs:
                   f"Cargo.lock does not uniquely pin {package} to {expected_source}"
               )
           PY
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - name: Resolve and verify exact Rust toolchain contract
+        id: rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import re
+          import tomllib
+          from pathlib import Path
+
+          toolchain = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]["channel"]
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", toolchain):
+              raise SystemExit(f"Rust toolchain must be patch-exact, got {toolchain!r}")
+          dockerfile = Path("Dockerfile").read_text()
+          assert f"FROM rust:{toolchain}-slim-bookworm AS build" in dockerfile
+          assert f"ENV RUSTUP_TOOLCHAIN={toolchain}" in dockerfile
+          print(f"toolchain={toolchain}")
+          PY
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
           components: rustfmt
       - name: Install mold (fast linker)
         uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
@@ -118,8 +137,23 @@ jobs:
       - name: Verify exact contributor head
         shell: bash
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - name: Resolve exact Rust toolchain
+        id: rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import re
+          import tomllib
+          from pathlib import Path
+          toolchain = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]["channel"]
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", toolchain):
+              raise SystemExit(f"Rust toolchain must be patch-exact, got {toolchain!r}")
+          print(f"toolchain={toolchain}")
+          PY
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
           components: clippy
       - name: Install mold (fast linker)
         uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
