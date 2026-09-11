@@ -28,8 +28,10 @@ pub struct AppState {
     /// Distributed lock service; None → Postgres-only serialization (correct,
     /// just without cross-replica FIFO queueing/observability).
     pub fiducia: Option<Arc<FiduciaClient>>,
-    /// Per-token rate limiter; None disables limiting (tests, and
-    /// `ZED_RATE_LIMIT_DISABLED=1` for single-tenant self-hosting).
+    /// Canonical `.ores-rl.toml` / Redis-backed package-token limiter. Real
+    /// `serve` startup constructs this before opening the listener. `None` is
+    /// tolerated only in isolated unit-test states; middleware fails closed if
+    /// such a state reaches a protected request.
     pub rate_limiter: Option<Arc<crate::ratelimit::RateLimiter>>,
     /// Protected Shared Auth introspection client for browser/account routes.
     /// None is tolerated only for healthchecks and legacy package-token routes;
