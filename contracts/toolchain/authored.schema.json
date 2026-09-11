@@ -18,7 +18,7 @@
         "canonicalFlagsAuthority": { "type": "boolean", "const": true },
         "strictUnknownOptions": { "type": "boolean", "const": true },
         "dotenvDisabled": { "type": "boolean", "const": true },
-        "flagCount": { "type": "integer", "minimum": 1 },
+        "flagCount": { "type": "integer", "const": 36 },
         "requiredSecretEnvIgnored": { "type": "boolean", "const": true },
         "legacyFlagsAuthorityPresent": { "type": "boolean", "const": false }
       },
