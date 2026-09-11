@@ -14,7 +14,7 @@ url = "https://github.com/zed-pkg/zed-api-server.rs"
 [publish]
 include_readme = true
 tag_format = "v{version}"
-smoke_test = "test -f \"$ZED_PKG_TEST_TARGET/src/main.rs\" && test -f \"$ZED_PKG_TEST_TARGET/src/routes/publish.rs\" && test -f \"$ZED_PKG_TEST_TARGET/schema/schema.sql\""
+smoke_test = "test -f \"$ZED_PKG_TEST_TARGET/src/main.rs\" && test -f \"$ZED_PKG_TEST_TARGET/src/routes/publish.rs\" && test -f \"$ZED_PKG_TEST_TARGET/schema/schema.sql\" && test -f \"$ZED_PKG_TEST_TARGET/.ores-rl.toml\" && grep -F 'ores-rl-lib-core' \"$ZED_PKG_TEST_TARGET/Cargo.toml\""
 exclude = [
   ".env",
   ".env.*",
