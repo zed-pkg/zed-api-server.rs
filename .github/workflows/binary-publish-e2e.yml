@@ -1,0 +1,352 @@
+name: binary publish e2e
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - migration/**
+      - src/**
+      - .github/workflows/binary-publish-e2e.yml
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - migration/**
+      - src/**
+      - .github/workflows/binary-publish-e2e.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zed-registry-binary-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Reviewed head of zed-cli#266. This commit pins zed-interfaces#64 and ships
+  # the external `zed-binary` command used by the public `zed binary ...` form.
+  ZED_CLI_SHA: 1bc86d7ad40acf4fb99a482c37d9a3aa68abc987
+  ZED_PKG_REGISTRY: http://127.0.0.1:8080
+  ZED_PKG_INTERACTIVE: "false"
+
+jobs:
+  binary-publish-download-roundtrip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.2-pg17-bookworm
+        env:
+          POSTGRES_USER: zed
+          POSTGRES_PASSWORD: zed
+          POSTGRES_DB: zed
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U zed -d zed"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Check out the registry server
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          shared-key: binary-publish-e2e
+
+      - name: Build the locked registry and reviewed binary CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --quiet --locked
+          cargo install --quiet \
+            --git https://github.com/zed-pkg/zed-cli.git \
+            --rev "$ZED_CLI_SHA" \
+            --locked \
+            --bins \
+            --root "$RUNNER_TEMP/zed-cli"
+          "$RUNNER_TEMP/zed-cli/bin/zed" --help >/dev/null
+          "$RUNNER_TEMP/zed-cli/bin/zed-binary" --help >/dev/null
+
+      - name: Start the real registry against Postgres
+        shell: bash
+        env:
+          DATABASE_URL: postgres://zed:zed@127.0.0.1:5432/zed
+          AUTO_MIGRATE: "true"
+          BIND_ADDR: 127.0.0.1:8080
+          PUBLIC_BASE_URL: http://127.0.0.1:8080
+          STORAGE_BACKEND: local
+          STORAGE_LOCAL_DIR: ${{ runner.temp }}/artifacts
+          ZED_VERIFY_TAGS: "off"
+          ZED_AUTH_DISABLED: "1"
+          ZED_RATE_LIMIT_DISABLED: "1"
+          DB_CONNECT_MAX_WAIT_SECS: "30"
+          RUST_LOG: info
+        run: |
+          set -euo pipefail
+          mkdir -p "$STORAGE_LOCAL_DIR"
+          ./target/debug/zed-api-server >"$RUNNER_TEMP/zed-api-binary.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/zed-api-binary.pid"
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/zed-api-binary.log"
+          exit 1
+
+      - name: Mint an admin token and claim the fixture organization
+        shell: bash
+        env:
+          DATABASE_URL: postgres://zed:zed@127.0.0.1:5432/zed
+          PUBLIC_BASE_URL: http://127.0.0.1:8080
+          STORAGE_BACKEND: local
+          STORAGE_LOCAL_DIR: ${{ runner.temp }}/artifacts
+          ZED_VERIFY_TAGS: "off"
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/zed-api-server create-token \
+            --name registry-binary-e2e \
+            --expires-in-days 1)
+          token=$(printf '%s\n' "$output" | tail -n 1)
+          case "$token" in
+            zpkg_*) ;;
+            *) printf '%s\n' "$output" >&2; exit 1 ;;
+          esac
+          echo "::add-mask::$token"
+          export ZED_PKG_TOKEN="$token"
+          printf 'ZED_PKG_TOKEN=%s\n' "$token" >>"$GITHUB_ENV"
+          "$RUNNER_TEMP/zed-cli/bin/zed" org claim binary-e2e
+
+      - name: Compile and tag a real native executable package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$RUNNER_TEMP/binary-package"
+          download_dir="$RUNNER_TEMP/binary-download"
+          mkdir -p "$package_dir/bin" "$download_dir"
+          printf 'BINARY_PACKAGE_DIR=%s\nBINARY_DOWNLOAD_DIR=%s\n' \
+            "$package_dir" "$download_dir" >>"$GITHUB_ENV"
+
+          cat >"$package_dir/main.rs" <<'RS'
+          fn main() {
+              println!("hello from verified zed binary v1");
+          }
+          RS
+          rustc "$package_dir/main.rs" -o "$package_dir/bin/registry-binary-smoke"
+          test -x "$package_dir/bin/registry-binary-smoke"
+
+          cat >"$package_dir/.zpkg.toml" <<'TOML'
+          [package]
+          org = "binary-e2e"
+          name = "registry-binary-smoke"
+          version = "0.1.0"
+          description = "Real native binary ZIP publication fixture"
+          license = "MIT"
+
+          [package.repository]
+          vcs = "git"
+          url = "https://github.com/zed-pkg/zed-api-server.rs"
+
+          [bin]
+          registry-binary-smoke = "bin/registry-binary-smoke"
+          TOML
+          printf 'target/\n.zed/\n' >"$package_dir/.gitignore"
+          printf 'MIT fixture license\n' >"$package_dir/LICENSE"
+
+          git -C "$package_dir" init -q
+          git -C "$package_dir" config user.name "Zed Binary E2E"
+          git -C "$package_dir" config user.email "zed-binary-e2e@example.invalid"
+          git -C "$package_dir" add .
+          git -C "$package_dir" commit -qm "binary fixture v0.1.0"
+          git -C "$package_dir" tag v0.1.0
+          test -z "$(git -C "$package_dir" status --porcelain)"
+
+      - name: Pack and publish through the real multipart endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$BINARY_PACKAGE_DIR"
+          "$RUNNER_TEMP/zed-cli/bin/zed-binary" publish \
+            --target x86_64-unknown-linux-gnu \
+            --os linux \
+            --arch x86_64 \
+            --libc gnu \
+            --json | tee "$RUNNER_TEMP/binary-publish.json"
+          jq -e '
+            .package == "binary-e2e/registry-binary-smoke"
+            and .version == "0.1.0"
+            and .target == "x86_64-unknown-linux-gnu"
+            and .uploaded == true
+            and (.sha256 | test("^[0-9a-f]{64}$"))
+            and .size > 0
+          ' "$RUNNER_TEMP/binary-publish.json" >/dev/null
+
+      - name: Verify registry metadata and server-side profile evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata=$(curl -fsS \
+            http://127.0.0.1:8080/v1/packages/binary-e2e/registry-binary-smoke/versions/0.1.0)
+          printf '%s\n' "$metadata" | tee "$RUNNER_TEMP/binary-metadata.json" | jq .
+          printf '%s\n' "$metadata" | jq -e '
+            . as $metadata
+            | $metadata.org == "binary-e2e"
+            and $metadata.name == "registry-binary-smoke"
+            and $metadata.version == "0.1.0"
+            and $metadata.format == "zip"
+            and ($metadata.sha256 | test("^[0-9a-f]{64}$"))
+            and $metadata.size > 0
+            and ($metadata.download_url
+              | endswith("/v1/artifacts/" + $metadata.sha256))
+            and $metadata.yanked == false
+          ' >/dev/null
+          grep -q 'verified self-describing binary ZIP before publication' \
+            "$RUNNER_TEMP/zed-api-binary.log"
+
+      - name: Download and independently re-verify the immutable ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$BINARY_DOWNLOAD_DIR/registry-binary-smoke.zip"
+          "$RUNNER_TEMP/zed-cli/bin/zed-binary" download \
+            binary-e2e/registry-binary-smoke@0.1.0 \
+            --out "$archive" \
+            --target x86_64-unknown-linux-gnu \
+            --json | tee "$RUNNER_TEMP/binary-download.json"
+          "$RUNNER_TEMP/zed-cli/bin/zed-binary" verify \
+            "$archive" \
+            --target x86_64-unknown-linux-gnu \
+            --json | tee "$RUNNER_TEMP/binary-verify.json"
+
+          expected=$(jq -r .sha256 "$RUNNER_TEMP/binary-metadata.json")
+          actual=$(sha256sum "$archive" | awk '{print $1}')
+          test "$actual" = "$expected"
+          test "$(jq -r .sha256 "$RUNNER_TEMP/binary-download.json")" = "$expected"
+          test "$(jq -r .sha256 "$RUNNER_TEMP/binary-verify.json")" = "$expected"
+
+      - name: Inspect the canonical layout and execute the verified payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$BINARY_DOWNLOAD_DIR/registry-binary-smoke.zip"
+          extract="$BINARY_DOWNLOAD_DIR/extracted"
+          python3 - "$archive" "$extract" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+          import zipfile
+
+          archive = pathlib.Path(sys.argv[1])
+          extract = pathlib.Path(sys.argv[2])
+          with zipfile.ZipFile(archive) as bundle:
+              names = bundle.namelist()
+              assert names == sorted(names), names
+              assert "pkg/.zpkg.toml" in names
+              assert "pkg/.zpkg-binary.json" in names
+              assert "pkg/bin/registry-binary-smoke" in names
+              descriptor_bytes = bundle.read("pkg/.zpkg-binary.json")
+              descriptor = json.loads(descriptor_bytes)
+              assert descriptor_bytes == json.dumps(
+                  descriptor, separators=(",", ":"), ensure_ascii=False
+              ).encode()
+              assert descriptor["schema"] == "zpkg.binary-artifact/v1"
+              assert descriptor["package"] == {
+                  "org": "binary-e2e",
+                  "name": "registry-binary-smoke",
+                  "version": "0.1.0",
+              }
+              assert descriptor["platform"]["target"] == "x86_64-unknown-linux-gnu"
+              assert descriptor["entrypoints"] == {
+                  "registry-binary-smoke": "bin/registry-binary-smoke"
+              }
+              payload = bundle.read("pkg/bin/registry-binary-smoke")
+              record = next(
+                  item for item in descriptor["files"]
+                  if item["path"] == "bin/registry-binary-smoke"
+              )
+              assert record["executable"] is True
+              assert record["size"] == len(payload)
+              assert record["sha256"] == hashlib.sha256(payload).hexdigest()
+              bundle.extractall(extract)
+          PY
+          chmod 0755 "$extract/pkg/bin/registry-binary-smoke"
+          output=$("$extract/pkg/bin/registry-binary-smoke")
+          test "$output" = 'hello from verified zed binary v1'
+
+      - name: Verify idempotency and immutable artifact rejection
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$BINARY_PACKAGE_DIR"
+          identical_output=$("$RUNNER_TEMP/zed-cli/bin/zed-binary" publish \
+            --target x86_64-unknown-linux-gnu \
+            --os linux \
+            --arch x86_64 \
+            --libc gnu 2>&1)
+          printf '%s\n' "$identical_output"
+          printf '%s\n' "$identical_output" \
+            | grep -Eiq 'already published.*identical|identical binary ZIP|skipping'
+
+          cat >main.rs <<'RS'
+          fn main() {
+              println!("mutated bytes must not replace an immutable release");
+          }
+          RS
+          rustc main.rs -o bin/registry-binary-smoke
+          git add main.rs bin/registry-binary-smoke
+          git commit -qm "mutate immutable binary fixture"
+          git tag -f v0.1.0 >/dev/null
+          test -z "$(git status --porcelain)"
+
+          set +e
+          changed_output=$("$RUNNER_TEMP/zed-cli/bin/zed-binary" publish \
+            --target x86_64-unknown-linux-gnu \
+            --os linux \
+            --arch x86_64 \
+            --libc gnu 2>&1)
+          changed_status=$?
+          set -e
+          printf '%s\n' "$changed_output"
+          test "$changed_status" -ne 0
+          printf '%s\n' "$changed_output" \
+            | grep -Eiq 'already has an immutable artifact|already exists|different bytes|different sha256'
+
+      - name: Print binary registry diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          printf '%s\n' '--- registry log ---'
+          cat "$RUNNER_TEMP/zed-api-binary.log" || true
+          printf '%s\n' '--- publish summary ---'
+          cat "$RUNNER_TEMP/binary-publish.json" 2>/dev/null || true
+          printf '%s\n' '--- registry metadata ---'
+          cat "$RUNNER_TEMP/binary-metadata.json" 2>/dev/null || true
+          printf '%s\n' '--- package tree ---'
+          find "${BINARY_PACKAGE_DIR:-$RUNNER_TEMP/binary-package}" \
+            -maxdepth 4 -type f -print 2>/dev/null || true
+          printf '%s\n' '--- download tree ---'
+          find "${BINARY_DOWNLOAD_DIR:-$RUNNER_TEMP/binary-download}" \
+            -maxdepth 5 -type f -print 2>/dev/null || true
+
+      - name: Stop the registry
+        if: always()
+        shell: bash
+        run: |
+          if test -f "$RUNNER_TEMP/zed-api-binary.pid"; then
+            kill "$(cat "$RUNNER_TEMP/zed-api-binary.pid")" 2>/dev/null || true
+          fi

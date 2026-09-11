@@ -1,12 +1,14 @@
 # zed-api-server
 
 The [zed-pkg](https://zpkg.net) registry REST API, in Rust: package and
-version metadata in Postgres (SeaORM + the `migration/` crate), with artifact
-archives (tar.gz/zip) in bounded process memory for disposable certification,
-local disk for development/self-hosting, or any S3-compatible object storage —
-Cloudflare R2 in production and AWS S3 or MinIO as alternatives. This is the
-service `zed publish` and `zed install` talk to, and the whole stack is
-self-hostable for private registries.
+version metadata in Postgres through the canonical `zed-orm-core` boundary and
+the legacy compatibility migration crate. Production schema changes run only
+through the explicit `zed-api-server migrate` release command. Artifact
+archives (tar.gz/zip) live in bounded process memory for disposable
+certification, local disk for development/self-hosting, or any S3-compatible
+object storage—Cloudflare R2 in production and AWS S3 or MinIO as alternatives.
+This is the service `zed publish` and `zed install` talk to, and the whole
+stack is self-hostable for private registries.
 
 ## Endpoints
 
@@ -23,31 +25,63 @@ self-hostable for private registries.
 
 Errors are JSON `ApiError { code, message }` — codes include `not_found`,
 `unauthorized`, `org_not_found`, `org_taken`, `version_exists`,
-`sha256_mismatch`, `tag_not_found`, `invalid_manifest`.
+`sha256_mismatch`, `tag_not_found`, `invalid_manifest`, `invalid_multipart`,
+`invalid_binary_artifact`, and `vcs_commit_mismatch`.
+
+`api.zpkg.net` serves the complete API. `registry.zpkg.net` reaches this same
+process but is constrained by a fail-closed Host state machine to the machine
+registry routes above (plus the rest of the checked-in machine OpenAPI). It
+cannot reach browser/account, auth, docs, admin, or unknown routes, including
+account compatibility routes that happen to live below `/v1`.
 
 Publish pipeline: bearer token -> manifest validation -> URL/manifest
 agreement -> server-side sha256 recomputation -> org ownership -> VCS tag
 verification (policy below) -> immutability check -> store artifact -> record
 version.
 
-## Configuration (env)
+Native binary ZIP layout, server verification, R2 race recovery, and the
+coordinated multi-platform route/data-model boundary are specified in
+[`docs/binary-artifact-publication.md`](docs/binary-artifact-publication.md).
+
+## Configuration (CLI and environment)
+
+Long-running and release commands resolve non-secret settings through the
+pinned [flags-2-env](https://github.com/flags-2-env/flags-2-env) Rust binding
+before tracing, network, storage, or database effects. Every option maps to the
+environment variable in [`.cli-flags.toml`](.cli-flags.toml); command-line
+values take precedence, and unknown options fail closed. Run
+`zed-api-server --help` (or `zed-api-server serve --help`) for the audited
+option list.
+
+Credentials remain environment-only: `DATABASE_URL`,
+`SHARED_AUTH_SERVICE_CREDENTIAL`, `FIDUCIA_INTERNAL_SECRET`, `GITHUB_TOKEN`,
+and AWS credential variables deliberately have no command-line form. The
+existing `create-token` and `revoke-token` subcommands retain their own private
+argument parsers.
 
 | Var | Default | Notes |
 | --- | --- | --- |
 | `BIND_ADDR` | `0.0.0.0:8080` | |
-| `DATABASE_URL` | required | Postgres |
-| `AUTO_MIGRATE` | `true` | run `migration/` on boot |
+| `DATABASE_URL` | required | Postgres runtime credential; DML only in production |
+| `AUTO_MIGRATE` | `false` | transitional disposable-local escape hatch only; production/Kubernetes must run the reviewed `zed-api-server migrate` release job |
 | `STORAGE_BACKEND` | `local` | `memory`, `local`, or `s3` |
 | `STORAGE_MEMORY_MAX_BYTES` | `268435456` | hard total for the process-memory backend; must be greater than zero |
 | `STORAGE_LOCAL_DIR` | `.data/artifacts` | local backend |
+| `ZED_MAX_BINARY_ARCHIVE_BYTES` | `1073741824` | binary ZIP outer-byte limit; may only lower the v1 ceiling |
+| `ZED_MAX_BINARY_EXPANDED_BYTES` | `2147483648` | total expanded-byte limit; may only lower the v1 ceiling |
+| `ZED_MAX_BINARY_ENTRIES` | `200000` | entry-count limit; may only lower the v1 ceiling |
+| `ZED_MAX_BINARY_COMPRESSION_RATIO` | `1000` | per-entry ratio limit; may only lower the v1 ceiling |
 | `S3_BUCKET` | required for s3 | |
 | `S3_ENDPOINT_URL` | unset | set for R2/MinIO |
 | `S3_REGION` | `auto` | R2 uses `auto` |
 | `S3_FORCE_PATH_STYLE` | `true` | MinIO needs it |
 | `PUBLIC_BASE_URL` | `http://localhost:8080` | used in download URLs |
+| `ZED_REGISTRY_ID` | `registry:zpkg-primary` | stable logical graph identity; set once and do not derive it from an ingress alias |
 | `ZED_VERIFY_TAGS` | `off` | `off` or `github` |
 | `GITHUB_TOKEN` | unset | raises tag-check rate limits |
 | `MAX_ARTIFACT_BYTES` | `104857600` | request body cap |
+| `ZED_ARTIFACT_SERVE_MEMORY_BUDGET_BYTES` | `268435456` | memory budget for concurrently buffered artifact/file responses |
+| `ZED_GRAPH_SERVE_MEMORY_BUDGET_BYTES` | `268435456` | independent memory budget for concurrent dependency-graph encoders |
 | `RUST_LOG` | `info` | |
 
 `memory` is intentionally process-local and disposable: every restart clears
@@ -56,6 +90,21 @@ throwaway metadata during certification. See
 [`docs/memory-publish-certification.md`](docs/memory-publish-certification.md)
 for the `zed r2g` + real-server test contract and the Kubernetes promotion
 boundary.
+
+## Database ownership
+
+This process is the sole runtime writer for the shared registry schema. The web
+server receives a separate read-only identity and sends every mutation through
+this API over private-cluster HTTP. Production migrations run once as a
+reviewed release step with a dedicated migrator identity; normal API replicas
+do not receive DDL privileges and do not migrate on boot.
+
+The shared-library rollout, role split, migration evidence, and exact
+`zed-orm-core` pin are documented in
+[`docs/database-boundary.md`](docs/database-boundary.md). The disposable Docker
+Compose stack explicitly opts into the legacy SeaORM boot migration while the
+production release path invokes the explicit migration command. That boot-time
+exception is not valid for Kubernetes or durable self-hosted deployments.
 
 ### Cloudflare R2 mapping
 
@@ -79,14 +128,19 @@ client-side either way.
 ## Run it
 
 ```sh
-# full local stack: postgres + minio + api (from the parent directory)
+# disposable local stack: postgres + minio + api (from the parent directory)
+# docker-compose.yml explicitly enables the legacy local boot migration.
 docker compose -f zed-api-server.rs/docker-compose.yml up --build
 
-# or bare, against your own postgres and a disposable in-memory artifact store
+# or bare, after applying the reviewed schema to your own Postgres
+DATABASE_URL=postgres://zed:zed@localhost:5432/zed \
+cargo run -- migrate
+
 DATABASE_URL=postgres://zed:zed@localhost:5432/zed \
 STORAGE_BACKEND=memory \
-STORAGE_MEMORY_MAX_BYTES=268435456 \
-cargo run
+STORAGE_MEMORY_MAX_BYTES=268435456 cargo run -- \
+  --bind-addr 127.0.0.1:8080 \
+  --rust-log info
 
 # mint a token (printed once)
 DATABASE_URL=... cargo run -- create-token --name ci --org acme

@@ -41,7 +41,7 @@ impl TagVerifier {
                 .user_agent(concat!("zed-api-server/", env!("CARGO_PKG_VERSION")))
                 .build()
                 .expect("reqwest client builds"),
-            github_token: std::env::var("GITHUB_TOKEN").ok(),
+            github_token: crate::flags::var("GITHUB_TOKEN").ok(),
         }
     }
 

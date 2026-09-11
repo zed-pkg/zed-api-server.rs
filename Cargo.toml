@@ -1,6 +1,6 @@
 [package]
 name = "zed-api-server"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "zed-pkg registry REST API: Postgres metadata, S3/R2 artifacts"
 license = "MIT"
@@ -10,16 +10,19 @@ repository = "https://github.com/zed-pkg/zed-api-server.rs"
 members = [".", "migration"]
 
 [dependencies]
+ores-middleware = { git = "https://github.com/ORESoftware/ores-middleware", rev = "c759246bbd207841aa8fe9150214ee922c751b94", features = ["axum"] }
 # Keep every cross-repository boundary immutable and independently reviewable.
-# This revision includes both the account/audit contracts already consumed by
-# the service and the audited dependency-graph v1 contract (DEN-2864,
-# zed-interfaces#52). It intentionally predates the later polyglot layout move,
-# which changes the Rust crate path and must be adopted atomically by consumers.
-zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "30d739167036f54b7919c5776c453123f206ca3c" }
+# This revision includes the account/audit and dependency-graph contracts, the
+# additive graph export route/media contract (zed-interfaces#63), and the
+# target-qualified binary artifact v1 DTOs and portable path validation
+# (zed-interfaces#64). The repository root remains a Cargo workspace, so git
+# consumers resolve its Rust package from the polyglot `src/rust` member without
+# a path override.
+zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "4b87e425b04777b0ee413971dc1df805d24f295f" }
 # Canonical account, registry projection, and migration data plane. The API is
 # the only long-running service that opts into write symbols; the discrete
 # `migrate` command is the only runtime path that invokes DDL.
-zed-orm-core = { git = "https://github.com/zed-pkg/zed-lib-core.git", rev = "700f1f9578c6633a20693a5b1f52970ab845a740", features = ["read-write", "migrate"] }
+zed-orm-core = { git = "https://github.com/zed-pkg/zed-lib-core.git", rev = "c3d486a1519381276fbec02aa25247f542924443", features = ["read-write", "migrate"] }
 # The private shared-auth-clients repository cannot be cloned by this
 # repository's scoped GITHUB_TOKEN. `src/shared_auth.rs` implements the small,
 # reviewed exchange/introspection HTTP contract using the existing reqwest
@@ -32,17 +35,20 @@ zed-orm-core = { git = "https://github.com/zed-pkg/zed-lib-core.git", rev = "700
 migration = { path = "migration" }
 anyhow = "1"
 # Distributed locks/leases (fiducia.cloud). Blocking (ureq) client — call it
-# via spawn_blocking from async handlers. See routes/orgs.rs.
-fiducia-client = { git = "https://github.com/fiducia-cloud/fiducia-clients.git" }
+# via spawn_blocking from async handlers. Pin the exact source commit already
+# recorded in Cargo.lock so `--locked` does not depend on a mutable default ref.
+# See routes/orgs.rs.
+fiducia-client = { git = "https://github.com/fiducia-cloud/fiducia-clients.git", rev = "d8df52a8fc4451e6b358d4085eb30ba8eb46d6d7" }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
 axum = { version = "0.8", features = ["multipart"] }
 # Bytes flows from the multipart reader into storage without a re-copy.
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
-dotenvy = "0.15"
+flags2env = { version = "0.1.0", git = "https://github.com/flags-2-env/flags-2-env", rev = "d7bad9ea7dfc657653368237e08903514cdca1ec" }
 flate2 = "1"
 hex = "0.4"
+http-body = "1"
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sea-orm = { version = "1", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-chrono", "with-uuid"] }
@@ -51,6 +57,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tar = "0.4"
+tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 # ReaderStream, so artifact downloads stream from disk instead of buffering.
 tokio-util = { version = "0.7", features = ["io"] }
@@ -58,6 +65,7 @@ tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.6", features = ["set-header", "timeout", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+toml = "0.9"
 uuid = { version = "1", features = ["v4", "serde"] }
 # Read-side only; deflate decoding reuses the flate2 backend already in-tree.
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }

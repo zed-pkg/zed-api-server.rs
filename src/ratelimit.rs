@@ -64,11 +64,11 @@ impl RateLimiter {
     /// `ZED_RATE_LIMIT_PER_SECOND` (default 10). Generous by design — this is
     /// an abuse ceiling, not a quota.
     pub fn from_env() -> Self {
-        let burst = std::env::var("ZED_RATE_LIMIT_BURST")
+        let burst = crate::flags::var("ZED_RATE_LIMIT_BURST")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(60);
-        let per_second = std::env::var("ZED_RATE_LIMIT_PER_SECOND")
+        let per_second = crate::flags::var("ZED_RATE_LIMIT_PER_SECOND")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10.0);

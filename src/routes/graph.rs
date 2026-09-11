@@ -5,39 +5,76 @@
 //! package version, and an immutable *resolution artifact* addressed by its
 //! resolution digest.
 //!
-//! Declared requirements are read from the published artifact's own
-//! `pkg/.zpkg.toml`, not from a server-side copy: the artifact is
-//! content-addressed and immutable, so it is the authentic declaration for that
-//! exact version and needs no backfill. The server never resolves anything —
+//! Declared requirements are read from the canonical immutable package-version
+//! row in Postgres. That row is transactionally adopted from the verified,
+//! content-addressed publish and retains the normalized manifest plus the exact
+//! artifact identity. The server never resolves anything —
 //! producing a resolved graph requires resolver state the registry does not
 //! have, and re-resolving old metadata against today's index and labelling the
 //! result "the graph for this lock" is precisely what the contract forbids.
 
+use std::convert::Infallible;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use bytes::Bytes;
+use http_body::{Body as HttpBody, Frame, SizeHint};
+#[cfg(test)]
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use zed_interfaces::{
-    DEPENDENCY_GRAPH_DEFAULT_MAX_ENCODED_BYTES, DEPENDENCY_GRAPH_DIGEST_HEADER,
-    DEPENDENCY_GRAPH_SCHEMA_V1, DeclaredDependency, DependencyGraphData, DependencyGraphDocument,
-    DependencyGraphFormat, DependencyKind, PackageVersionIdentity,
+    DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER, DEPENDENCY_GRAPH_DEFAULT_MAX_EDGES,
+    DEPENDENCY_GRAPH_DEFAULT_MAX_ENCODED_BYTES, DEPENDENCY_GRAPH_DEFAULT_MAX_NODES,
+    DEPENDENCY_GRAPH_DIGEST_HEADER, DEPENDENCY_GRAPH_SCHEMA_V1, DeclaredDependency,
+    DependencyGraphData, DependencyGraphDocument, DependencyGraphFormat, DependencyKind,
+    PackageVersionIdentity,
 };
 
+use crate::auth::{bearer_token, require_account, require_token};
+#[cfg(test)]
 use crate::entities::version;
 use crate::error::{ApiErr, ApiResult};
+#[cfg(test)]
 use crate::files;
 use crate::state::AppState;
 
-use super::{artifact_format, find_org, find_package};
+use super::find_org;
+#[cfg(test)]
+use super::{artifact_format, find_package};
 
 /// Declared metadata is immutable for an exact package version, so it caches
 /// like the artifact itself.
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
+const PRIVATE_NO_STORE: &str = "private, no-store";
+
+/// Visibility-sensitive cache policy for one canonical package graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DeclaredGraphAccess {
+    Public,
+    Private,
+}
+
+impl DeclaredGraphAccess {
+    pub(super) const fn cache_control(self) -> &'static str {
+        match self {
+            Self::Public => IMMUTABLE,
+            Self::Private => PRIVATE_NO_STORE,
+        }
+    }
+
+    pub(super) const fn vary(self) -> &'static str {
+        match self {
+            Self::Public => "Accept",
+            Self::Private => "Accept, Authorization",
+        }
+    }
+}
 
 /// Every failure to produce a graph — unknown org, unknown package, unknown
 /// version, unknown or malformed resolution digest, and (once private graphs
@@ -49,6 +86,52 @@ fn graph_not_found() -> ApiErr {
         status: StatusCode::NOT_FOUND,
         code: "not_found",
         message: "dependency graph not found".to_string(),
+    }
+}
+
+/// An empty body whose length is deliberately unknown to Hyper.
+///
+/// Hyper 1.11 removes an explicit selected-representation `Content-Length`
+/// from a 304 when the body advertises an exact zero size. An unknown size hint
+/// lets Hyper retain that RFC-valid metadata header, while the 304 status still
+/// forces the wire body to zero bytes. `is_end_stream` must remain false until
+/// Hyper has classified the response body.
+struct MetadataOnlyBody;
+
+impl HttpBody for MetadataOnlyBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Poll::Ready(None)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        false
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::new()
+    }
+}
+
+pub(super) fn not_modified_response(headers: HeaderMap) -> Response {
+    let mut response = Response::new(axum::body::Body::new(MetadataOnlyBody));
+    *response.status_mut() = StatusCode::NOT_MODIFIED;
+    *response.headers_mut() = headers;
+    response
+}
+
+fn requires_graph_authorization(visibility: &str) -> ApiResult<bool> {
+    match visibility {
+        "public" => Ok(false),
+        "internal" | "private" => Ok(true),
+        // A newly introduced visibility state is protected until this service
+        // explicitly understands its authority model.
+        _ => Err(graph_not_found()),
     }
 }
 
@@ -88,25 +171,118 @@ pub async fn get_declared_graph(
         }
     }
     let format = resolve_format(&headers, query.format.as_deref())?;
+    let (document, access) =
+        load_authorized_declared_document(&state, &headers, &org_slug, &name, &ver).await?;
+    respond(
+        &headers,
+        format,
+        &document,
+        &filename_stem(&org_slug, &name, &ver),
+        access,
+    )
+}
 
-    let org_row = find_org(&state, &org_slug)
+/// Shared authorized loader for the canonical and extended representation
+/// routes. Keeping access, artifact extraction, and typed graph construction in
+/// one path prevents the two format families from drifting on bounds or policy.
+pub(super) async fn load_authorized_declared_document(
+    state: &AppState,
+    headers: &HeaderMap,
+    org_slug: &str,
+    name: &str,
+    ver: &str,
+) -> ApiResult<(DependencyGraphDocument, DeclaredGraphAccess)> {
+    let Some(read) = state.registry_read.as_ref() else {
+        // Legacy-only unit fixtures predate the canonical Postgres plane. Keep
+        // their artifact-integrity coverage without permitting this fallback in
+        // a production build.
+        #[cfg(test)]
+        return load_legacy_declared_document(
+            state,
+            org_slug,
+            name,
+            ver,
+            DeclaredGraphAccess::Public,
+        )
+        .await;
+
+        #[cfg(not(test))]
+        return Err(ApiErr::service_unavailable(
+            "registry_data_plane_unavailable",
+            "canonical registry read context is not configured",
+        ));
+    };
+    // Look the package up once and carry that exact row through authorization
+    // and version loading. Repeating the lookup on either side of the access
+    // check would leave a fail-open race if visibility, project ownership, or
+    // the package row changed between queries.
+    let (package, canonical_org) =
+        zed_orm_core::read::package_by_org_and_name(read, org_slug, name)
+            .await
+            .map_err(|error| {
+                ApiErr::from(anyhow::anyhow!(
+                    "canonical package visibility lookup failed: {error}"
+                ))
+            })?
+            .ok_or_else(graph_not_found)?;
+    let access =
+        authorize_declared_graph(state, headers, org_slug, &package, &canonical_org).await?;
+    // Use the final core checkpoint's exact lookup rather than scanning the
+    // 100-row page-oriented version listing. The package row carried through
+    // authorization supplies the immutable package id for this query.
+    let row = zed_orm_core::read::package_version_by_package_and_version(read, package.id, ver)
+        .await
+        .map_err(|error| {
+            ApiErr::from(anyhow::anyhow!(
+                "canonical package-version lookup failed: {error}"
+            ))
+        })?
+        .ok_or_else(graph_not_found)?;
+    let manifest: zed_interfaces::Manifest =
+        serde_json::from_value(row.manifest).map_err(|error| {
+            ApiErr::from(anyhow::anyhow!(
+                "canonical package-version manifest is invalid: {error}"
+            ))
+        })?;
+    if manifest.package.org != org_slug
+        || manifest.package.name != name
+        || manifest.package.version != ver
+    {
+        return Err(ApiErr::from(anyhow::anyhow!(
+            "canonical package-version manifest coordinate does not match its package row: \
+             expected {org_slug}/{name}@{ver}, stored {}/{}@{}",
+            manifest.package.org,
+            manifest.package.name,
+            manifest.package.version
+        )));
+    }
+
+    let document = declared_document(&state.registry_id, ver, &manifest)?;
+    Ok((document, access))
+}
+
+#[cfg(test)]
+async fn load_legacy_declared_document(
+    state: &AppState,
+    org_slug: &str,
+    name: &str,
+    ver: &str,
+    access: DeclaredGraphAccess,
+) -> ApiResult<(DependencyGraphDocument, DeclaredGraphAccess)> {
+    let org_row = find_org(state, org_slug)
         .await
         .map_err(|_| graph_not_found())?;
-    let pkg = find_package(&state, &org_row, &name)
+    let pkg = find_package(state, &org_row, name)
         .await
         .map_err(|_| graph_not_found())?;
     let row = version::Entity::find()
         .filter(version::Column::PackageId.eq(pkg.id))
-        .filter(version::Column::Version.eq(&ver))
+        .filter(version::Column::Version.eq(ver))
         .one(&state.db)
         .await?
         .ok_or_else(graph_not_found)?;
-
     let archive = state.store.get_bytes(&row.artifact_key).await?;
     let archive_format = artifact_format(&row.format);
-    // Decompression is CPU-bound and cannot be interrupted by the router's
-    // timeout layer if it runs inline on a worker thread (same reasoning as
-    // `get_file`).
     let manifest_bytes = tokio::task::spawn_blocking(move || {
         files::extract_file(
             &archive,
@@ -115,22 +291,98 @@ pub async fn get_declared_graph(
         )
     })
     .await
-    .map_err(|err| ApiErr::from(anyhow::anyhow!("extract task failed: {err}")))?
+    .map_err(|error| ApiErr::from(anyhow::anyhow!("extract task failed: {error}")))?
     .map_err(ApiErr::from)?
     .ok_or_else(graph_not_found)?;
-
     let manifest_text = String::from_utf8(manifest_bytes)
         .map_err(|_| ApiErr::from(anyhow::anyhow!("stored manifest is not valid UTF-8")))?;
-    let manifest = zed_interfaces::Manifest::parse(&manifest_text)
-        .map_err(|err| ApiErr::from(anyhow::anyhow!("stored manifest does not parse: {err}")))?;
+    let manifest = zed_interfaces::Manifest::parse(&manifest_text).map_err(|error| {
+        ApiErr::from(anyhow::anyhow!("stored manifest does not parse: {error}"))
+    })?;
+    if manifest.package.org != org_slug
+        || manifest.package.name != name
+        || manifest.package.version != ver
+    {
+        return Err(ApiErr::from(anyhow::anyhow!(
+            "stored package-version manifest coordinate does not match its package row: \
+             expected {org_slug}/{name}@{ver}, stored {}/{}@{}",
+            manifest.package.org,
+            manifest.package.name,
+            manifest.package.version
+        )));
+    }
+    let document = declared_document(&state.registry_id, ver, &manifest)?;
+    Ok((document, access))
+}
 
-    let document = declared_document(&registry_id(&state.public_base_url), &ver, &manifest)?;
-    respond(
-        &headers,
-        format,
-        &document,
-        &filename_stem(&org_slug, &name, &ver),
-    )
+/// Authorize a declared-graph read against the canonical package visibility.
+///
+/// Public packages remain anonymous. Internal and private packages require either a live
+/// legacy token scoped to the matching legacy organization or a delegated
+/// browser account that belongs to the canonical organization/owning project.
+/// Every missing, invalid, cross-tenant, or insufficient credential collapses
+/// to the same graph 404 so private package coordinates cannot be enumerated.
+pub(super) async fn authorize_declared_graph(
+    state: &AppState,
+    headers: &HeaderMap,
+    org_slug: &str,
+    package: &zed_orm_core::entities::package::Model,
+    canonical_org: &zed_orm_core::entities::org::Model,
+) -> ApiResult<DeclaredGraphAccess> {
+    let read = state.registry_read.as_ref().ok_or_else(|| {
+        ApiErr::service_unavailable(
+            "registry_data_plane_unavailable",
+            "canonical registry read context is not configured",
+        )
+    })?;
+
+    if !requires_graph_authorization(&package.visibility)? {
+        return Ok(DeclaredGraphAccess::Public);
+    }
+    if bearer_token(headers).is_none() {
+        return Err(graph_not_found());
+    }
+
+    // CLI/package tokens are scoped in the transitional plane. Only a scoped
+    // token for this exact legacy organization is accepted; an unscoped admin
+    // token is intentionally not universal private-read authority.
+    if let Ok(token) = require_token(&state.db, headers).await {
+        let legacy_org = find_org(state, org_slug)
+            .await
+            .map_err(|_| graph_not_found())?;
+        return if token.org_id == Some(legacy_org.id) {
+            Ok(DeclaredGraphAccess::Private)
+        } else {
+            Err(graph_not_found())
+        };
+    }
+
+    // A browser bearer must be a session-backed, audience-bound delegated
+    // product token. Authentication failures (including a dependency outage)
+    // are concealed here rather than exposing that the private package exists.
+    let account = require_account(state, headers)
+        .await
+        .map_err(|_| graph_not_found())?;
+    let user =
+        zed_orm_core::read::user_by_subject(read, &account.session.realm, account.session.subject)
+            .await
+            .map_err(|_| graph_not_found())?
+            .ok_or_else(graph_not_found)?;
+    let org_role = zed_orm_core::read::org_role_for_user(read, canonical_org.id, user.id)
+        .await
+        .map_err(|_| graph_not_found())?;
+    if org_role.is_some() {
+        return Ok(DeclaredGraphAccess::Private);
+    }
+    if let Some(project_id) = package.project_id {
+        let project_role = zed_orm_core::read::project_role_for_user(read, project_id, user.id)
+            .await
+            .map_err(|_| graph_not_found())?;
+        if project_role.is_some() {
+            return Ok(DeclaredGraphAccess::Private);
+        }
+    }
+    Err(graph_not_found())
 }
 
 /// `GET|HEAD /v1/resolutions/{resolution_digest}/dependency-graph`
@@ -154,32 +406,34 @@ pub async fn get_resolution_graph(
     Err(graph_not_found())
 }
 
-/// The registry's own immutable identity, carried on every node this server
-/// declares. Registry identity is intrinsic to a graph node so that remapping a
-/// local alias cannot reinterpret a stored graph.
-fn registry_id(public_base_url: &str) -> String {
-    let host = public_base_url
-        .split_once("://")
-        .map_or(public_base_url, |(_scheme, rest)| rest)
-        .split('/')
-        .next()
-        .unwrap_or(public_base_url)
-        .trim_end_matches('.');
-    if host.is_empty() {
-        format!("registry:{public_base_url}")
-    } else {
-        format!("registry:{host}")
-    }
-}
-
 /// Map an exact manifest onto the declared view: unresolved requirements, never
 /// invented exact versions.
-fn declared_document(
+pub(super) fn declared_document(
     registry: &str,
     version: &str,
     manifest: &zed_interfaces::Manifest,
 ) -> ApiResult<DependencyGraphDocument> {
-    let mut dependencies = Vec::new();
+    if manifest.package.version != version {
+        return Err(ApiErr::from(anyhow::anyhow!(
+            "stored manifest version {} does not match requested exact version {version}",
+            manifest.package.version
+        )));
+    }
+    manifest
+        .package
+        .version_scheme
+        .validate_version(version)
+        .map_err(|error| {
+            ApiErr::from(anyhow::anyhow!(
+                "stored manifest version is invalid for {}: {error}",
+                manifest.package.version_scheme.as_str()
+            ))
+        })?;
+    let dependency_count = checked_declared_dependency_count(
+        manifest.dependencies.len(),
+        manifest.build_dependencies.len(),
+    )?;
+    let mut dependencies = Vec::with_capacity(dependency_count);
     let runtime = manifest
         .dependencies
         .iter()
@@ -227,6 +481,61 @@ fn declared_document(
     .map_err(|err| ApiErr::from(anyhow::anyhow!("dependency graph is invalid: {err}")))
 }
 
+fn checked_declared_dependency_count(runtime: usize, build: usize) -> ApiResult<usize> {
+    let count = runtime
+        .checked_add(build)
+        .ok_or_else(graph_limit_exceeded)?;
+    let nodes = count.checked_add(1).ok_or_else(graph_limit_exceeded)?;
+    ensure_graph_counts(nodes, count)?;
+    Ok(count)
+}
+
+pub(super) fn ensure_graph_bounds(document: &DependencyGraphDocument) -> ApiResult<()> {
+    let (nodes, edges) = match &document.graph {
+        DependencyGraphData::Declared { dependencies, .. } => (
+            dependencies
+                .len()
+                .checked_add(1)
+                .ok_or_else(graph_limit_exceeded)?,
+            dependencies.len(),
+        ),
+        DependencyGraphData::Resolved { nodes, edges, .. } => (nodes.len(), edges.len()),
+    };
+    ensure_graph_counts(nodes, edges)
+}
+
+fn ensure_graph_counts(nodes: usize, edges: usize) -> ApiResult<()> {
+    if nodes > DEPENDENCY_GRAPH_DEFAULT_MAX_NODES as usize
+        || edges > DEPENDENCY_GRAPH_DEFAULT_MAX_EDGES as usize
+    {
+        return Err(graph_limit_exceeded());
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_encoded_size(length: usize) -> ApiResult<()> {
+    if length as u64 > DEPENDENCY_GRAPH_DEFAULT_MAX_ENCODED_BYTES {
+        return Err(representation_too_large());
+    }
+    Ok(())
+}
+
+fn graph_limit_exceeded() -> ApiErr {
+    ApiErr {
+        status: StatusCode::UNPROCESSABLE_ENTITY,
+        code: "graph_limit_exceeded",
+        message: "dependency graph exceeds the server node or edge limit".to_string(),
+    }
+}
+
+fn representation_too_large() -> ApiErr {
+    ApiErr {
+        status: StatusCode::PAYLOAD_TOO_LARGE,
+        code: "graph_representation_too_large",
+        message: "dependency graph representation exceeds the server limit".to_string(),
+    }
+}
+
 /// Resolve the representation from `Accept` and `format=`.
 ///
 /// A conflict is a 406 rather than a silent pick: a caller that sends
@@ -245,76 +554,158 @@ fn resolve_format(
         })?),
     };
 
-    let accept = headers
-        .get(header::ACCEPT)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    let from_accept = parse_accept(accept)?;
-
-    match (from_query, from_accept) {
-        (Some(query), Some(accept)) if query != accept => Err(ApiErr {
+    let accepted = parse_accept(headers)?;
+    match (from_query, accepted) {
+        (Some(format), None) => Ok(format),
+        (Some(format), Some(accepted)) if accepted.iter().any(|entry| entry.0 == format) => {
+            Ok(format)
+        }
+        (Some(_), Some(_)) => Err(ApiErr {
             status: StatusCode::NOT_ACCEPTABLE,
             code: "format_conflict",
             message: "requested graph representations conflict".to_string(),
         }),
-        (Some(format), _) | (None, Some(format)) => Ok(format),
         (None, None) => Ok(DependencyGraphFormat::Json),
+        (None, Some(accepted)) => accepted
+            .into_iter()
+            .fold(
+                None::<(DependencyGraphFormat, u16)>,
+                |selected, candidate| match selected {
+                    Some(current) if current.1 >= candidate.1 => Some(current),
+                    _ => Some(candidate),
+                },
+            )
+            .map(|(format, _quality)| format)
+            .ok_or_else(|| ApiErr {
+                status: StatusCode::NOT_ACCEPTABLE,
+                code: "unsupported_format",
+                message: "no acceptable dependency graph representation".to_string(),
+            }),
     }
 }
 
 fn parse_format_name(value: &str) -> Option<DependencyGraphFormat> {
-    Some(match value {
+    Some(match value.to_ascii_lowercase().as_str() {
         "json" => DependencyGraphFormat::Json,
-        "yaml" => DependencyGraphFormat::Yaml,
+        "yaml" | "yml" => DependencyGraphFormat::Yaml,
         "toml" => DependencyGraphFormat::Toml,
-        "dot" => DependencyGraphFormat::Dot,
-        "mermaid" => DependencyGraphFormat::Mermaid,
+        "dot" | "graphviz" => DependencyGraphFormat::Dot,
+        "mermaid" | "mmd" => DependencyGraphFormat::Mermaid,
         _ => return None,
     })
 }
 
-/// Pick the first acceptable representation named by `Accept`.
-///
-/// `None` means the caller expressed no preference (absent, empty, or a
-/// wildcard), which defaults to canonical JSON. An `Accept` that names only
-/// representations this route cannot produce is a 406.
-fn parse_accept(accept: &str) -> ApiResult<Option<DependencyGraphFormat>> {
-    if accept.trim().is_empty() {
-        return Ok(None);
-    }
+/// Effective positive qualities for all representations named by every Accept
+/// field-line. An exact q=0 exclusion overrides a positive wildcard for that
+/// representation. `None` means Accept was absent or contained no media range.
+fn parse_accept(headers: &HeaderMap) -> ApiResult<Option<Vec<(DependencyGraphFormat, u16)>>> {
+    let formats = [
+        DependencyGraphFormat::Json,
+        DependencyGraphFormat::Yaml,
+        DependencyGraphFormat::Toml,
+        DependencyGraphFormat::Dot,
+        DependencyGraphFormat::Mermaid,
+    ];
     let mut saw_entry = false;
-    for entry in accept.split(',') {
-        let media = entry.split(';').next().unwrap_or("").trim();
-        if media.is_empty() {
-            continue;
-        }
-        saw_entry = true;
-        if media == "*/*" {
-            return Ok(None);
-        }
-        for format in [
-            DependencyGraphFormat::Json,
-            DependencyGraphFormat::Yaml,
-            DependencyGraphFormat::Toml,
-            DependencyGraphFormat::Dot,
-            DependencyGraphFormat::Mermaid,
-        ] {
-            // The registered media types carry parameters (`; charset=utf-8`)
-            // for the text renderings, so compare on the bare type.
-            let registered = format.media_type().split(';').next().unwrap_or("").trim();
-            if media == registered {
-                return Ok(Some(format));
-            }
-        }
-    }
-    if saw_entry {
-        return Err(ApiErr {
+    let mut selected = [None; 5];
+
+    for value in headers.get_all(header::ACCEPT).iter() {
+        let value = value.to_str().map_err(|_| ApiErr {
             status: StatusCode::NOT_ACCEPTABLE,
             code: "unsupported_format",
             message: "no acceptable dependency graph representation".to_string(),
-        });
+        })?;
+        for entry in value.split(',').filter(|entry| !entry.trim().is_empty()) {
+            saw_entry = true;
+            for (index, format) in formats.iter().copied().enumerate() {
+                let Some(candidate) = canonical_accept_match(entry, format.media_type()) else {
+                    continue;
+                };
+                if selected[index].is_none_or(|current: (u16, u16)| {
+                    candidate.0 > current.0 || (candidate.0 == current.0 && candidate.1 > current.1)
+                }) {
+                    selected[index] = Some(candidate);
+                }
+            }
+        }
     }
-    Ok(None)
+
+    if !saw_entry {
+        return Ok(None);
+    }
+    Ok(Some(
+        formats
+            .into_iter()
+            .zip(selected)
+            .filter_map(|(format, selected)| {
+                selected
+                    .filter(|(_specificity, quality)| *quality > 0)
+                    .map(|(_specificity, quality)| (format, quality))
+            })
+            .collect(),
+    ))
+}
+
+fn canonical_accept_match(entry: &str, registered: &str) -> Option<(u16, u16)> {
+    let mut parts = entry.split(';');
+    let media = parts.next()?.trim().to_ascii_lowercase();
+    let (requested_type, requested_subtype) = media.split_once('/')?;
+    let mut registered_parts = registered.split(';');
+    let (registered_type, registered_subtype) = registered_parts.next()?.trim().split_once('/')?;
+    let registered_parameters: Vec<_> = registered_parts
+        .filter_map(|parameter| parameter.trim().split_once('='))
+        .collect();
+    let media_specificity: u16 = match (requested_type, requested_subtype) {
+        ("*", "*") => 0,
+        (requested_type, "*") if requested_type == registered_type => 1,
+        (requested_type, requested_subtype)
+            if requested_type == registered_type && requested_subtype == registered_subtype =>
+        {
+            2
+        }
+        _ => return None,
+    };
+
+    let mut quality = 1_000;
+    let mut parameter_specificity = 0_u16;
+    for parameter in parts {
+        let Some((name, value)) = parameter.trim().split_once('=') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("q") {
+            quality = parse_accept_quality(value.trim()).unwrap_or(0);
+            break;
+        }
+        let requested_value = value.trim().trim_matches('"');
+        if !registered_parameters
+            .iter()
+            .any(|(registered_name, registered_value)| {
+                name.trim().eq_ignore_ascii_case(registered_name.trim())
+                    && requested_value
+                        .eq_ignore_ascii_case(registered_value.trim().trim_matches('"'))
+            })
+        {
+            return None;
+        }
+        parameter_specificity = parameter_specificity.saturating_add(1);
+    }
+    Some((
+        media_specificity * 256 + parameter_specificity.min(255),
+        quality,
+    ))
+}
+
+fn parse_accept_quality(value: &str) -> Option<u16> {
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if fraction.len() > 3 || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let fraction = format!("{fraction:0<3}").parse::<u16>().ok()?;
+    match whole {
+        "0" => Some(fraction),
+        "1" if fraction == 0 => Some(1_000),
+        _ => None,
+    }
 }
 
 /// Encode, bound, validate against the caller's `If-None-Match`, and answer.
@@ -323,17 +714,12 @@ fn respond(
     format: DependencyGraphFormat,
     document: &DependencyGraphDocument,
     filename_stem: &str,
+    access: DeclaredGraphAccess,
 ) -> ApiResult<Response> {
     let body = encode(document, format)?;
-    if body.len() as u64 > DEPENDENCY_GRAPH_DEFAULT_MAX_ENCODED_BYTES {
-        // Never a truncated document: a caller cannot tell a clipped graph from
-        // a complete one, and the digest would not match either way.
-        return Err(ApiErr {
-            status: StatusCode::PAYLOAD_TOO_LARGE,
-            code: "graph_representation_too_large",
-            message: "dependency graph representation exceeds the server limit".to_string(),
-        });
-    }
+    // Never return a truncated document: a caller cannot tell a clipped graph
+    // from a complete one, and the digest would not match either way.
+    ensure_encoded_size(body.len())?;
 
     // Strong validator over the encoded bytes of *this* representation. The
     // semantic graph digest is deliberately not reused: YAML and TOML of one
@@ -355,36 +741,49 @@ fn respond(
     };
     let mut response_headers = HeaderMap::new();
     response_headers.insert(header::ETAG, header_value(&etag)?);
-    response_headers.insert(header::CACHE_CONTROL, header_value(IMMUTABLE)?);
+    response_headers.insert(header::CACHE_CONTROL, header_value(access.cache_control())?);
+    response_headers.insert(header::VARY, header_value(access.vary())?);
     response_headers.insert(header::CONTENT_DISPOSITION, header_value(&disposition)?);
+    response_headers.insert(
+        header::CONTENT_LENGTH,
+        header_value(&body.len().to_string())?,
+    );
     // Header name is a contract constant, so clients and server cannot drift.
     response_headers.insert(
         header::HeaderName::from_static(DEPENDENCY_GRAPH_DIGEST_HEADER),
         header_value(&graph_digest)?,
     );
+    response_headers.insert(
+        header::HeaderName::from_static(DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER),
+        header::HeaderValue::from_static(if format.is_authoritative() {
+            "true"
+        } else {
+            "false"
+        }),
+    );
 
     if if_none_match_matches(headers, &etag) {
-        // 304 carries the validators and cache policy, never a body.
-        return Ok((StatusCode::NOT_MODIFIED, response_headers).into_response());
+        // 304 carries selected-representation metadata, never body bytes.
+        return Ok(not_modified_response(response_headers));
     }
 
     response_headers.insert(header::CONTENT_TYPE, header_value(format.media_type())?);
     Ok((StatusCode::OK, response_headers, body).into_response())
 }
 
-/// Strong comparison per RFC 9110: `W/`-prefixed (weak) validators never match,
-/// and `*` matches any existing representation.
+/// Weak comparison per RFC 9110 for `If-None-Match` on GET and HEAD: a weak
+/// validator can match the same opaque tag emitted as a strong ETag, and `*`
+/// matches any existing representation.
 fn if_none_match_matches(headers: &HeaderMap, etag: &str) -> bool {
-    let Some(value) = headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-    else {
-        return false;
-    };
-    value
-        .split(',')
+    headers
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
         .map(str::trim)
-        .any(|candidate| candidate == "*" || candidate == etag)
+        .any(|candidate| {
+            candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == etag
+        })
 }
 
 /// Download filename built only from validated coordinates, never from
@@ -408,10 +807,12 @@ fn filename_stem(org: &str, name: &str, version: &str) -> String {
 }
 
 fn encode(document: &DependencyGraphDocument, format: DependencyGraphFormat) -> ApiResult<Vec<u8>> {
+    ensure_graph_bounds(document)?;
     let canonical = document
         .canonical_document_bytes()
         .map_err(|err| ApiErr::from(anyhow::anyhow!("graph canonicalization failed: {err}")))?;
-    Ok(match format {
+    ensure_encoded_size(canonical.len())?;
+    let encoded = match format {
         DependencyGraphFormat::Json => canonical,
         DependencyGraphFormat::Yaml => {
             let value: Value = serde_json::from_slice(&canonical)
@@ -425,9 +826,11 @@ fn encode(document: &DependencyGraphDocument, format: DependencyGraphFormat) -> 
                 .map_err(|err| ApiErr::from(anyhow::anyhow!("canonical JSON reparse: {err}")))?;
             write_toml(&value)?.into_bytes()
         }
-        DependencyGraphFormat::Dot => render_dot(document).into_bytes(),
-        DependencyGraphFormat::Mermaid => render_mermaid(document).into_bytes(),
-    })
+        DependencyGraphFormat::Dot => render_dot(document)?.into_bytes(),
+        DependencyGraphFormat::Mermaid => render_mermaid(document)?.into_bytes(),
+    };
+    ensure_encoded_size(encoded.len())?;
+    Ok(encoded)
 }
 
 // ---------------------------------------------------------------------------
@@ -604,7 +1007,7 @@ fn json_string(text: &str) -> String {
 // excluded from the round-trip guarantee — they are for humans and graphviz.
 // ---------------------------------------------------------------------------
 
-fn render_dot(document: &DependencyGraphDocument) -> String {
+fn render_dot(document: &DependencyGraphDocument) -> ApiResult<String> {
     let mut out = String::from(
         "// Non-authoritative rendering of a zpkg/dependency-graph/v1 document.\n\
          // Use the JSON, YAML, or TOML representation for interchange.\n\
@@ -616,86 +1019,144 @@ fn render_dot(document: &DependencyGraphDocument) -> String {
             dependencies,
         } => {
             let root = package.to_string();
-            out.push_str(&format!("  {} [shape=box];\n", json_string(&root)));
+            let root_id = graph_node_id(&root);
+            push_graph_text(
+                &mut out,
+                &format!("  {root_id} [label={}, shape=box];\n", json_string(&root)),
+            )?;
             for dependency in dependencies {
                 let target = format!(
                     "{}::{}/{} {}",
                     dependency.registry_id, dependency.org, dependency.name, dependency.requirement
                 );
-                out.push_str(&format!(
-                    "  {} -> {};\n",
-                    json_string(&root),
-                    json_string(&target)
-                ));
+                let target_id = graph_node_id(&target);
+                push_graph_text(
+                    &mut out,
+                    &format!("  {target_id} [label={}];\n", json_string(&target)),
+                )?;
+                push_graph_text(&mut out, &format!("  {root_id} -> {target_id};\n"))?;
             }
         }
         DependencyGraphData::Resolved { nodes, edges, .. } => {
             for node in nodes {
-                out.push_str(&format!(
-                    "  {} [shape=box];\n",
-                    json_string(&node.id.to_string())
-                ));
+                let identity = node.id.to_string();
+                push_graph_text(
+                    &mut out,
+                    &format!(
+                        "  {} [label={}, shape=box];\n",
+                        graph_node_id(&identity),
+                        json_string(&identity)
+                    ),
+                )?;
             }
             for edge in edges {
-                out.push_str(&format!(
-                    "  {} -> {};\n",
-                    json_string(&edge.from.to_string()),
-                    json_string(&edge.to.to_string())
-                ));
+                push_graph_text(
+                    &mut out,
+                    &format!(
+                        "  {} -> {};\n",
+                        graph_node_id(&edge.from.to_string()),
+                        graph_node_id(&edge.to.to_string())
+                    ),
+                )?;
             }
         }
     }
-    out.push_str("}\n");
-    out
+    push_graph_text(&mut out, "}\n")?;
+    Ok(out)
 }
 
-fn render_mermaid(document: &DependencyGraphDocument) -> String {
+fn render_mermaid(document: &DependencyGraphDocument) -> ApiResult<String> {
     let mut out = String::from(
         "%% Non-authoritative rendering of a zpkg/dependency-graph/v1 document.\n\
          %% Use the JSON, YAML, or TOML representation for interchange.\n\
          graph LR\n",
     );
-    let label = |text: &str| format!("  {}[{}]\n", mermaid_id(text), json_string(text));
+    let label = |text: &str| {
+        format!(
+            "  {}[\"{}\"]\n",
+            graph_node_id(text),
+            mermaid_safe_label(text)
+        )
+    };
     match &document.graph {
         DependencyGraphData::Declared {
             package,
             dependencies,
         } => {
             let root = package.to_string();
-            out.push_str(&label(&root));
+            push_graph_text(&mut out, &label(&root))?;
             for dependency in dependencies {
                 let target = format!(
                     "{}::{}/{} {}",
                     dependency.registry_id, dependency.org, dependency.name, dependency.requirement
                 );
-                out.push_str(&label(&target));
-                out.push_str(&format!(
-                    "  {} --> {}\n",
-                    mermaid_id(&root),
-                    mermaid_id(&target)
-                ));
+                push_graph_text(&mut out, &label(&target))?;
+                push_graph_text(
+                    &mut out,
+                    &format!(
+                        "  {} --> {}\n",
+                        graph_node_id(&root),
+                        graph_node_id(&target)
+                    ),
+                )?;
             }
         }
         DependencyGraphData::Resolved { nodes, edges, .. } => {
             for node in nodes {
-                out.push_str(&label(&node.id.to_string()));
+                push_graph_text(&mut out, &label(&node.id.to_string()))?;
             }
             for edge in edges {
-                out.push_str(&format!(
-                    "  {} --> {}\n",
-                    mermaid_id(&edge.from.to_string()),
-                    mermaid_id(&edge.to.to_string())
-                ));
+                push_graph_text(
+                    &mut out,
+                    &format!(
+                        "  {} --> {}\n",
+                        graph_node_id(&edge.from.to_string()),
+                        graph_node_id(&edge.to.to_string())
+                    ),
+                )?;
             }
         }
     }
-    out
+    Ok(out)
 }
 
-/// Stable, collision-resistant node id for mermaid, which does not accept
-/// arbitrary characters in identifiers.
-fn mermaid_id(text: &str) -> String {
+/// Stable, collision-resistant identifier accepted by DOT and Mermaid. Using
+/// an identifier rather than the full coordinate on every edge also prevents a
+/// long root coordinate from being repeated hundreds of thousands of times.
+fn graph_node_id(text: &str) -> String {
     format!("n{}", hex::encode(&Sha256::digest(text.as_bytes())[..8]))
+}
+
+fn push_graph_text(output: &mut String, value: &str) -> ApiResult<()> {
+    let length = output
+        .len()
+        .checked_add(value.len())
+        .ok_or_else(representation_too_large)?;
+    ensure_encoded_size(length)?;
+    output.push_str(value);
+    Ok(())
+}
+
+/// Keep untrusted package metadata inside one Mermaid label. Mermaid's quoted
+/// label grammar does not use JSON string escaping consistently across
+/// renderers, so a `\"` or escaped newline is not a sufficient boundary. Keep
+/// common coordinate characters readable and spell every other scalar as a
+/// safe ASCII token that cannot close the label or introduce a directive.
+fn mermaid_safe_label(text: &str) -> String {
+    let mut label = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_ascii_alphanumeric()
+            || matches!(
+                character,
+                ' ' | '.' | '_' | ':' | '/' | '@' | '+' | '-' | '^' | '=' | ','
+            )
+        {
+            label.push(character);
+        } else {
+            label.push_str(&format!("_u{:X}_", character as u32));
+        }
+    }
+    label
 }
 
 #[cfg(test)]
@@ -731,7 +1192,7 @@ url = "https://github.com/acme/app"
     }
 
     fn sample_document() -> DependencyGraphDocument {
-        declared_document("registry:registry.zpkg.net", "1.0.0", &sample_manifest())
+        declared_document("registry:zpkg-primary", "1.0.0", &sample_manifest())
             .expect("fixture document builds")
     }
 
@@ -764,6 +1225,77 @@ url = "https://github.com/acme/app"
         assert_eq!(corelib.requirement, "^2");
     }
 
+    #[test]
+    fn declared_graph_refuses_version_relabeling_and_invalid_semver() {
+        let manifest = sample_manifest();
+        let relabeled = declared_document("registry:registry.zpkg.net", "2.0.0", &manifest)
+            .expect_err("a URL version cannot relabel another stored manifest");
+        assert_eq!(relabeled.code, "internal");
+
+        let mut invalid = sample_manifest();
+        invalid.package.version = "latest".to_string();
+        let invalid = declared_document("registry:registry.zpkg.net", "latest", &invalid)
+            .expect_err("semver packages require an exact semantic version");
+        assert_eq!(invalid.code, "internal");
+    }
+
+    #[test]
+    fn internal_private_and_unknown_visibility_fail_closed() {
+        assert!(!requires_graph_authorization("public").unwrap());
+        assert!(requires_graph_authorization("internal").unwrap());
+        assert!(requires_graph_authorization("private").unwrap());
+        assert_eq!(
+            requires_graph_authorization("future-policy")
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
+    }
+
+    #[test]
+    fn declared_dependency_count_is_checked_before_allocation() {
+        // A declared graph has one package node in addition to its dependency
+        // nodes, so the node limit is reached before the larger edge limit.
+        let limit = DEPENDENCY_GRAPH_DEFAULT_MAX_NODES as usize - 1;
+        assert_eq!(
+            checked_declared_dependency_count(limit.saturating_sub(1), 1).unwrap(),
+            limit
+        );
+        assert_eq!(
+            checked_declared_dependency_count(limit, 1)
+                .unwrap_err()
+                .code,
+            "graph_limit_exceeded"
+        );
+        assert!(
+            ensure_graph_counts(1, DEPENDENCY_GRAPH_DEFAULT_MAX_EDGES as usize).is_ok(),
+            "the independent edge limit is inclusive"
+        );
+        assert_eq!(
+            ensure_graph_counts(1, DEPENDENCY_GRAPH_DEFAULT_MAX_EDGES as usize + 1)
+                .unwrap_err()
+                .code,
+            "graph_limit_exceeded"
+        );
+        assert_eq!(
+            checked_declared_dependency_count(usize::MAX, 1)
+                .unwrap_err()
+                .code,
+            "graph_limit_exceeded"
+        );
+    }
+
+    #[test]
+    fn encoded_size_limit_is_inclusive_and_fails_closed() {
+        assert!(ensure_encoded_size(DEPENDENCY_GRAPH_DEFAULT_MAX_ENCODED_BYTES as usize).is_ok());
+        assert_eq!(
+            ensure_encoded_size(DEPENDENCY_GRAPH_DEFAULT_MAX_ENCODED_BYTES as usize + 1)
+                .unwrap_err()
+                .code,
+            "graph_representation_too_large"
+        );
+    }
+
     /// The three authoritative representations must decode to one typed
     /// document with one semantic digest. Parsed here with independent
     /// third-party parsers, so this proves interoperability rather than that
@@ -794,6 +1326,29 @@ url = "https://github.com/acme/app"
         // representations would be a cache-poisoning bug.
         assert_ne!(json, yaml);
         assert_ne!(json, toml_bytes);
+    }
+
+    #[test]
+    fn every_golden_graph_round_trips_through_authoritative_text_formats() {
+        for (name, document) in zed_interfaces::golden_fixture_documents() {
+            let json = encode(&document, DependencyGraphFormat::Json).unwrap();
+            let yaml = encode(&document, DependencyGraphFormat::Yaml).unwrap();
+            let toml = encode(&document, DependencyGraphFormat::Toml).unwrap();
+
+            let from_json = DependencyGraphDocument::parse_verified_canonical(&json)
+                .unwrap_or_else(|error| panic!("canonical JSON failed for {name}: {error}"));
+            let from_yaml: DependencyGraphDocument = serde_yaml::from_slice(&yaml)
+                .unwrap_or_else(|error| panic!("YAML failed for {name}: {error}"));
+            let from_toml: DependencyGraphDocument =
+                toml::from_str(std::str::from_utf8(&toml).unwrap())
+                    .unwrap_or_else(|error| panic!("TOML failed for {name}: {error}"));
+
+            assert_eq!(from_json, document, "JSON mismatch for {name}");
+            assert_eq!(from_yaml, document, "YAML mismatch for {name}");
+            assert_eq!(from_toml, document, "TOML mismatch for {name}");
+            from_yaml.verify_digest().unwrap();
+            from_toml.verify_digest().unwrap();
+        }
     }
 
     /// The safe subset admits no YAML feature that can alias, tag, or merge.
@@ -844,6 +1399,10 @@ url = "https://github.com/acme/app"
             resolve_format(&accept("*/*"), None).unwrap(),
             DependencyGraphFormat::Json
         );
+        assert_eq!(
+            resolve_format(&HeaderMap::new(), Some("YML")).unwrap(),
+            DependencyGraphFormat::Yaml
+        );
         // Text renderings are still negotiable despite their charset parameter.
         assert_eq!(
             resolve_format(&accept("text/vnd.graphviz"), None).unwrap(),
@@ -855,6 +1414,43 @@ url = "https://github.com/acme/app"
         assert_eq!(err.status, StatusCode::NOT_ACCEPTABLE);
         let err = resolve_format(&HeaderMap::new(), Some("xml")).unwrap_err();
         assert_eq!(err.status, StatusCode::NOT_ACCEPTABLE);
+    }
+
+    #[test]
+    fn accept_honors_quality_specificity_and_all_field_lines() {
+        let json = DependencyGraphFormat::Json.media_type();
+        let yaml = DependencyGraphFormat::Yaml.media_type();
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::ACCEPT,
+            HeaderValue::from_str(&format!("{json};q=0")).unwrap(),
+        );
+        headers.append(
+            header::ACCEPT,
+            HeaderValue::from_str(&format!("{yaml};q=0.7, */*;q=0.5")).unwrap(),
+        );
+        assert_eq!(
+            resolve_format(&headers, None).unwrap(),
+            DependencyGraphFormat::Yaml
+        );
+        assert_eq!(
+            resolve_format(&headers, Some("json")).unwrap_err().code,
+            "format_conflict"
+        );
+        // A specifically excluded text representation remains excluded even
+        // when a generic text wildcard is positive.
+        let mut text = HeaderMap::new();
+        text.insert(
+            header::ACCEPT,
+            "text/*;q=1, text/vnd.graphviz;charset=utf-8;q=0"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            resolve_format(&text, None).unwrap(),
+            DependencyGraphFormat::Mermaid
+        );
+        assert!(resolve_format(&text, Some("dot")).is_err());
     }
 
     /// Hostile identifiers cannot escape the filename or inject a header.
@@ -881,6 +1477,7 @@ url = "https://github.com/acme/app"
             DependencyGraphFormat::Json,
             &document,
             "acme_app_1.0.0",
+            DeclaredGraphAccess::Public,
         )
         .unwrap();
         let json_etag = json.headers().get(header::ETAG).unwrap().clone();
@@ -889,12 +1486,31 @@ url = "https://github.com/acme/app"
             .get(DEPENDENCY_GRAPH_DIGEST_HEADER)
             .unwrap()
             .clone();
+        assert_eq!(
+            json.headers()
+                .get(DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER)
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            json.headers()
+                .get(header::CONTENT_LENGTH)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .parse::<usize>()
+                .unwrap(),
+            encode(&document, DependencyGraphFormat::Json)
+                .unwrap()
+                .len()
+        );
 
         let yaml = respond(
             &HeaderMap::new(),
             DependencyGraphFormat::Yaml,
             &document,
             "acme_app_1.0.0",
+            DeclaredGraphAccess::Public,
         )
         .unwrap();
         // Semantic identity is shared; byte identity is not.
@@ -913,10 +1529,19 @@ url = "https://github.com/acme/app"
             DependencyGraphFormat::Json,
             &document,
             "acme_app_1.0.0",
+            DeclaredGraphAccess::Public,
         )
         .unwrap();
         assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
         assert_eq!(not_modified.headers().get(header::ETAG), Some(&json_etag));
+        assert!(not_modified.headers().contains_key(header::CONTENT_LENGTH));
+        assert_eq!(
+            not_modified
+                .headers()
+                .get(DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER)
+                .unwrap(),
+            "true"
+        );
 
         // … and never for YAML.
         let yaml_conditional = respond(
@@ -924,11 +1549,13 @@ url = "https://github.com/acme/app"
             DependencyGraphFormat::Yaml,
             &document,
             "acme_app_1.0.0",
+            DeclaredGraphAccess::Public,
         )
         .unwrap();
         assert_eq!(yaml_conditional.status(), StatusCode::OK);
 
-        // A weak validator never satisfies a strong comparison.
+        // RFC 9110 requires weak comparison for If-None-Match on GET/HEAD,
+        // even though the response's representation validator is strong.
         let mut weak = HeaderMap::new();
         weak.insert(
             header::IF_NONE_MATCH,
@@ -939,20 +1566,48 @@ url = "https://github.com/acme/app"
             DependencyGraphFormat::Json,
             &document,
             "acme_app_1.0.0",
+            DeclaredGraphAccess::Public,
         )
         .unwrap();
-        assert_eq!(weak_response.status(), StatusCode::OK);
+        assert_eq!(weak_response.status(), StatusCode::NOT_MODIFIED);
     }
 
     #[test]
-    fn registry_identity_comes_from_the_public_base_url() {
+    fn private_graph_responses_are_never_cacheable() {
+        let response = respond(
+            &HeaderMap::new(),
+            DependencyGraphFormat::Json,
+            &sample_document(),
+            "acme_app_1.0.0",
+            DeclaredGraphAccess::Private,
+        )
+        .unwrap();
         assert_eq!(
-            registry_id("https://registry.zpkg.net"),
-            "registry:registry.zpkg.net"
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            PRIVATE_NO_STORE
         );
         assert_eq!(
-            registry_id("http://localhost:8080/"),
-            "registry:localhost:8080"
+            response.headers().get(header::VARY).unwrap(),
+            "Accept, Authorization"
+        );
+    }
+
+    #[test]
+    fn registry_identity_is_the_stable_configured_coordinate() {
+        let document = declared_document("registry:zpkg-primary", "1.0.0", &sample_manifest())
+            .expect("fixture document builds");
+        let DependencyGraphData::Declared {
+            package,
+            dependencies,
+        } = document.graph
+        else {
+            panic!("declared view");
+        };
+        assert_eq!(package.registry_id, "registry:zpkg-primary");
+        assert!(
+            dependencies
+                .iter()
+                .all(|dependency| dependency.registry_id == "registry:zpkg-primary")
         );
     }
 
@@ -1071,11 +1726,14 @@ url = "https://github.com/acme/http-kit"
         })
         .await
         .unwrap();
+        let artifact = artifact_with_manifest();
+        let artifact_sha256 = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&artifact));
         store
-            .put(
+            .put_verified(
                 "artifacts/graph.tar.gz",
-                artifact_with_manifest().into(),
+                artifact.into(),
                 "application/gzip",
+                &artifact_sha256,
             )
             .await
             .unwrap();
@@ -1088,6 +1746,7 @@ url = "https://github.com/acme/http-kit"
                 store,
                 verifier: TagVerifier::new(TagPolicy::Off),
                 public_base_url: "https://registry.zpkg.net".to_string(),
+                registry_id: "registry:zpkg-primary".to_string(),
                 max_orgs_per_token: 5,
                 fiducia: None,
                 rate_limiter: None,
@@ -1117,6 +1776,76 @@ url = "https://github.com/acme/http-kit"
             .unwrap()
     }
 
+    struct LiveResponse {
+        status: u16,
+        headers: std::collections::BTreeMap<String, String>,
+        body: Vec<u8>,
+    }
+
+    impl LiveResponse {
+        fn header(&self, name: &str) -> &str {
+            self.headers
+                .get(&name.to_ascii_lowercase())
+                .unwrap_or_else(|| panic!("live response omitted {name}"))
+        }
+    }
+
+    /// Exercise Hyper's real HTTP/1 encoder. In-memory `oneshot` responses do
+    /// not expose protocol-layer header rewriting.
+    async fn live_request(
+        app: &axum::Router,
+        method: &str,
+        uri: &str,
+        request_headers: &[(&str, &str)],
+    ) -> LiveResponse {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = app.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let mut wire_request =
+            format!("{method} {uri} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n");
+        for (name, value) in request_headers {
+            wire_request.push_str(name);
+            wire_request.push_str(": ");
+            wire_request.push_str(value);
+            wire_request.push_str("\r\n");
+        }
+        wire_request.push_str("\r\n");
+        stream.write_all(wire_request.as_bytes()).await.unwrap();
+
+        let mut wire_response = Vec::new();
+        stream.read_to_end(&mut wire_response).await.unwrap();
+        server.abort();
+
+        let header_end = wire_response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4)
+            .expect("live response has an HTTP header terminator");
+        let head = std::str::from_utf8(&wire_response[..header_end]).unwrap();
+        let mut lines = head.trim_end().split("\r\n");
+        let status = lines
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u16>().ok())
+            .expect("live response has a numeric status");
+        let headers = lines
+            .map(|line| line.split_once(':').expect("live response header is valid"))
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_string()))
+            .collect();
+        LiveResponse {
+            status,
+            headers,
+            body: wire_response[header_end..].to_vec(),
+        }
+    }
+
     const DECLARED_URI: &str =
         "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph?view=declared";
 
@@ -1135,6 +1864,7 @@ url = "https://github.com/acme/http-kit"
             response.headers().get(header::CONTENT_DISPOSITION).unwrap(),
             "attachment; filename=\"acme_http-kit_1.0.0.dependency-graph.json\""
         );
+        assert_eq!(response.headers().get(header::VARY).unwrap(), "Accept");
         let digest = response
             .headers()
             .get(DEPENDENCY_GRAPH_DIGEST_HEADER)
@@ -1156,10 +1886,181 @@ url = "https://github.com/acme/http-kit"
         else {
             panic!("declared view");
         };
-        assert_eq!(package.registry_id, "registry:registry.zpkg.net");
+        assert_eq!(package.registry_id, "registry:zpkg-primary");
         assert_eq!(package.name, "http-kit");
         assert_eq!(dependencies.len(), 1);
         assert_eq!(dependencies[0].requirement, "^2");
+    }
+
+    /// Every registered representation exposes byte-exact length and
+    /// authority metadata consistently across GET, HEAD, and conditional GET.
+    #[tokio::test]
+    async fn every_format_has_exact_get_head_and_not_modified_metadata() {
+        let app = seeded_app().await;
+        let cases = [
+            (
+                "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph?view=declared&format=json",
+                true,
+            ),
+            (
+                "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph?view=declared&format=yaml",
+                true,
+            ),
+            (
+                "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph?view=declared&format=toml",
+                true,
+            ),
+            (
+                "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph?view=declared&format=dot",
+                false,
+            ),
+            (
+                "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph?view=declared&format=mermaid",
+                false,
+            ),
+            (
+                "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph/export/json5",
+                true,
+            ),
+            (
+                "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph/export/xml",
+                true,
+            ),
+            (
+                "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph/export/csv",
+                false,
+            ),
+            (
+                "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph/export/msgpack",
+                true,
+            ),
+            (
+                "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph/export/protobuf",
+                true,
+            ),
+        ];
+        let metadata = [
+            "etag",
+            "cache-control",
+            "vary",
+            "content-disposition",
+            "content-length",
+            DEPENDENCY_GRAPH_DIGEST_HEADER,
+            DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER,
+        ];
+
+        for (uri, authoritative) in cases {
+            let get = request(&app, "GET", uri, &[]).await;
+            assert_eq!(get.status(), StatusCode::OK, "GET {uri}");
+            let get_headers = get.headers().clone();
+            assert_eq!(
+                get_headers
+                    .get(DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER)
+                    .unwrap(),
+                if authoritative { "true" } else { "false" },
+                "authority for {uri}"
+            );
+            let body = axum::body::to_bytes(get.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(
+                get_headers
+                    .get(header::CONTENT_LENGTH)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap(),
+                body.len(),
+                "GET length for {uri}"
+            );
+
+            let head = request(&app, "HEAD", uri, &[]).await;
+            assert_eq!(head.status(), StatusCode::OK, "HEAD {uri}");
+            let head_headers = head.headers().clone();
+            assert!(
+                axum::body::to_bytes(head.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "HEAD body for {uri}"
+            );
+            for name in metadata {
+                assert_eq!(
+                    head_headers.get(name),
+                    get_headers.get(name),
+                    "HEAD {name} for {uri}"
+                );
+            }
+
+            let etag = get_headers.get(header::ETAG).unwrap().to_str().unwrap();
+            let not_modified = request(&app, "GET", uri, &[(header::IF_NONE_MATCH, etag)]).await;
+            assert_eq!(
+                not_modified.status(),
+                StatusCode::NOT_MODIFIED,
+                "conditional GET {uri}"
+            );
+            let not_modified_headers = not_modified.headers().clone();
+            assert!(
+                axum::body::to_bytes(not_modified.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "304 body for {uri}"
+            );
+            for name in metadata {
+                assert_eq!(
+                    not_modified_headers.get(name),
+                    get_headers.get(name),
+                    "304 {name} for {uri}"
+                );
+            }
+        }
+    }
+
+    /// Hyper sees a deliberately unknown-size body on 304 so it retains the
+    /// selected representation's length header while transmitting no bytes.
+    #[tokio::test]
+    async fn live_http_retains_selected_length_for_canonical_and_extended_304() {
+        let app = seeded_app().await;
+        let cases = [
+            (
+                "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph?view=declared&format=json",
+                "true",
+            ),
+            (
+                "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph/export/csv",
+                "false",
+            ),
+        ];
+
+        for (uri, authoritative) in cases {
+            let get = live_request(&app, "GET", uri, &[]).await;
+            assert_eq!(get.status, 200, "GET {uri}");
+            let selected_length = get.header("content-length").to_string();
+            assert_eq!(selected_length.parse::<usize>().unwrap(), get.body.len());
+            assert_eq!(
+                get.header(DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER),
+                authoritative
+            );
+
+            let head = live_request(&app, "HEAD", uri, &[]).await;
+            assert_eq!(head.status, 200, "HEAD {uri}");
+            assert!(head.body.is_empty(), "HEAD body for {uri}");
+            assert_eq!(head.header("content-length"), selected_length);
+            assert_eq!(head.header("etag"), get.header("etag"));
+
+            let not_modified =
+                live_request(&app, "GET", uri, &[("If-None-Match", get.header("etag"))]).await;
+            assert_eq!(not_modified.status, 304, "conditional GET {uri}");
+            assert!(not_modified.body.is_empty(), "304 body for {uri}");
+            assert_eq!(not_modified.header("content-length"), selected_length);
+            assert_eq!(not_modified.header("etag"), get.header("etag"));
+            assert_eq!(
+                not_modified.header(DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER),
+                authoritative
+            );
+        }
     }
 
     /// `HEAD` answers with the same metadata and no body; a matching
@@ -1200,6 +2101,90 @@ url = "https://github.com/acme/http-kit"
         )
         .await;
         assert_eq!(other.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn extended_exports_preserve_head_negotiation_and_private_miss_semantics() {
+        const EXPORT_URI: &str =
+            "/v1/packages/acme/http-kit/versions/1.0.0/dependency-graph/export/xml";
+        let app = seeded_app().await;
+        let head = request(
+            &app,
+            "HEAD",
+            EXPORT_URI,
+            &[(
+                header::ACCEPT,
+                "application/vnd.zpkg.dependency-graph.v1+xml",
+            )],
+        )
+        .await;
+        assert_eq!(head.status(), StatusCode::OK);
+        assert!(head.headers().contains_key(header::CONTENT_LENGTH));
+        let etag = head
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            axum::body::to_bytes(head.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .is_empty(),
+            "HEAD carries no export body"
+        );
+
+        let weak_etag = format!("W/{etag}");
+        let conditional = request(
+            &app,
+            "GET",
+            EXPORT_URI,
+            &[(header::IF_NONE_MATCH, weak_etag.as_str())],
+        )
+        .await;
+        assert_eq!(conditional.status(), StatusCode::NOT_MODIFIED);
+
+        let unacceptable = request(&app, "GET", EXPORT_URI, &[(header::ACCEPT, "text/csv")]).await;
+        assert_eq!(unacceptable.status(), StatusCode::NOT_ACCEPTABLE);
+        let unknown_unacceptable = request(
+            &app,
+            "GET",
+            "/v1/packages/nope/http-kit/versions/1.0.0/dependency-graph/export/xml",
+            &[(header::ACCEPT, "text/csv")],
+        )
+        .await;
+        assert_eq!(unknown_unacceptable.status(), StatusCode::NOT_ACCEPTABLE);
+        assert_eq!(
+            axum::body::to_bytes(unacceptable.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+            axum::body::to_bytes(unknown_unacceptable.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+            "negotiation failures must not reveal package existence"
+        );
+
+        let mut bodies = Vec::new();
+        for uri in [
+            "/v1/packages/nope/http-kit/versions/1.0.0/dependency-graph/export/xml",
+            "/v1/packages/acme/nope/versions/1.0.0/dependency-graph/export/xml",
+            "/v1/packages/acme/http-kit/versions/9.9.9/dependency-graph/export/xml",
+        ] {
+            let response = request(&app, "GET", uri, &[]).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL).unwrap(),
+                "private, no-store"
+            );
+            bodies.push(
+                axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            );
+        }
+        assert!(bodies.windows(2).all(|pair| pair[0] == pair[1]));
     }
 
     /// Every miss — unknown org, package, version, or resolution digest —
@@ -1287,6 +2272,44 @@ url = "https://github.com/acme/http-kit"
             let rendered = String::from_utf8(encode(&document, format).unwrap()).unwrap();
             assert!(rendered.contains("Non-authoritative"));
             assert!(!format.is_authoritative());
+            let response = respond(
+                &HeaderMap::new(),
+                format,
+                &document,
+                "acme_app_1.0.0",
+                DeclaredGraphAccess::Public,
+            )
+            .unwrap();
+            assert_eq!(
+                response
+                    .headers()
+                    .get(DEPENDENCY_GRAPH_AUTHORITATIVE_HEADER)
+                    .unwrap(),
+                "false"
+            );
         }
+    }
+
+    #[test]
+    fn mermaid_labels_cannot_break_out_into_directives() {
+        let hostile = "pkg\"]\nclick root callback\r\n<script>";
+        let label = mermaid_safe_label(hostile);
+        assert!(
+            !label
+                .chars()
+                .any(|character| matches!(character, '"' | ']' | '\n' | '\r' | '<' | '>'))
+        );
+        assert!(label.contains("_u22_"));
+        assert!(label.contains("_uA_"));
+
+        let mut document = sample_document();
+        let DependencyGraphData::Declared { dependencies, .. } = &mut document.graph else {
+            unreachable!();
+        };
+        dependencies[0].requirement = hostile.to_string();
+        let document = document.finalize().unwrap();
+        let mermaid = render_mermaid(&document).unwrap();
+        assert!(!mermaid.contains("\nclick "));
+        assert!(!mermaid.contains("<script>"));
     }
 }

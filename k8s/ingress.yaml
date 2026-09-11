@@ -3,11 +3,12 @@
 # verification disabled, so a public Ingress remains gated on the DEN-534 and
 # DEN-535 promotion work.
 #
-# api.zpkg.net and registry.zpkg.net both serve the API root today. When the
-# registry moves to a sub-path of the API server, the registry.zpkg.net rule
-# gains the path prefix (or an edge rewrite); DNS stays the same. DNS lives in
-# zed-infra/terraform/cloudflare, and records stay DNS-only until cert-manager
-# issues this certificate via ACME HTTP-01.
+# api.zpkg.net serves the complete API. registry.zpkg.net reaches the same
+# process, but `registry_host` rejects every route/method outside the explicit
+# machine-registry state table before handler work. Cloudflare enforces the
+# same table at the edge; the in-process guard prevents direct-origin bypass.
+# DNS lives in zed-infra/terraform/cloudflare; records stay DNS-only until
+# cert-manager issues this certificate (ACME HTTP-01 ordering).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -19,17 +20,20 @@ metadata:
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    # Publishes streaming tarballs up to MAX_ARTIFACT_BYTES (100 MiB).
-    nginx.ingress.kubernetes.io/proxy-body-size: "110m"
-    # nginx sees the real client address and therefore owns anonymous per-IP
-    # protection. The application separately enforces per-token limits.
+    # The app can identify authenticated credentials but, behind ingress-nginx,
+    # it cannot safely treat the upstream socket address as the original client.
+    # Keep an ingress-owned IP abuse ceiling for anonymous/read traffic as a
+    # separate layer from the application's per-token limiter.
     nginx.ingress.kubernetes.io/limit-rps: "50"
     nginx.ingress.kubernetes.io/limit-burst-multiplier: "5"
     nginx.ingress.kubernetes.io/limit-connections: "50"
-    # Sit above the application's 30-second request timeout so its response
-    # normally wins while still bounding slow upstream connections.
+    # Keep slow clients from retaining ingress/upstream resources indefinitely.
+    # These remain above the application's 30-second request timeout so normal
+    # application timeout/error behavior wins before the proxy gives up.
     nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    # Publishes streaming tarballs up to MAX_ARTIFACT_BYTES (100 MiB).
+    nginx.ingress.kubernetes.io/proxy-body-size: "110m"
 spec:
   ingressClassName: nginx
   tls:

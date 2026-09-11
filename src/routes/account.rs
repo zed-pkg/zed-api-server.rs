@@ -196,7 +196,7 @@ pub async fn home(
             .await
             .map_err(map_orm_error)?;
         for project in &mut rows {
-            let direct = zed_orm_core::account::project_role_for_user(read, project.id, user.id)
+            let direct = zed_orm_core::read::project_role_for_user(read, project.id, user.id)
                 .await
                 .map_err(map_orm_error)?;
             project.role = strongest_role(Some(&org.role), direct.as_deref())
@@ -330,7 +330,7 @@ pub async fn org_dashboard(
             .await
             .map_err(map_orm_error)?;
     for project in &mut projects {
-        let direct = zed_orm_core::account::project_role_for_user(read, project.id, user.id)
+        let direct = zed_orm_core::read::project_role_for_user(read, project.id, user.id)
             .await
             .map_err(map_orm_error)?;
         project.role = strongest_role(Some(&org_summary.role), direct.as_deref())
@@ -412,14 +412,14 @@ pub async fn project_settings(
         .await
         .map_err(map_orm_error)?
         .ok_or_else(|| ApiErr::not_found("project"))?;
-    let project = zed_orm_core::account::project_by_org_and_slug(read, org.id, &project_slug)
+    let project = zed_orm_core::read::project_by_org_and_slug(read, org.id, &project_slug)
         .await
         .map_err(map_orm_error)?
         .ok_or_else(|| ApiErr::not_found("project"))?;
     let org_role = zed_orm_core::read::org_role_for_user(read, org.id, user.id)
         .await
         .map_err(map_orm_error)?;
-    let project_role = zed_orm_core::account::project_role_for_user(read, project.id, user.id)
+    let project_role = zed_orm_core::read::project_role_for_user(read, project.id, user.id)
         .await
         .map_err(map_orm_error)?;
     let role = strongest_role(org_role.as_deref(), project_role.as_deref())
@@ -510,7 +510,7 @@ pub async fn package_settings(
         .await
         .map_err(map_orm_error)?;
     let project_role = match package.project_id {
-        Some(project_id) => zed_orm_core::account::project_role_for_user(read, project_id, user.id)
+        Some(project_id) => zed_orm_core::read::project_role_for_user(read, project_id, user.id)
             .await
             .map_err(map_orm_error)?,
         None => None,

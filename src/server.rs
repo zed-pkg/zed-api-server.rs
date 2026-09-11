@@ -12,7 +12,7 @@ use crate::shared_auth::SharedAuthClient;
 use crate::state::AppState;
 use crate::storage::ArtifactStore;
 use crate::verify::TagVerifier;
-use crate::{account_router, ratelimit, routes, tokens};
+use crate::{account_router, api_docs, ratelimit, registry_host, routes, tokens};
 
 #[derive(Debug, PartialEq, Eq)]
 enum ProcessCommand<'a> {
@@ -25,9 +25,9 @@ enum ProcessCommand<'a> {
 
 /// Run the registry process or one of its local administrative commands.
 pub(crate) async fn run() -> Result<()> {
-    dotenvy::dotenv().ok();
+    let rust_log = crate::flags::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(EnvFilter::try_new(rust_log).unwrap_or_else(|_| "info".into()))
         .init();
 
     let args = std::env::args().collect::<Vec<_>>();
@@ -65,7 +65,10 @@ pub(crate) async fn run() -> Result<()> {
             None => fiducia_client::FiduciaClient::new(&configuration.url),
         })
     });
-    let rate_limiter = if std::env::var("ZED_RATE_LIMIT_DISABLED").as_deref() == Ok("1") {
+    let rate_limiter = if matches!(
+        crate::flags::var("ZED_RATE_LIMIT_DISABLED").as_deref(),
+        Ok("1" | "true")
+    ) {
         tracing::warn!("per-token rate limiting is DISABLED (ZED_RATE_LIMIT_DISABLED=1)");
         None
     } else {
@@ -91,6 +94,7 @@ pub(crate) async fn run() -> Result<()> {
         store,
         verifier: TagVerifier::new(cfg.verify_tags),
         public_base_url: cfg.public_base_url.trim_end_matches('/').to_string(),
+        registry_id: cfg.registry_id,
         max_orgs_per_token: cfg.max_orgs_per_token,
         fiducia,
         rate_limiter,
@@ -111,12 +115,44 @@ pub(crate) async fn run() -> Result<()> {
             .map(|configuration| configuration.public_url.clone()),
     });
 
-    let app =
-        routes::router(state.clone(), cfg.max_artifact_bytes).merge(account_router::router(state));
+    // Keep the state-free public documentation surface outside the registry
+    // router so it cannot inherit token auth or per-token rate limiting.
+    let app = axum::Router::new()
+        .merge(api_docs::router())
+        .merge(routes::router(state.clone(), cfg.max_artifact_bytes))
+        .merge(account_router::router(state))
+        // Defense in depth for the registry virtual host. Cloudflare runs the
+        // same transition table at the edge, but direct-origin traffic must
+        // not be able to bypass it with Host: registry.zpkg.net.
+        .layer(axum::middleware::from_fn(
+            registry_host::enforce_registry_host,
+        ));
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr).await?;
     tracing::info!("zed-api-server listening on {}", cfg.bind_addr);
-    axum::serve(listener, app).await?;
+    let middleware_config =
+        registry_transport_config(ores_middleware::config_from_env(env!("CARGO_PKG_NAME"))?);
+    let middleware_stack = Arc::new(
+        ores_middleware::MiddlewareStack::new(middleware_config).map_err(|issues| {
+            anyhow::anyhow!("invalid registry middleware configuration: {issues:?}")
+        })?,
+    );
+    axum::serve(
+        listener,
+        ores_middleware::frameworks::axum::install(app, middleware_stack),
+    )
+    .await?;
     Ok(())
+}
+
+/// The registry's artifact endpoints expose the exact representation length as
+/// part of their immutable download contract. Keep the shared middleware stack,
+/// but disable transfer compression at this application boundary so it cannot
+/// remove or rewrite the handler-provided `Content-Length`.
+fn registry_transport_config(
+    mut config: ores_middleware::MiddlewareConfig,
+) -> ores_middleware::MiddlewareConfig {
+    config.settings.compression.enabled = false;
+    config
 }
 
 fn process_command(args: &[String]) -> ProcessCommand<'_> {
@@ -242,7 +278,7 @@ async fn connect_registry_read_with_retry(cfg: &Config) -> Result<ReadContext> {
 
 fn database_connect_max_wait() -> Duration {
     Duration::from_secs(
-        std::env::var("DB_CONNECT_MAX_WAIT_SECS")
+        crate::flags::var("DB_CONNECT_MAX_WAIT_SECS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(30),
@@ -251,7 +287,7 @@ fn database_connect_max_wait() -> Duration {
 
 /// Probe the local `/healthz` endpoint for the container HEALTHCHECK.
 async fn healthcheck() -> Result<()> {
-    let bind = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    let bind = crate::flags::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let url = healthcheck_url(&bind);
     let response = reqwest::Client::new()
         .get(&url)
@@ -304,6 +340,16 @@ mod tests {
             process_command(&arguments(&["zed-api-server", "unknown"])),
             ProcessCommand::Serve
         );
+    }
+
+    #[test]
+    fn registry_transport_keeps_artifact_representation_length_stable() {
+        let defaults = ores_middleware::default_config("zed-api-server-test");
+        assert!(defaults.settings.compression.enabled);
+
+        let registry = registry_transport_config(defaults);
+        assert!(!registry.settings.compression.enabled);
+        assert!(registry.settings.security_headers.enabled);
     }
 
     #[test]
