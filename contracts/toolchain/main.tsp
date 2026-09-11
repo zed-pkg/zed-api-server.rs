@@ -17,8 +17,7 @@ model ZedApiToolchainContract {
   canonicalFlagsAuthority: true;
   strictUnknownOptions: true;
   dotenvDisabled: true;
-  @minValue(1)
-  flagCount: int32;
+  flagCount: 36;
   requiredSecretEnvIgnored: true;
   legacyFlagsAuthorityPresent: false;
 }
