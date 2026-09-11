@@ -4,7 +4,12 @@ on:
   push:
     branches: [main]
     paths:
+      - '.cli-flags.toml'
+      - '.ores-rl.toml'
       - '.zpkg.toml'
+      - '.zpkg.lock'
+      - 'env/**'
+      - 'scripts/sops-entrypoint.sh'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -18,7 +23,12 @@ on:
       - '.github/workflows/publish-container.yml'
   pull_request:
     paths:
+      - '.cli-flags.toml'
+      - '.ores-rl.toml'
       - '.zpkg.toml'
+      - '.zpkg.lock'
+      - 'env/**'
+      - 'scripts/sops-entrypoint.sh'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
