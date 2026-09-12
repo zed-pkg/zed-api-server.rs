@@ -65,8 +65,8 @@ jobs:
             --component rustfmt \
             --component clippy \
             --no-self-update
-          rustup default "$toolchain"
-          test "$(rustc --version | awk '{print $2}')" = "$toolchain"
+          test "$(rustc +"$toolchain" --version | awk '{print $2}')" = "$toolchain"
+          echo "FMCTL_RUST_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
 
       - name: Install Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -88,7 +88,7 @@ jobs:
           # and resolve product-only path dependencies before compiling fmctl.
           mkdir -p "$RUNNER_TEMP/fmctl-source"
           cp -R .formal-tools/opto-sync-clients/tools/fmctl/. "$RUNNER_TEMP/fmctl-source/"
-          cargo build \
+          cargo +"$FMCTL_RUST_TOOLCHAIN" build \
             --locked \
             --release \
             --manifest-path "$RUNNER_TEMP/fmctl-source/Cargo.toml"
