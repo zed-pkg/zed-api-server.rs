@@ -21,9 +21,9 @@ fn formal_workflow_uses_exact_candidate_and_pinned_fmctl_toolchain() {
         ".formal-tools/opto-sync-clients/tools/fmctl/rust-toolchain.toml",
         "persist-credentials: false",
         "rustup toolchain install \"$toolchain\"",
-        "rustup default \"$toolchain\"",
-        "rustc --version",
-        "cargo build \\",
+        "rustc +\"$toolchain\" --version",
+        "FMCTL_RUST_TOOLCHAIN=$toolchain",
+        "cargo +\"$FMCTL_RUST_TOOLCHAIN\" build",
         "--locked \\",
         "\"$FMCTL\" --format json validate",
         "\"$FMCTL\" --format json doctor",
@@ -42,6 +42,7 @@ fn formal_workflow_uses_exact_candidate_and_pinned_fmctl_toolchain() {
         "toolchain: stable",
         "rustup toolchain install stable",
         "rustup default stable",
+        "rustup default \"$toolchain\"",
         "persist-credentials: true",
         "contents: write",
     ] {
@@ -60,9 +61,15 @@ fn repository_product_toolchain_remains_patch_exact_and_independent() {
         .as_str()
         .expect("toolchain.channel must be a string");
     let parts = channel.split('.').collect::<Vec<_>>();
-    assert_eq!(parts.len(), 3, "product Rust must be x.y.z exact: {channel}");
+    assert_eq!(
+        parts.len(),
+        3,
+        "product Rust must be x.y.z exact: {channel}"
+    );
     assert!(
-        parts.iter().all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit())),
+        parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit())),
         "product Rust must be numeric x.y.z: {channel}"
     );
 
@@ -70,5 +77,9 @@ fn repository_product_toolchain_remains_patch_exact_and_independent() {
     assert!(
         !formal.contains(&format!("toolchain: {channel}")),
         "formal runner must use the pinned fmctl toolchain rather than silently coupling to product Rust"
+    );
+    assert!(
+        !formal.contains("rustup default \"$toolchain\""),
+        "formal runner must not replace the product repository's active Rust authority"
     );
 }
