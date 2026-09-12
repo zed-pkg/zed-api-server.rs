@@ -4,11 +4,15 @@ on:
   pull_request:
     paths:
       - .zpkg.toml
+      - Cargo.toml
+      - Cargo.lock
       - .github/workflows/zed-package-release.yml
   push:
     branches: [main]
     paths:
       - .zpkg.toml
+      - Cargo.toml
+      - Cargo.lock
       - .github/workflows/zed-package-release.yml
 
 permissions:
@@ -46,11 +50,24 @@ jobs:
           package = document['package']
           repository = package['repository']
           publish = document.get('publish', {})
+          cargo = tomllib.loads(Path('Cargo.toml').read_text(encoding='utf-8'))['package']
+          lock = tomllib.loads(Path('Cargo.lock').read_text(encoding='utf-8'))
 
           assert package['org'] == 'zed-pkg'
           assert package['name'] == 'zed-api-server'
+          assert cargo['name'] == package['name']
+          assert cargo['version'] == package['version']
           assert repository['url'].removesuffix('.git').rstrip('/') == \
               'https://github.com/zed-pkg/zed-api-server.rs'
+          assert cargo['repository'].removesuffix('.git').rstrip('/') == \
+              repository['url'].removesuffix('.git').rstrip('/')
+
+          local_lock_entries = [
+              entry for entry in lock.get('package', [])
+              if entry.get('name') == package['name'] and 'source' not in entry
+          ]
+          assert len(local_lock_entries) == 1
+          assert local_lock_entries[0]['version'] == package['version']
 
           version = package['version']
           assert re.fullmatch(r'[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}', version)
