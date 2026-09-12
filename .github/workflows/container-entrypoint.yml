@@ -1,0 +1,26 @@
+name: Container entrypoint contract
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-entrypoint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Ported from fiducia-cloud/fiducia-mcp-server.rs#43 (DEN-332). Hermetic: the
+  # test drives scripts/sops-entrypoint.sh with a synthetic sops stub, so no
+  # age identity, ciphertext, or image build is needed.
+  entrypoint-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify SOPS required-secret, literal-value, environment, and exec contracts
+        run: node --test scripts/sops-entrypoint.test.mjs
