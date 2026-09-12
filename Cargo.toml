@@ -69,6 +69,9 @@ toml = "0.9"
 uuid = { version = "1", features = ["v4", "serde"] }
 # Read-side only; deflate decoding reuses the flate2 backend already in-tree.
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+k8s-web-api-data-plane = { git = "https://github.com/ORESoftware/k8s-libs-and-shared-defs.git", rev = "55adadc9f6d223d40b28ae66097dfe16930951b1", package = "k8s-web-api-data-plane" }
+dotenvy = "0.15"
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "fast"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

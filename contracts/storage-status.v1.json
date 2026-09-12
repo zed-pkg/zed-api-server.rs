@@ -1,0 +1,27 @@
+{
+  "schema": "zed.storage-status.v1",
+  "backend": {
+    "kind": "object-store",
+    "provider": "cloudflare-r2",
+    "display_name": "Cloudflare R2",
+    "bucket": "zed-artifacts",
+    "region": "auto",
+    "endpoint_host": "abc123.r2.cloudflarestorage.com",
+    "path_style": false,
+    "durable": true
+  },
+  "health": {
+    "state": "reachable",
+    "latency_ms": 37
+  },
+  "usage": {
+    "artifact_count": 1284,
+    "total_bytes": 9317842944,
+    "largest_bytes": 73400320
+  },
+  "limits": {
+    "max_artifact_bytes": 104857600,
+    "max_buffered_artifact_bytes": 104857600
+  },
+  "observed_at": "2026-08-23T18:42:11Z"
+}

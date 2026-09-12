@@ -18,6 +18,21 @@ pub struct Model {
     #[sea_orm(column_type = "Json")]
     pub tags: Json,
     pub created_at: DateTimeUtc,
+    /// Monotonic index counter, bumped on every publish.
+    ///
+    /// A signed index served by a mirror is genuine forever, so freshness
+    /// cannot come from the signature. This counter is what lets a client
+    /// refuse an index older than one it has already seen, turning a silent
+    /// rollback — the way you hide a security release — into a loud failure.
+    #[sea_orm(default_value = 0)]
+    pub index_sequence: i64,
+    /// The publisher's signed version index, stored verbatim.
+    ///
+    /// The server can assemble the index's *contents* from its own rows, but
+    /// not the signature over them, so the document is kept whole rather than
+    /// rebuilt. Absent for publishers who do not sign.
+    #[sea_orm(column_type = "Json", nullable)]
+    pub signed_index: Option<Json>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

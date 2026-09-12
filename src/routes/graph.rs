@@ -1674,6 +1674,7 @@ url = "https://github.com/acme/http-kit"
             schema.create_table_from_entity(token::Entity),
             schema.create_table_from_entity(package::Entity),
             schema.create_table_from_entity(version::Entity),
+            schema.create_table_from_entity(crate::entities::publisher_key::Entity),
         ] {
             db.execute(backend.build(&stmt)).await.unwrap();
         }
@@ -1699,6 +1700,8 @@ url = "https://github.com/acme/http-kit"
             version_scheme: ActiveValue::Set("semver".to_string()),
             tags: ActiveValue::Set(serde_json::json!([])),
             created_at: ActiveValue::Set(Utc::now()),
+            index_sequence: ActiveValue::Set(1),
+            signed_index: ActiveValue::NotSet,
         }
         .insert(&db)
         .await
@@ -1715,6 +1718,8 @@ url = "https://github.com/acme/http-kit"
             artifact_key: ActiveValue::Set("artifacts/graph.tar.gz".to_string()),
             yanked: ActiveValue::Set(false),
             published_at: ActiveValue::Set(Utc::now()),
+            mirrors: ActiveValue::Set(serde_json::json!([])),
+            signatures: ActiveValue::Set(serde_json::json!([])),
         }
         .insert(&db)
         .await
@@ -1754,6 +1759,8 @@ url = "https://github.com/acme/http-kit"
                 shared_auth_audience: "zpkg-api".to_owned(),
                 shared_auth_application_id: "zpkg-web".to_owned(),
                 shared_auth_public_url: None,
+                mirrors: Vec::new(),
+                storage_backend: crate::storage_report::StorageBackend::process_memory(),
             }),
             8 * 1024 * 1024,
         )

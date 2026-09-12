@@ -20,8 +20,20 @@ pub struct AppState {
     /// closed when it is unavailable.
     pub registry_write: Option<WriteContext>,
     pub store: ArtifactStore,
+    /// Static, credential-free description of the configured backend, resolved
+    /// once at startup. Held on state rather than re-derived per request so the
+    /// console can never report a backend the process is not actually using.
+    pub storage_backend: crate::storage_report::StorageBackend,
     pub verifier: TagVerifier,
     pub public_base_url: String,
+    /// Mirrors this deployment advertises for its own contents, in try order.
+    ///
+    /// Configured rather than derived: only an operator knows which buckets and
+    /// hostnames actually front this bucket, and a wrong guess here would point
+    /// clients at a host that answers 404 during exactly the outage the list
+    /// exists for. Empty by default, which is the correct answer for a
+    /// self-hosted deployment with no CDN.
+    pub mirrors: Vec<zed_interfaces::mirror::MirrorDescriptorV1>,
     /// Stable graph-node identity; deliberately independent of ingress URLs.
     pub registry_id: String,
     pub max_orgs_per_token: u64,

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use aws_sdk_s3::presigning::PresigningConfig;
@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::config::StorageConfig;
+use crate::storage_report::{ObjectHead, StorageBackend, StorageHealth, redact_backend_error};
 
 /// Artifact storage: bounded process memory for disposable certification,
 /// local disk for development/self-hosting, or any S3-compatible endpoint
@@ -480,6 +481,165 @@ impl ArtifactStore {
         }
         Ok(())
     }
+}
+
+/// Read-only introspection, for the storage console.
+///
+/// These are the only methods that describe the backend rather than move bytes
+/// through it. Each returns a value from [`crate::storage_report`]; none of them
+/// can mutate the store, and none of them is provider-specific — the same three
+/// calls answer the same three questions on R2, S3, GCS, MinIO, a directory, or
+/// process memory.
+impl ArtifactStore {
+    /// Identity of this backend: what kind it is, which vendor is behind it,
+    /// and the non-secret configuration an operator would recognize.
+    ///
+    /// Derived from live state rather than re-read from configuration, so the
+    /// console cannot report a bucket the process is not actually using.
+    #[must_use]
+    pub fn describe(&self, config: &StorageConfig) -> StorageBackend {
+        match (self, config) {
+            (Self::Memory { .. }, _) => StorageBackend::process_memory(),
+            (Self::Local { dir }, _) => StorageBackend::filesystem(dir.display().to_string()),
+            (
+                Self::S3 { bucket, .. },
+                StorageConfig::S3 {
+                    endpoint_url,
+                    region,
+                    force_path_style,
+                    ..
+                },
+            ) => StorageBackend::object_store(
+                bucket,
+                region,
+                endpoint_url.as_deref(),
+                *force_path_style,
+            ),
+            // The store was built from this config, so the arms above are
+            // exhaustive in practice. Describing the live variant with unknown
+            // endpoint details still beats claiming a backend we do not have.
+            (Self::S3 { bucket, .. }, _) => {
+                StorageBackend::object_store(bucket, String::new(), None, false)
+            }
+        }
+    }
+
+    /// Ask the backend whether it is answering, without reading an object.
+    ///
+    /// A bucket-level HEAD is the cheapest S3-compatible liveness question and
+    /// is priced as a request rather than as a listing. Failures are reported,
+    /// never propagated: a console that 500s when storage is down cannot tell
+    /// anyone that storage is down.
+    pub async fn probe(&self) -> StorageHealth {
+        let started = Instant::now();
+        let outcome: Result<()> = match self {
+            Self::Memory { .. } => Ok(()),
+            Self::Local { dir } => tokio::fs::metadata(dir)
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|meta| {
+                    if meta.is_dir() {
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!("{} is not a directory", dir.display()))
+                    }
+                }),
+            Self::S3 { client, bucket } => client
+                .head_bucket()
+                .bucket(bucket)
+                .send()
+                .await
+                .map(|_| ())
+                .map_err(|error| anyhow::anyhow!("{error}")),
+        };
+        match outcome {
+            Ok(()) => StorageHealth::Reachable {
+                latency_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            },
+            Err(error) => StorageHealth::Unreachable {
+                reason: redact_backend_error(&format!("{error}")),
+            },
+        }
+    }
+
+    /// What the backend knows about one object, without downloading it.
+    ///
+    /// `Ok(None)` is "the store does not have this key" — an ordinary answer
+    /// for a console reconciling the registry against the store. `Err` is
+    /// reserved for a backend that could not be asked at all.
+    pub async fn head(&self, key: &str) -> Result<Option<ObjectHead>> {
+        match self {
+            Self::Memory { objects, .. } => {
+                Ok(objects.read().await.get(key).map(|bytes| ObjectHead {
+                    size: Some(bytes.len() as u64),
+                    ..ObjectHead::default()
+                }))
+            }
+            Self::Local { dir } => match tokio::fs::metadata(Self::local_path(dir, key)).await {
+                Ok(meta) => Ok(Some(ObjectHead {
+                    size: Some(meta.len()),
+                    last_modified: meta
+                        .modified()
+                        .ok()
+                        .and_then(|time| {
+                            time.duration_since(std::time::UNIX_EPOCH)
+                                .ok()
+                                .and_then(|since| i64::try_from(since.as_millis()).ok())
+                        })
+                        .and_then(rfc3339_from_millis),
+                    ..ObjectHead::default()
+                })),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error).context("reading local artifact metadata"),
+            },
+            Self::S3 { client, bucket } => {
+                let response = client.head_object().bucket(bucket).key(key).send().await;
+                match response {
+                    Ok(object) => Ok(Some(ObjectHead {
+                        size: object.content_length().map(|len| len.max(0) as u64),
+                        sha256: object
+                            .metadata()
+                            .and_then(|meta| meta.get(ARTIFACT_SHA256_METADATA_KEY).cloned()),
+                        content_type: object.content_type().map(str::to_owned),
+                        cache_control: object.cache_control().map(str::to_owned),
+                        last_modified: object
+                            .last_modified()
+                            .and_then(|time| time.to_millis().ok())
+                            .and_then(rfc3339_from_millis),
+                    })),
+                    // A HEAD on an absent key is a 404, which the SDK surfaces
+                    // as a typed NotFound rather than a transport failure.
+                    Err(error) => {
+                        let rendered = format!("{error}");
+                        if is_not_found(&rendered) {
+                            Ok(None)
+                        } else {
+                            Err(anyhow::anyhow!(redact_backend_error(&rendered)))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Milliseconds since the Unix epoch as an RFC 3339 UTC timestamp.
+fn rfc3339_from_millis(millis: i64) -> Option<String> {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(millis)
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
+
+/// Does a rendered S3 error describe an absent key?
+///
+/// Matched on the rendered error rather than the typed variant so the same
+/// predicate holds across S3-compatible services, which do not agree on how the
+/// SDK models a missing object.
+fn is_not_found(rendered: &str) -> bool {
+    let lowered = rendered.to_ascii_lowercase();
+    lowered.contains("notfound")
+        || lowered.contains("not found")
+        || lowered.contains("nosuchkey")
+        || lowered.contains("status code: 404")
 }
 
 pub fn artifact_key(sha256: &str, extension: &str) -> String {

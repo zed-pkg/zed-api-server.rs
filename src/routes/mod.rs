@@ -7,12 +7,15 @@ mod artifacts;
 mod audit;
 mod graph;
 mod graph_exports;
+pub(crate) mod keys;
 mod list;
+mod mirrors;
 mod orgs;
 mod packages;
 mod publish;
 mod search;
 mod semantic;
+mod storage;
 mod yank;
 
 use std::sync::Arc;
@@ -38,9 +41,22 @@ pub const ROUTE_PACKAGES_LIST: &str = "/v1/packages";
 pub const ROUTE_SEMANTIC: &str = "/v1/search/semantic";
 pub const ROUTE_EMBEDDING: &str = "/v1/packages/{org}/{name}/embedding";
 pub const ROUTE_ORGS: &str = "/v1/orgs";
+/// Anonymous read of an org's publisher signing keys; owner-scoped write.
+pub const ROUTE_ORG_KEYS: &str = "/v1/orgs/{org}/keys";
+/// The mirror set this deployment advertises for its own contents.
+pub const ROUTE_MIRRORS: &str = "/v1/mirrors";
+/// The same document at the path every mirror kind serves it from, so a client
+/// that cannot reach this route can still find one somewhere.
+pub const ROUTE_MIRROR_BOOTSTRAP: &str = zed_interfaces::mirror::MIRROR_BOOTSTRAP_PATH;
+/// A package's version index in the shape a mirror serves it.
+pub const ROUTE_SIGNED_INDEX: &str = "/v1/packages/{org}/{name}/signed-index";
 pub const ROUTE_AUDIT: &str = "/v1/orgs/{org}/audit";
 pub const ROUTE_AUDIT_VERIFY: &str = "/v1/orgs/{org}/audit/verify";
 pub const ROUTE_FILES: &str = "/v1/files/{org}/{name}/{version}/{*path}";
+/// Read-only description of the configured artifact backend.
+pub const ROUTE_STORAGE_STATUS: &str = "/v1/storage/status";
+/// Read-only reconciliation of one artifact against that backend.
+pub const ROUTE_STORAGE_ARTIFACT: &str = "/v1/storage/artifacts/{sha256}";
 pub const ROUTE_DECLARED_GRAPH: &str =
     "/v1/packages/{org}/{name}/versions/{version}/dependency-graph";
 pub const ROUTE_DECLARED_GRAPH_EXPORT: &str =
@@ -122,6 +138,16 @@ pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
     // small JSON document (or none). The 100 MB publish limit applied
     // globally would let a client stream ~100 MB at the cheap JSON endpoints,
     // so scope the large limit to publish and default the rest to 64 KiB.
+    // The storage console's ceilings are the server's own, so they are handed
+    // to the handlers rather than duplicated in a client that would drift.
+    let storage_routes = Router::new()
+        .route(ROUTE_STORAGE_STATUS, get(storage::status))
+        .route(ROUTE_STORAGE_ARTIFACT, get(storage::artifact))
+        .layer(axum::Extension(crate::storage_report::StorageLimits {
+            max_artifact_bytes: max_artifact_bytes as u64,
+            max_buffered_artifact_bytes: crate::storage::MAX_BUFFERED_ARTIFACT_BYTES,
+        }));
+
     let publish_route = Router::new()
         .route(
             ROUTE_VERSION,
@@ -141,10 +167,18 @@ pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
         .route(ROUTE_SEARCH, get(search::search))
         .route(ROUTE_SEMANTIC, post(semantic::semantic_search))
         .route(ROUTE_ORGS, post(orgs::claim_org))
+        .route(ROUTE_ORG_KEYS, get(keys::get_keys).put(keys::put_keys))
+        .route(ROUTE_MIRRORS, get(mirrors::get_mirrors))
+        .route(ROUTE_MIRROR_BOOTSTRAP, get(mirrors::get_bootstrap))
+        .route(
+            ROUTE_SIGNED_INDEX,
+            get(mirrors::get_signed_index).put(mirrors::put_signed_index),
+        )
         .route(ROUTE_AUDIT, get(audit::get_audit_log))
         .route(ROUTE_AUDIT_VERIFY, get(audit::verify_audit_log))
         .merge(artifact_routes)
         .merge(graph_routes)
+        .merge(storage_routes)
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
         .merge(publish_route)
         // Charge authenticated requests against their token's bucket before
@@ -268,6 +302,11 @@ pub(super) fn version_metadata(
         ),
         published_at: row.published_at.to_rfc3339(),
         yanked: row.yanked,
+        // Stored verbatim and returned verbatim: the publisher's signature
+        // covers these exact bytes, so any normalization here would break
+        // verification for every consumer.
+        mirrors: serde_json::from_value(row.mirrors.clone()).unwrap_or_default(),
+        signatures: serde_json::from_value(row.signatures.clone()).unwrap_or_default(),
     }
 }
 
@@ -295,6 +334,8 @@ mod tests {
             artifact_key: format!("artifacts/{identity}.tar.gz"),
             yanked,
             published_at: Utc::now() + Duration::seconds(published_offset),
+            mirrors: serde_json::json!([]),
+            signatures: serde_json::json!([]),
         }
     }
 
@@ -347,6 +388,16 @@ mod tests {
         assert_eq!(ROUTE_ORGS, r::orgs_path());
         assert_eq!(fill(ROUTE_AUDIT), r::audit_path("acme"));
         assert_eq!(fill(ROUTE_AUDIT_VERIFY), r::audit_verify_path("acme"));
+        assert_eq!(fill(ROUTE_ORG_KEYS), r::org_keys_path("acme"));
+        assert_eq!(ROUTE_MIRRORS, r::mirrors_path());
+        assert_eq!(
+            ROUTE_MIRROR_BOOTSTRAP,
+            zed_interfaces::mirror::MIRROR_BOOTSTRAP_PATH
+        );
+        assert_eq!(
+            fill(ROUTE_SIGNED_INDEX),
+            r::signed_index_path("acme", "http-kit")
+        );
         assert_eq!(
             fill(ROUTE_FILES),
             r::file_path("acme", "http-kit", "1.2.0", "dist/style.css")
@@ -402,6 +453,8 @@ mod tests {
             shared_auth_audience: "zed-pkg".to_string(),
             shared_auth_application_id: "zed-pkg".to_string(),
             shared_auth_public_url: None,
+            mirrors: Vec::new(),
+            storage_backend: crate::storage_report::StorageBackend::process_memory(),
         });
         let app = router(state, 1024 * 1024);
         let response = app
@@ -437,6 +490,8 @@ mod tests {
             shared_auth_audience: "zed-pkg".to_string(),
             shared_auth_application_id: "zed-pkg".to_string(),
             shared_auth_public_url: None,
+            mirrors: Vec::new(),
+            storage_backend: crate::storage_report::StorageBackend::process_memory(),
         })
     }
 

@@ -8,6 +8,7 @@ mod m20260724_000005_token_lifecycle;
 mod m20260725_000006_audit_log;
 mod m20260726_000007_embeddings_and_tags;
 pub mod m20260726_000008_audit_chain;
+mod m20260828_000009_mirrors_and_publisher_keys;
 
 pub struct Migrator;
 
@@ -23,6 +24,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260725_000006_audit_log::Migration),
             Box::new(m20260726_000007_embeddings_and_tags::Migration),
             Box::new(m20260726_000008_audit_chain::Migration),
+            Box::new(m20260828_000009_mirrors_and_publisher_keys::Migration),
         ]
     }
 }

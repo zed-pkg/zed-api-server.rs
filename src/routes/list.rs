@@ -144,6 +144,8 @@ mod tests {
             version_scheme: ActiveValue::Set("semver".to_string()),
             tags: ActiveValue::Set(tags),
             created_at: ActiveValue::Set(Utc::now()),
+            index_sequence: ActiveValue::Set(1),
+            signed_index: ActiveValue::NotSet,
         }
         .insert(db)
         .await
