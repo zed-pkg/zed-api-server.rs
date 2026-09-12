@@ -31,3 +31,6 @@ temp/worktrees
 # ores-sops dotenv hardening: plaintext dotenv is local-only at every depth;
 # only env/enc/*.env.enc (sops ciphertext) is tracked. See env/README.md.
 **/**/*.env
+
+# typespec-json-schema-validator comparison evidence (generated; never an authority)
+.typespec-json-schema-validator/
