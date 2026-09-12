@@ -1,0 +1,67 @@
+name: Refresh Fiducia lock evidence
+
+on:
+  push:
+    branches:
+      - fix/pin-fiducia-client-20260910
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/refresh-fiducia-lock.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh-fiducia-lock-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact branch head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify exact branch head
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Install pinned repository toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.98.1
+
+      - name: Verify canonical Fiducia lock source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          sha = "d8df52a8fc4451e6b358d4085eb30ba8eb46d6d7"
+          repository = "https://github.com/fiducia-cloud/fiducia-clients.git"
+          canonical = f'source = "git+{repository}?rev={sha}#{sha}"'
+          legacy = f'source = "git+{repository}#{sha}"'
+          lock = Path("Cargo.lock").read_text()
+          assert lock.count(canonical) == 1, "expected exactly one canonical immutable Fiducia lock source"
+          assert legacy not in lock, "legacy unqualified Fiducia source remains"
+          PY
+          cp Cargo.lock Cargo.lock.before
+          cargo update -p fiducia-client --precise d8df52a8fc4451e6b358d4085eb30ba8eb46d6d7
+          cmp -s Cargo.lock.before Cargo.lock
+          git diff --exit-code -- Cargo.toml Cargo.lock
+          cargo metadata --locked --format-version 1 >/dev/null
+
+      - name: Upload validated lockfile
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fiducia-cargo-lock
+          path: Cargo.lock
+          if-no-files-found: error
+          retention-days: 1
