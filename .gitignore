@@ -1,9 +1,7 @@
 /target
-/.zed/
 /.data
 /.formal-artifacts
 /.formal-tools
-/.vendor/.zed/
 /_apalache-out
 
 # Local secrets. Provider credentials enter this repo only as sops ciphertext
@@ -19,7 +17,7 @@ env/dec/*
 !env/enc/*.env.enc
 !env/template.env.example
 
-# nix devShell artifacts
+# Nix devShell artifacts and local worktree scratch space.
 .direnv/
 result
 result-*
@@ -28,6 +26,8 @@ temp
 tmp/worktrees
 temp/worktrees
 
+/.zed/
+/.vendor/.zed/
 # ores-sops dotenv hardening: plaintext dotenv is local-only at every depth;
 # only env/enc/*.env.enc (sops ciphertext) is tracked. See env/README.md.
 **/**/*.env
