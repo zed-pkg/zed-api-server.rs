@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -22,24 +22,51 @@ jobs:
       NO_COLOR: '1'
       RUST_BACKTRACE: '1'
     steps:
-      - name: Checkout Zed API server
+      - name: Check out exact Zed API candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Verify exact Zed API candidate
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
       # fmctl is still incubating in opto-sync while DEN-580 extracts the same
       # manifest/process contract into ORESoftware/formal-methods.rs. Pin the
       # exact source revision so verifier behavior cannot drift under this job.
-      - name: Checkout the pinned fmctl incubator
+      - name: Check out the pinned fmctl incubator
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: opto-sync/opto-sync-clients
           ref: c2146ef9f054d24e1488c216547852aa148285cf
           path: .formal-tools/opto-sync-clients
           persist-credentials: false
+          fetch-depth: 1
+          show-progress: false
 
-      - name: Install the fmctl Rust toolchain
-        uses: dtolnay/rust-toolchain@2eae45db285e407f22119950686d47e1101e071b
+      - name: Verify fmctl source and install its exact Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C .formal-tools/opto-sync-clients rev-parse HEAD)" = \
+            "c2146ef9f054d24e1488c216547852aa148285cf"
+          toolchain="$(sed -n 's/^channel = "\([^"]*\)"/\1/p' \
+            .formal-tools/opto-sync-clients/tools/fmctl/rust-toolchain.toml)"
+          [[ "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          rustup toolchain install "$toolchain" \
+            --profile minimal \
+            --component rustfmt \
+            --component clippy \
+            --no-self-update
+          test "$(rustc +"$toolchain" --version | awk '{print $2}')" = "$toolchain"
+          echo "FMCTL_RUST_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
 
       - name: Install Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -53,20 +80,26 @@ jobs:
           java-version: 21
 
       - name: Build the pinned fmctl runner
+        shell: bash
         run: |
+          set -euo pipefail
           # Build outside the Zed Cargo workspace. Leaving the standalone crate
           # beneath this repository makes Cargo discover the product workspace
           # and resolve product-only path dependencies before compiling fmctl.
           mkdir -p "$RUNNER_TEMP/fmctl-source"
           cp -R .formal-tools/opto-sync-clients/tools/fmctl/. "$RUNNER_TEMP/fmctl-source/"
-          cargo build \
+          cargo +"$FMCTL_RUST_TOOLCHAIN" build \
             --locked \
             --release \
             --manifest-path "$RUNNER_TEMP/fmctl-source/Cargo.toml"
-          echo "FMCTL=$RUNNER_TEMP/fmctl-source/target/release/fmctl" >> "$GITHUB_ENV"
+          fmctl="$RUNNER_TEMP/fmctl-source/target/release/fmctl"
+          test -x "$fmctl"
+          echo "FMCTL=$fmctl" >> "$GITHUB_ENV"
 
       - name: Validate all formal-methods manifests
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p \
             .formal-artifacts/fmctl \
             .formal-artifacts/latest-selection \
@@ -91,26 +124,34 @@ jobs:
             | tee .formal-artifacts/local-rate-limit-guard/validate.json
 
       - name: Record and validate the formal toolchain
+        shell: bash
         run: |
+          set -euo pipefail
           "$FMCTL" --format json doctor \
             | tee .formal-artifacts/fmctl/doctor.json
 
       - name: Type-check all registry models
+        shell: bash
         run: |
+          set -euo pipefail
           "$FMCTL" check
           "$FMCTL" --manifest formal/latest_selection.fm.toml check
           "$FMCTL" --manifest formal/dependency_resolution.fm.toml check
           "$FMCTL" --manifest formal/local_rate_limit_guard.fm.toml check
 
       - name: Reach every configured registry witness
+        shell: bash
         run: |
+          set -euo pipefail
           "$FMCTL" simulate
           "$FMCTL" --manifest formal/latest_selection.fm.toml simulate
           "$FMCTL" --manifest formal/dependency_resolution.fm.toml simulate
           "$FMCTL" --manifest formal/local_rate_limit_guard.fm.toml simulate
 
       - name: Exhaust all finite registry state graphs
+        shell: bash
         run: |
+          set -euo pipefail
           "$FMCTL" verify
           "$FMCTL" --manifest formal/latest_selection.fm.toml verify
           "$FMCTL" --manifest formal/dependency_resolution.fm.toml verify
@@ -120,7 +161,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: zed-api-registry-formal-methods
+          name: zed-api-registry-formal-methods-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             .formal-artifacts/
             formal/fm.toml
