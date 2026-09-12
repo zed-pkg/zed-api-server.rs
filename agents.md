@@ -49,7 +49,6 @@ Functional programming is mostly the following:
 + composition
 + effects pushed outward
 + illegal states excluded by types
-
 ## Functional programming conformance
 
 This repository carries an FP conformance ratchet. Before you land a change:
@@ -64,3 +63,10 @@ the new violations. When you clear a class of violation, lower the budget in the
 same commit with `--write-budget`.
 
 The principles, the rule codes and the remedy for each are in `FP-GUIDELINES.md`.
+
+## Repository-local Git worktrees
+
+- Create or use a Git worktree only when the human operator explicitly authorizes it for the current task. Concurrency or a dirty checkout is not permission by itself.
+- Put every authorized worktree at `<repository-root>/tmp/worktrees/<name>`; from the repository root, use `./tmp/worktrees/<name>`. Never place worktrees beside repositories or organization directories.
+- Keep `tmp`, `temp`, `tmp/worktrees`, and `temp/worktrees` ignored in the repository-root `.gitignore`. Do not commit files from those directories.
+- Relocate or remove a worktree only when the operator explicitly requests it. Before removal, preserve and publish intended changes, verify its commit is represented on the target branch, and confirm there are no tracked, untracked, ignored-sensitive, or in-use files that must survive. Remove it with `git worktree remove <path>` without `--force`; never delete a worktree directory with `rm`.
