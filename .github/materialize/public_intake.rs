@@ -910,7 +910,7 @@ mod tests {
     }
 
     #[test]
-    fn common_field_inventory_is a subset of every request shape() {
+    fn common_field_inventory_is_a_subset_of_every_request_shape() {
         for field in COMMON_FIELDS {
             assert!(PRE_INTEREST_FIELDS.contains(field));
             assert!(QUOTE_FIELDS.contains(field));
