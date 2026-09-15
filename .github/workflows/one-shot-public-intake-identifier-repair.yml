@@ -1,0 +1,52 @@
+name: One-shot public intake identifier repair
+
+on:
+  push:
+    branches:
+      - fix/public-intake-test-identifier-20260915
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repair branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: fix/public-intake-test-identifier-20260915
+          fetch-depth: 0
+
+      - name: Restore baseline files and repair only malformed identifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git show origin/main:src/public_intake.rs > src/public_intake.rs
+          git show origin/main:.github/materialize/public_intake.rs > .github/materialize/public_intake.rs
+
+          old='fn public_response_shapes cannot_reflect_submitted_identity()'
+          new='fn public_response_shapes_cannot_reflect_submitted_identity()'
+          for file in src/public_intake.rs .github/materialize/public_intake.rs; do
+            test "$(grep -Foc "$old" "$file")" -eq 1
+            perl -0pi -e 's/fn public_response_shapes cannot_reflect_submitted_identity\(\)/fn public_response_shapes_cannot_reflect_submitted_identity()/g' "$file"
+            test "$(grep -Foc "$old" "$file" || true)" -eq 0
+            test "$(grep -Foc "$new" "$file")" -eq 1
+          done
+
+          git diff --check
+          test "$(git diff --numstat -- src/public_intake.rs | awk '{print $1+$2}')" -eq 2
+          test "$(git diff --numstat -- .github/materialize/public_intake.rs | awk '{print $1+$2}')" -eq 2
+
+      - name: Commit minimal repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/public_intake.rs .github/materialize/public_intake.rs
+          git diff --cached --check
+          git commit -m 'fix: repair public intake test identifier'
+          git push origin HEAD:fix/public-intake-test-identifier-20260915
