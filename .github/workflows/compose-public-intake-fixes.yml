@@ -1,0 +1,49 @@
+name: compose public intake parser fixes
+
+on:
+  push:
+    branches:
+      - ci/private-git-auth-current-main-20260915
+    paths:
+      - .github/workflows/compose-public-intake-fixes.yml
+
+permissions:
+  contents: write
+
+jobs:
+  compose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ci/private-git-auth-current-main-20260915
+          persist-credentials: true
+      - name: Apply exact parser repairs
+        shell: bash
+        run: |
+          set -euo pipefail
+          first='fn public_response_shapes cannot_reflect_submitted_identity() {'
+          first_fixed='fn public_response_shapes_cannot_reflect_submitted_identity() {'
+          second='fn common_field_inventory_is a subset of every request shape() {'
+          second_fixed='fn common_field_inventory_is_a_subset_of_every_request_shape() {'
+          [[ "$(grep -Fxc "$first" src/public_intake.rs)" == 1 ]]
+          [[ "$(grep -Fxc "$second" .github/materialize/public_intake.rs)" == 1 ]]
+          sed -i "s/^    fn public_response_shapes cannot_reflect_submitted_identity() {/    fn public_response_shapes_cannot_reflect_submitted_identity() {/" src/public_intake.rs
+          sed -i "s/^    fn common_field_inventory_is a subset of every request shape() {/    fn common_field_inventory_is_a_subset_of_every_request_shape() {/" .github/materialize/public_intake.rs
+          [[ "$(grep -Fxc "    $first_fixed" src/public_intake.rs)" == 1 ]]
+          [[ "$(grep -Fxc "    $second_fixed" .github/materialize/public_intake.rs)" == 1 ]]
+          rm .github/workflows/compose-public-intake-fixes.yml
+          git diff --check
+          changed=$(git diff --name-only | sort)
+          expected=$(printf '%s\n' '.github/materialize/public_intake.rs' '.github/workflows/compose-public-intake-fixes.yml' 'src/public_intake.rs' | sort)
+          [[ "$changed" == "$expected" ]]
+      - name: Commit composed repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'ORESoftware automation'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/public_intake.rs .github/materialize/public_intake.rs .github/workflows/compose-public-intake-fixes.yml
+          git commit -m 'fix: compose public intake parser repairs with private Git auth'
+          git push origin HEAD:ci/private-git-auth-current-main-20260915
