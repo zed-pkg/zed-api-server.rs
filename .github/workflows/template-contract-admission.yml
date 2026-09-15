@@ -1,0 +1,35 @@
+name: template contract admission
+on:
+  pull_request:
+    paths: ['.ores-*.toml','.shared-auth.toml','.ores-config-authorities.json','config/ores-middleware-stack.json','template-contracts/**','.github/workflows/template-contract-admission.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  local-admission:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.85.0
+      - run: cargo test --manifest-path template-contracts/Cargo.toml
+      - name: Check config bundle
+        shell: python
+        run: |
+          import json,tomllib,pathlib
+          r=pathlib.Path('.')
+          a=json.loads((r/'.ores-config-authorities.json').read_text())
+          assert a['schemaVersion']==1 and a['authorities']['sharedAuth']['canonicalConfig']=='.shared-auth.toml'
+          assert not (r/'.auth-shared.toml').exists(), 'compatibility alias must not coexist with canonical .shared-auth.toml'
+          mw=tomllib.loads((r/'.ores-mw.toml').read_text()); rl=tomllib.loads((r/'.ores-rl.toml').read_text()); lru=tomllib.loads((r/'.ores-lru.toml').read_text()); auth=tomllib.loads((r/'.shared-auth.toml').read_text())
+          assert mw['repository_mode']=='server-only' and mw['default_target']=='api'
+          assert rl['server']['keyHmacEnv']=='ORES_RL_HMAC_KEY' and rl['policies'][0]['backendFailureMode']=='fail-closed'
+          assert lru['redis']['urlEnv']=='REDIS_URL' and lru['defaults']['failOpenOnStartup'] is False
+          assert auth['compatibility']['commit']==a['authorities']['sharedAuth']['revision']
+          stack=json.loads((r/'config/ores-middleware-stack.json').read_text()); assert stack['integrations']['sharedAuth']['mode']=='disabled' and stack['integrations']['oresOtel']['enabled'] is True
+      - run: git diff --exit-code HEAD
