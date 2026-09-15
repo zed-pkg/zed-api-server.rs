@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "authorities": {
-    "middleware": {"repository":"ORESoftware/ores-middleware","revision":"ee75f0a67cf23895500846402fbc757aa0686530","typespec":"contracts/ores-mw-config/typespec/main.tsp","jsonSchema":"contracts/ores-mw-config/json-schema/ores-mw-config.schema.json","stackTypespec":"contracts/typespec/main.tsp","stackJsonSchema":"contracts/json-schema/middleware-stack.schema.json"},
+    "middleware": {"repository":"ORESoftware/ores-middleware","revision":"a99b7609200c076bedab58d14581d64b57c04387","typespec":"contracts/ores-mw-config/typespec/main.tsp","jsonSchema":"contracts/ores-mw-config/json-schema/ores-mw-config.schema.json","stackTypespec":"contracts/typespec/main.tsp","stackJsonSchema":"contracts/json-schema/middleware-stack.schema.json"},
     "rateLimit": {"repository":"ores-rate-limit/ores-rl-interfaces","revision":"241353d0f5269450690d9646be03db2aba59a2ae","typespec":"typespec/rate-limit-config.v1.tsp","jsonSchema":"json-schema/rate-limit-config.v1.schema.json","mapping":"tjsv/rate-limit-config.v1.mapping.json"},
     "lru": {"repository":"ores-redis-lru-cache/ores-lru-redis-interfaces","revision":"4474d240b38a4fe1dd24f01dcd2e9ab7a4c34b27","typespec":"contracts/typespec/main.tsp","jsonSchema":"contracts/json-schema/authored.schema.json"},
     "sharedAuth": {"repository":"shared-auth/shared-auth-interfaces","revision":"52b7ac7fbf0c7c169684f613eda923f3aa6c82e9","typespec":"contracts/shared-auth-config/main.tsp","jsonSchema":"schema/shared-auth-config.schema.json","canonicalConfig":".shared-auth.toml","compatibilityAliases":[".auth-shared.toml"]},
