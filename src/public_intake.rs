@@ -978,7 +978,7 @@ mod tests {
 
     #[test]
     fn hmac_implementation_matches_the_reviewed_known_vector() {
-        let body = br#"{"schema":"zed.public-intake.v1"}"#;
+        let body = br#"{\"schema\":\"zed.public-intake.v1\"}"#;
         assert_eq!(
             hex::encode(sha256(body)),
             "a619783cf12a5f68a4ec7b009daa16acd249401c08987b6608e004d650794a42"
@@ -1002,7 +1002,7 @@ mod tests {
 
     #[test]
     fn signature_body_host_path_and_time_are_all_authority_inputs() {
-        let body = br#"{"schema":"zed.public-intake.v1"}"#;
+        let body = br#"{\"schema\":\"zed.public-intake.v1\"}"#;
         let headers = signed_headers(body);
         for result in [
             verify_edge_headers(
@@ -1098,7 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn public_response_shapes cannot_reflect_submitted_identity() {
+    fn public_response_shapes_cannot_reflect_submitted_identity() {
         let accepted = respond(Ok(()));
         assert_eq!(accepted.status(), StatusCode::ACCEPTED);
         let error = PublicApiError::invalid_request().into_response();
