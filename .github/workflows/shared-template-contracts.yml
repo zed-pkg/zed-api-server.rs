@@ -10,17 +10,32 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with: { persist-credentials: false }
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with: { toolchain: 1.88.0 }
       - run: cargo test --manifest-path template-shared/Cargo.toml
-      - shell: python
+      - name: Check authority, schema, and workspace invariants
+        shell: python
         run: |
           import json,pathlib,tomllib
           r=pathlib.Path('.')
           lock=json.loads((r/'.ores-config-authorities.json').read_text()); assert lock['schemaVersion']==1
+          expected={'middleware','rateLimit','lru','sharedAuth','tjsv'}
+          assert set(lock['authorities']) == expected
           assert (r/'.shared-auth.toml').is_file() and not (r/'.auth-shared.toml').exists()
-          for n in ('middleware','rateLimit','lru','sharedAuth','tjsv'):
+          for n in expected:
               rev=lock['authorities'][n]['revision']; assert len(rev)==40 and all(c in '0123456789abcdef' for c in rev)
-          for p in ('.ores-mw.toml','.ores-rl.toml','.ores-lru.toml','.shared-auth.toml'): tomllib.loads((r/p).read_text())
+          mw=tomllib.loads((r/'.ores-mw.toml').read_text())
+          rl=tomllib.loads((r/'.ores-rl.toml').read_text())
+          lru=tomllib.loads((r/'.ores-lru.toml').read_text())
+          auth=tomllib.loads((r/'.shared-auth.toml').read_text())
+          crate=tomllib.loads((r/'template-shared/Cargo.toml').read_text())
+          assert mw['schema_version']==1 and mw['repository_mode']=='server-only'
+          assert rl['schemaVersion']=='ores.rate-limit.config.v1' and rl['layout']=='server-only'
+          assert lru['protocol']=='ores.lru-config.v1'
+          assert auth['schema_version']==1
+          assert auth['compatibility']['commit']==lock['authorities']['sharedAuth']['revision']
+          assert 'workspace' in crate
           assert json.loads((r/'config/ores-middleware-stack.json').read_text())['contractVersion']=='1.0.0'
