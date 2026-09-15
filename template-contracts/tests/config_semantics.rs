@@ -5,23 +5,29 @@ const MIDDLEWARE: &str = include_str!("../../.ores-mw.toml");
 const RATE_LIMIT: &str = include_str!("../../.ores-rl.toml");
 const STACK: &str = include_str!("../../config/ores-middleware-stack.json");
 
+fn compact_json(input: &str) -> String {
+    input.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
 #[test]
 fn pins_reviewed_middleware_authority() {
-    assert!(AUTHORITIES.contains("a99b7609200c076bedab58d14581d64b57c04387"));
-    assert!(AUTHORITIES.contains("\"stackTypespec\":\"contracts/typespec/main.tsp\""));
-    assert!(AUTHORITIES.contains("\"stackJsonSchema\":\"contracts/json-schema/middleware-stack.schema.json\""));
+    let authorities = compact_json(AUTHORITIES);
+    assert!(authorities.contains("a99b7609200c076bedab58d14581d64b57c04387"));
+    assert!(authorities.contains("\"stackTypespec\":\"contracts/typespec/main.tsp\""));
+    assert!(authorities.contains("\"stackJsonSchema\":\"contracts/json-schema/middleware-stack.schema.json\""));
 }
 
 #[test]
 fn api_role_invariants_are_fail_closed() {
+    let stack = compact_json(STACK);
     assert!(MIDDLEWARE.contains("default_target = \"api\""));
     assert!(RATE_LIMIT.contains("keyHmacEnv = \"ORES_RL_HMAC_KEY\""));
     assert!(RATE_LIMIT.contains("backendFailureMode = \"fail-closed\""));
-    assert!(STACK.contains("\"idempotency\": {\"enabled\": true"));
-    assert!(STACK.contains("\"requiredMethods\": [\"POST\", \"PUT\", \"PATCH\"]"));
-    assert!(STACK.contains("\"testAuthBypass\": {\"enabled\": false, \"headerName\": \"x-ores-"));
-    assert!(!STACK.contains("X-ORES-"));
-    assert!(!STACK.contains(": null"));
+    assert!(stack.contains("\"idempotency\":{\"enabled\":true"));
+    assert!(stack.contains("\"requiredMethods\":[\"POST\",\"PUT\",\"PATCH\"]"));
+    assert!(stack.contains("\"testAuthBypass\":{\"enabled\":false,\"headerName\":\"x-ores-"));
+    assert!(!stack.contains("X-ORES-"));
+    assert!(!stack.contains("\":null"));
 }
 
 #[test]
