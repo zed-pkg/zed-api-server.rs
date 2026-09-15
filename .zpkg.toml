@@ -2,6 +2,7 @@
 org = "zed-pkg"
 name = "zed-api-server"
 version = "0.1.1"
+kind = "server"
 description = "Zed registry and account API server with PostgreSQL metadata and S3/R2 artifact storage"
 license = "MIT"
 keywords = ["zed-pkg", "package-manager", "registry", "postgres", "r2"]
@@ -14,7 +15,7 @@ url = "https://github.com/zed-pkg/zed-api-server.rs"
 [publish]
 include_readme = true
 tag_format = "v{version}"
-smoke_test = "test -f \"$ZED_PKG_TEST_TARGET/src/main.rs\" && test -f \"$ZED_PKG_TEST_TARGET/src/routes/publish.rs\" && test -f \"$ZED_PKG_TEST_TARGET/schema/schema.sql\""
+smoke_test = "sh \"$ZED_PKG_TEST_TARGET/scripts/tests/smoke-published-artifact.sh\""
 exclude = [
   ".env",
   ".env.*",
