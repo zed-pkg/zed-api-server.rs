@@ -19,44 +19,28 @@ jobs:
           ref: fix/public-intake-test-identifier-20260915
           fetch-depth: 0
 
-      - name: Restore baseline files and repair only malformed identifier
+      - name: Diagnose baseline parser defects independently
         shell: bash
         run: |
           set -euo pipefail
           git fetch --no-tags origin main
-          git show origin/main:src/public_intake.rs > src/public_intake.rs
-          git show origin/main:.github/materialize/public_intake.rs > .github/materialize/public_intake.rs
+          git show origin/main:src/public_intake.rs > "$RUNNER_TEMP/src-public-intake.rs"
+          git show origin/main:.github/materialize/public_intake.rs > "$RUNNER_TEMP/materialized-public-intake.rs"
+
+          echo '=== suspicious function declarations: runtime ==='
+          grep -nE '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+[A-Za-z0-9_]+[[:space:]]+[A-Za-z0-9_]+[[:space:]]*\(' "$RUNNER_TEMP/src-public-intake.rs" || true
+          echo '=== suspicious function declarations: materialized ==='
+          grep -nE '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+[A-Za-z0-9_]+[[:space:]]+[A-Za-z0-9_]+[[:space:]]*\(' "$RUNNER_TEMP/materialized-public-intake.rs" || true
+
+          echo '=== rustfmt parse: runtime ==='
+          rustfmt --edition 2024 --check "$RUNNER_TEMP/src-public-intake.rs" || true
+          echo '=== rustfmt parse: materialized ==='
+          rustfmt --edition 2024 --check "$RUNNER_TEMP/materialized-public-intake.rs" || true
 
           old='fn public_response_shapes cannot_reflect_submitted_identity()'
-          new='fn public_response_shapes_cannot_reflect_submitted_identity()'
-          for file in src/public_intake.rs .github/materialize/public_intake.rs; do
-            before="$(grep -Foc "$old" "$file" || true)"
-            printf '%s old-count=%s\n' "$file" "$before"
-            test "$before" -eq 1
-            perl -0pi -e 's/fn public_response_shapes cannot_reflect_submitted_identity\(\)/fn public_response_shapes_cannot_reflect_submitted_identity()/g' "$file"
-            after_old="$(grep -Foc "$old" "$file" || true)"
-            after_new="$(grep -Foc "$new" "$file" || true)"
-            printf '%s old-after=%s new-after=%s\n' "$file" "$after_old" "$after_new"
-            test "$after_old" -eq 0
-            test "$after_new" -eq 1
-          done
+          test "$(grep -Foc "$old" "$RUNNER_TEMP/src-public-intake.rs" || true)" -eq 1
 
-          git diff origin/main --check -- src/public_intake.rs .github/materialize/public_intake.rs
-          git diff --numstat origin/main -- src/public_intake.rs .github/materialize/public_intake.rs
-          src_stats="$(git diff --numstat origin/main -- src/public_intake.rs)"
-          mat_stats="$(git diff --numstat origin/main -- .github/materialize/public_intake.rs)"
-          test "$(printf '%s\n' "$src_stats" | awk '{print $1}')" -eq 1
-          test "$(printf '%s\n' "$src_stats" | awk '{print $2}')" -eq 1
-          test "$(printf '%s\n' "$mat_stats" | awk '{print $1}')" -eq 1
-          test "$(printf '%s\n' "$mat_stats" | awk '{print $2}')" -eq 1
-
-      - name: Commit minimal repair
+      - name: Stop after diagnostics
         shell: bash
         run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/public_intake.rs .github/materialize/public_intake.rs
-          git diff --cached --check
-          git commit -m 'fix: repair public intake test identifier'
-          git push origin HEAD:fix/public-intake-test-identifier-20260915
+          echo 'diagnostics complete; no repository source files were changed'
