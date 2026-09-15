@@ -63,6 +63,8 @@ jobs:
   image:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      FLEET_GITHUB_TOKEN: ${{ secrets.FLEET_GITHUB_READ_TOKEN }}
     services:
       postgres:
         # Migration m20260726_000007_embeddings_and_tags creates the vector
@@ -87,6 +89,9 @@ jobs:
           ref: ${{ env.EXPECTED_HEAD }}
           path: zed-api-server.rs
           persist-credentials: false
+
+      - name: Require private dependency credential
+        run: test -n "${FLEET_GITHUB_TOKEN}"
 
       - name: Checkout pinned shared interfaces
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -169,6 +174,8 @@ jobs:
             ZED_API_REVISION=${{ env.EXPECTED_HEAD }}
             ZED_INTERFACES_REVISION=${{ env.ZED_INTERFACES_SHA }}
             ZED_LIB_CORE_REVISION=${{ env.ZED_LIB_CORE_SHA }}
+          secrets: |
+            github_token=${{ env.FLEET_GITHUB_TOKEN }}
           tags: |
             ghcr.io/zed-pkg/zed-api-server:${{ env.EXPECTED_HEAD }}
             ghcr.io/zed-pkg/zed-api-server:main
