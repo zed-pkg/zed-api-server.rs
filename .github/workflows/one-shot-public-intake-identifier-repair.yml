@@ -19,28 +19,52 @@ jobs:
           ref: fix/public-intake-test-identifier-20260915
           fetch-depth: 0
 
-      - name: Diagnose baseline parser defects independently
+      - name: Repair independent baseline parser defects
         shell: bash
         run: |
           set -euo pipefail
+          runtime_old='fn public_response_shapes cannot_reflect_submitted_identity()'
+          runtime_new='fn public_response_shapes_cannot_reflect_submitted_identity()'
+          materialized_old='fn common_field_inventory_is a subset of every request shape()'
+          materialized_new='fn common_field_inventory_is_a_subset_of_every_request_shape()'
+
+          if grep -Fq "$runtime_new" src/public_intake.rs \
+            && grep -Fq "$materialized_new" .github/materialize/public_intake.rs \
+            && ! grep -Fq "$runtime_old" src/public_intake.rs \
+            && ! grep -Fq "$materialized_old" .github/materialize/public_intake.rs; then
+            echo 'parser repairs already present on branch; no-op'
+            exit 0
+          fi
+
           git fetch --no-tags origin main
-          git show origin/main:src/public_intake.rs > "$RUNNER_TEMP/src-public-intake.rs"
-          git show origin/main:.github/materialize/public_intake.rs > "$RUNNER_TEMP/materialized-public-intake.rs"
+          git show origin/main:src/public_intake.rs > src/public_intake.rs
+          git show origin/main:.github/materialize/public_intake.rs > .github/materialize/public_intake.rs
 
-          echo '=== suspicious function declarations: runtime ==='
-          grep -nE '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+[A-Za-z0-9_]+[[:space:]]+[A-Za-z0-9_]+[[:space:]]*\(' "$RUNNER_TEMP/src-public-intake.rs" || true
-          echo '=== suspicious function declarations: materialized ==='
-          grep -nE '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+[A-Za-z0-9_]+[[:space:]]+[A-Za-z0-9_]+[[:space:]]*\(' "$RUNNER_TEMP/materialized-public-intake.rs" || true
+          test "$(grep -Foc "$runtime_old" src/public_intake.rs || true)" -eq 1
+          test "$(grep -Foc "$materialized_old" .github/materialize/public_intake.rs || true)" -eq 1
+          perl -0pi -e 's/fn public_response_shapes cannot_reflect_submitted_identity\(\)/fn public_response_shapes_cannot_reflect_submitted_identity()/g' src/public_intake.rs
+          perl -0pi -e 's/fn common_field_inventory_is a subset of every request shape\(\)/fn common_field_inventory_is_a_subset_of_every_request_shape()/g' .github/materialize/public_intake.rs
 
-          echo '=== rustfmt parse: runtime ==='
-          rustfmt --edition 2024 --check "$RUNNER_TEMP/src-public-intake.rs" || true
-          echo '=== rustfmt parse: materialized ==='
-          rustfmt --edition 2024 --check "$RUNNER_TEMP/materialized-public-intake.rs" || true
+          test "$(grep -Foc "$runtime_new" src/public_intake.rs || true)" -eq 1
+          test "$(grep -Foc "$materialized_new" .github/materialize/public_intake.rs || true)" -eq 1
+          test "$(grep -Foc "$runtime_old" src/public_intake.rs || true)" -eq 0
+          test "$(grep -Foc "$materialized_old" .github/materialize/public_intake.rs || true)" -eq 0
 
-          old='fn public_response_shapes cannot_reflect_submitted_identity()'
-          test "$(grep -Foc "$old" "$RUNNER_TEMP/src-public-intake.rs" || true)" -eq 1
+          rustfmt --edition 2024 --emit stdout src/public_intake.rs >/dev/null
+          rustfmt --edition 2024 --emit stdout .github/materialize/public_intake.rs >/dev/null
+          git diff origin/main --check -- src/public_intake.rs .github/materialize/public_intake.rs
 
-      - name: Stop after diagnostics
-        shell: bash
-        run: |
-          echo 'diagnostics complete; no repository source files were changed'
+          src_stats="$(git diff --numstat origin/main -- src/public_intake.rs)"
+          mat_stats="$(git diff --numstat origin/main -- .github/materialize/public_intake.rs)"
+          printf 'runtime diff: %s\nmaterialized diff: %s\n' "$src_stats" "$mat_stats"
+          test "$(printf '%s\n' "$src_stats" | awk '{print $1}')" -eq 1
+          test "$(printf '%s\n' "$src_stats" | awk '{print $2}')" -eq 1
+          test "$(printf '%s\n' "$mat_stats" | awk '{print $1}')" -eq 1
+          test "$(printf '%s\n' "$mat_stats" | awk '{print $2}')" -eq 1
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/public_intake.rs .github/materialize/public_intake.rs
+          git diff --cached --check
+          git commit -m 'fix: repair public intake test identifiers'
+          git push origin HEAD:fix/public-intake-test-identifier-20260915
