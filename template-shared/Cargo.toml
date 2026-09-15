@@ -13,3 +13,7 @@ toml = "0.9"
 
 [lints.rust]
 unsafe_code = "forbid"
+
+# Keep this reusable crate independently testable even when the host repository
+# has a root Cargo workspace that does not list template-shared as a member.
+[workspace]
