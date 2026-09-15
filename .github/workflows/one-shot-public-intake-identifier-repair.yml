@@ -36,9 +36,9 @@ jobs:
             test "$(grep -Foc "$new" "$file")" -eq 1
           done
 
-          git diff --check
-          test "$(git diff --numstat -- src/public_intake.rs | awk '{print $1+$2}')" -eq 2
-          test "$(git diff --numstat -- .github/materialize/public_intake.rs | awk '{print $1+$2}')" -eq 2
+          git diff origin/main --check -- src/public_intake.rs .github/materialize/public_intake.rs
+          test "$(git diff --numstat origin/main -- src/public_intake.rs | awk '{print $1+$2}')" -eq 2
+          test "$(git diff --numstat origin/main -- .github/materialize/public_intake.rs | awk '{print $1+$2}')" -eq 2
 
       - name: Commit minimal repair
         shell: bash
