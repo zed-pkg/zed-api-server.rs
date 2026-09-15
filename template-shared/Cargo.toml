@@ -1,0 +1,19 @@
+[package]
+name = "zed-api-server-template-shared"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+license = "UNLICENSED"
+description = "Small reusable composition seams for the Zed non-admin Rust API server"
+
+[dependencies]
+async-trait = "0.1"
+toml = "0.9"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# Keep this reusable crate independently testable even when the host repository
+# has a root Cargo workspace that does not list template-shared as a member.
+[workspace]
