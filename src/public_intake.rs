@@ -1098,7 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn public_response_shapes cannot_reflect_submitted_identity() {
+    fn public_response_shapes_cannot_reflect_submitted_identity() {
         let accepted = respond(Ok(()));
         assert_eq!(accepted.status(), StatusCode::ACCEPTED);
         let error = PublicApiError::invalid_request().into_response();
