@@ -2,11 +2,26 @@
   "contractVersion": "1.0.0",
   "environment": "production",
   "requiredCapabilities": [
-    "request-context", "panic-recovery", "request-id", "trace-context",
-    "structured-logging", "metrics-red", "deadline-timeout", "payload-limit",
-    "rate-limit", "auth", "json", "headers", "compression",
-    "tls-policy", "security-headers", "idempotency", "content-negotiation",
-    "fault-injection", "test-auth-bypass", "schema-capture"
+    "request-context",
+    "panic-recovery",
+    "request-id",
+    "trace-context",
+    "structured-logging",
+    "metrics-red",
+    "deadline-timeout",
+    "payload-limit",
+    "rate-limit",
+    "auth",
+    "json",
+    "headers",
+    "compression",
+    "tls-policy",
+    "security-headers",
+    "idempotency",
+    "content-negotiation",
+    "fault-injection",
+    "test-auth-bypass",
+    "schema-capture"
   ],
   "settings": {
     "requestIdHeader": "x-request-id",
@@ -19,24 +34,37 @@
       "enabled": true,
       "capacity": 120,
       "refillPerSecond": 2.0,
-      "keyBy": ["ip", "route"],
-      "policyId": "public-default",
+      "keyBy": [
+        "ip",
+        "route"
+      ],
+      "policyId": "api-default",
       "algorithm": "token-bucket",
       "layer": "application",
       "failureMode": "fail-closed",
       "windowMs": 60000,
       "localCacheMaxEntries": 10000,
       "localCacheTtlMs": 60000,
-      "keyNamespace": "zed-api-server:public-default",
+      "keyNamespace": "zed-api-server:api-default",
       "keyVersion": "v1",
       "keyDerivation": "external-hmac-sha256"
     },
-    "compression": {"enabled": true, "minimumBytes": 1024, "algorithms": ["br", "gzip"]},
+    "compression": {
+      "enabled": true,
+      "minimumBytes": 1024,
+      "algorithms": [
+        "br",
+        "gzip"
+      ]
+    },
     "tls": {
       "mode": "trusted-proxy",
       "requireHttps": true,
       "strictForwardedHeaders": true,
-      "trustedProxyCidrs": ["127.0.0.1/32", "::1/128"]
+      "trustedProxyCidrs": [
+        "127.0.0.1/32",
+        "::1/128"
+      ]
     },
     "securityHeaders": {
       "enabled": true,
@@ -48,15 +76,47 @@
       "enabled": true,
       "headerName": "idempotency-key",
       "ttlSeconds": 86400,
-      "requiredMethods": ["POST", "PUT", "PATCH"]
+      "requiredMethods": [
+        "POST",
+        "PUT",
+        "PATCH"
+      ]
     },
-    "faultInjection": {"enabled": false, "latencyMs": 0, "errorRate": 0.0, "dropRate": 0.0},
-    "testAuthBypass": {"enabled": false, "headerName": "x-ores-test-auth-bypass", "allowedCidrs": ["127.0.0.1/32", "::1/128"]},
-    "contentRepresentations": ["application/json", "application/problem+json"]
+    "faultInjection": {
+      "enabled": false,
+      "latencyMs": 0,
+      "errorRate": 0.0,
+      "dropRate": 0.0
+    },
+    "testAuthBypass": {
+      "enabled": false,
+      "headerName": "x-ores-test-auth-bypass",
+      "allowedCidrs": [
+        "127.0.0.1/32",
+        "::1/128"
+      ]
+    },
+    "contentRepresentations": [
+      "application/json",
+      "application/problem+json"
+    ]
   },
   "integrations": {
-    "sharedAuth": {"mode": "disabled", "failOpen": false},
-    "optoSync": {"mode": "disabled", "failOpen": false},
-    "oresOtel": {"enabled": true, "serviceName": "zed-api-server", "propagators": ["tracecontext", "baggage"]}
+    "sharedAuth": {
+      "mode": "disabled",
+      "failOpen": false
+    },
+    "optoSync": {
+      "mode": "disabled",
+      "failOpen": false
+    },
+    "oresOtel": {
+      "enabled": true,
+      "serviceName": "zed-api-server",
+      "propagators": [
+        "tracecontext",
+        "baggage"
+      ]
+    }
   }
 }
