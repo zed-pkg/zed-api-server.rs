@@ -6,7 +6,7 @@ columns = ["options", "env", "type", "default", "description"]
 allow_unknown = false
 
 [env]
-dotenv = false
+load = false
 files = []
 ignore = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "DATABASE_URL", "FIDUCIA_INTERNAL_SECRET", "GITHUB_TOKEN", "ORES_RL_HMAC_KEY", "REDIS_URL", "SHARED_AUTH_SERVICE_CREDENTIAL"]
 
