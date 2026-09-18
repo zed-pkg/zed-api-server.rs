@@ -24,11 +24,22 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      FLEET_GITHUB_TOKEN: ${{ secrets.FLEET_GITHUB_READ_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.EXPECTED_HEAD }}
           persist-credentials: false
+      - name: Require private dependency credential
+        shell: bash
+        run: test -n "$FLEET_GITHUB_TOKEN"
+      - name: Configure ephemeral GitHub credential helper
+        shell: bash
+        run: >-
+          git config --global credential.https://github.com.helper
+          '!f() { test "$1" = get && echo username=x-access-token && echo "password=$FLEET_GITHUB_TOKEN"; }; f'
       - name: Checkout pinned shared interfaces for source verification
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -129,11 +140,22 @@ jobs:
   clippy:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      FLEET_GITHUB_TOKEN: ${{ secrets.FLEET_GITHUB_READ_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.EXPECTED_HEAD }}
           persist-credentials: false
+      - name: Require private dependency credential
+        shell: bash
+        run: test -n "$FLEET_GITHUB_TOKEN"
+      - name: Configure ephemeral GitHub credential helper
+        shell: bash
+        run: >-
+          git config --global credential.https://github.com.helper
+          '!f() { test "$1" = get && echo username=x-access-token && echo "password=$FLEET_GITHUB_TOKEN"; }; f'
       - name: Verify exact contributor head
         shell: bash
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
