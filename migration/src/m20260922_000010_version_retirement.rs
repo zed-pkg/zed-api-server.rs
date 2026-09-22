@@ -69,7 +69,9 @@ mod tests {
     fn postgres_schema_keeps_retirement_orthogonal_to_version() {
         let sql = up_statements(DatabaseBackend::Postgres).join("\n");
         assert!(sql.contains("create table if not exists version_retirement"));
-        assert!(sql.contains("version_id uuid primary key references version(id) on delete cascade"));
+        assert!(
+            sql.contains("version_id uuid primary key references version(id) on delete cascade")
+        );
         assert!(sql.contains("'renamed','deprecated','security','invalid','other'"));
         assert!(sql.contains("char_length(message) <= 140"));
         assert!(!sql.contains("alter table version add column"));
