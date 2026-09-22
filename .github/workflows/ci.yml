@@ -162,9 +162,13 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: clippy
-      - name: Deny every Rust warning from the committed lockfile
+      - name: Deny every production Rust warning from the committed lockfile
         shell: bash
         run: |
           set -o pipefail
-          cargo clippy --quiet --workspace --all-targets --locked -- -D warnings 2>&1 \
+          # The FP lint policy bans panic/expect/indexing in production code.
+          # Integration tests intentionally use assertion-style failures and are
+          # compiled/executed by the nextest lane above, so keep this strict gate
+          # scoped to production library/binary targets.
+          cargo clippy --quiet --workspace --lib --bins --locked -- -D warnings 2>&1 \
             | tee "$RUNNER_TEMP/clippy.log"
