@@ -13,3 +13,4 @@ pub mod package;
 pub mod publisher_key;
 pub mod token;
 pub mod version;
+pub mod version_retirement;
