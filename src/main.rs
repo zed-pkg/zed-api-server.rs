@@ -1,5 +1,4 @@
 // mod four_transports;  // not built: see docs/four-transports.md#status
-mod web_api_plane;
 #[path = "routes/account.rs"]
 mod account;
 mod account_router;
@@ -27,6 +26,7 @@ mod storage;
 mod storage_report;
 mod tokens;
 mod verify;
+mod web_api_plane;
 
 fn contract_command(args: &[String]) -> Option<&str> {
     match args.get(1).map(String::as_str) {
