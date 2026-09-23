@@ -11,18 +11,20 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, State};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-use zed_interfaces::mirror::{MIRROR_BOOTSTRAP_SCHEMA_V1, MirrorBootstrapV1};
-use zed_interfaces::registry::{MirrorsResponse, SignedIndexResponse};
-use zed_interfaces::signing::{IndexAttestationV1, IndexEntryV1, SIGNED_INDEX_SCHEMA_V1};
+use zed_interfaces::mirror::MirrorBootstrapV1;
+use zed_interfaces::signing::{
+    IndexAttestationV1, IndexVersionV1, SIGNED_INDEX_SCHEMA_V1, SignedIndexV1,
+};
 
 use crate::entities::version;
 use crate::error::ApiResult;
 use crate::state::AppState;
 
-use super::{artifact_format, find_org, find_package};
+use super::{find_org, find_package};
 
-pub async fn get_mirrors(State(state): State<Arc<AppState>>) -> Json<MirrorsResponse> {
-    Json(MirrorsResponse {
+pub async fn get_mirrors(State(state): State<Arc<AppState>>) -> Json<MirrorBootstrapV1> {
+    Json(MirrorBootstrapV1 {
+        generated_at: chrono::Utc::now().to_rfc3339(),
         registry_url: state.public_base_url.clone(),
         mirrors: state.mirrors.clone(),
     })
@@ -32,7 +34,6 @@ pub async fn get_mirrors(State(state): State<Arc<AppState>>) -> Json<MirrorsResp
 /// bootstrap finds one at the same URL on every mirror kind.
 pub async fn get_bootstrap(State(state): State<Arc<AppState>>) -> Json<MirrorBootstrapV1> {
     Json(MirrorBootstrapV1 {
-        schema: MIRROR_BOOTSTRAP_SCHEMA_V1.to_owned(),
         generated_at: chrono::Utc::now().to_rfc3339(),
         registry_url: state.public_base_url.clone(),
         mirrors: state.mirrors.clone(),
@@ -54,12 +55,12 @@ pub async fn get_bootstrap(State(state): State<Arc<AppState>>) -> Json<MirrorBoo
 pub async fn get_signed_index(
     State(state): State<Arc<AppState>>,
     Path((org_slug, name)): Path<(String, String)>,
-) -> ApiResult<Json<SignedIndexResponse>> {
+) -> ApiResult<Json<SignedIndexV1>> {
     let org_row = find_org(&state, &org_slug).await?;
     let pkg = find_package(&state, &org_row, &name).await?;
 
     if let Some(stored) = pkg.signed_index.clone()
-        && let Ok(document) = serde_json::from_value::<SignedIndexResponse>(stored)
+        && let Ok(document) = serde_json::from_value::<SignedIndexV1>(stored)
     {
         return Ok(Json(document));
     }
@@ -71,16 +72,10 @@ pub async fn get_signed_index(
 
     let mut ordered: Vec<String> = rows.iter().map(|row| row.version.clone()).collect();
     zed_interfaces::version::sort_desc(&mut ordered);
-    let mut versions: Vec<IndexEntryV1> = rows
+    let mut versions: Vec<IndexVersionV1> = rows
         .iter()
-        .map(|row| IndexEntryV1 {
+        .map(|row| IndexVersionV1 {
             version: row.version.clone(),
-            sha256: row.sha256.clone(),
-            size: row.size.max(0) as u64,
-            format: artifact_format(&row.format),
-            vcs_tag: row.vcs_tag.clone(),
-            vcs_commit: row.vcs_commit.clone().unwrap_or_default(),
-            published_at: row.published_at.to_rfc3339(),
             yanked: row.yanked,
         })
         .collect();
@@ -99,12 +94,11 @@ pub async fn get_signed_index(
         .and_then(|row| serde_json::from_value(row.mirrors.clone()).ok())
         .unwrap_or_default();
 
-    Ok(Json(SignedIndexResponse {
+    Ok(Json(SignedIndexV1 {
         schema: SIGNED_INDEX_SCHEMA_V1.to_owned(),
         payload: IndexAttestationV1 {
             org: org_slug,
             name,
-            generated_at: chrono::Utc::now().to_rfc3339(),
             sequence: pkg.index_sequence.max(1) as u64,
             versions,
             mirrors,
@@ -122,8 +116,8 @@ pub async fn put_signed_index(
     State(state): State<Arc<AppState>>,
     Path((org_slug, name)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
-    Json(document): Json<SignedIndexResponse>,
-) -> ApiResult<Json<SignedIndexResponse>> {
+    Json(document): Json<SignedIndexV1>,
+) -> ApiResult<Json<SignedIndexV1>> {
     let token = crate::auth::require_token(&state.db, &headers).await?;
     let org_row = find_org(&state, &org_slug).await?;
     crate::rbac::authorize_publish(
@@ -140,23 +134,16 @@ pub async fn put_signed_index(
         ));
     }
 
-    let candidate = zed_interfaces::signing::SignedIndexV1 {
-        schema: document.schema.clone(),
-        payload: document.payload.clone(),
-        signatures: document.signatures.clone(),
-    };
-    candidate.validate().map_err(|error| {
+    document.validate().map_err(|error| {
         crate::error::ApiErr::bad_request("invalid_index", format!("invalid signed index: {error}"))
     })?;
     let keys = super::keys::load_keys(&state, org_row.id).await?;
-    let preimage = zed_interfaces::signing::index_attestation_preimage(&document.payload).map_err(
-        |error| {
-            crate::error::ApiErr::bad_request(
-                "invalid_index",
-                format!("cannot reconstruct the signed payload: {error}"),
-            )
-        },
-    )?;
+    let preimage = document.preimage().map_err(|error| {
+        crate::error::ApiErr::bad_request(
+            "invalid_index",
+            format!("cannot reconstruct the signed payload: {error}"),
+        )
+    })?;
     crate::signing::verify_any(&preimage, &document.signatures, &keys).map_err(|error| {
         crate::error::ApiErr::bad_request(
             "signature_invalid",

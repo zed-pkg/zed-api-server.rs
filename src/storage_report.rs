@@ -41,6 +41,7 @@ pub enum StorageBackendKind {
 
 impl StorageBackendKind {
     /// Is this backend durable across a restart of the process?
+    #[cfg(test)]
     #[must_use]
     pub const fn is_durable(self) -> bool {
         match self {
@@ -277,6 +278,7 @@ pub enum StorageHealth {
 }
 
 impl StorageHealth {
+    #[cfg(test)]
     #[must_use]
     pub const fn is_reachable(&self) -> bool {
         matches!(self, Self::Reachable { .. })

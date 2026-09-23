@@ -1,5 +1,18 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::too_many_lines,
+        clippy::unwrap_used,
+        clippy::wildcard_enum_match_arm,
+        dead_code,
+        unsafe_code
+    )
+)]
 // mod four_transports;  // not built: see docs/four-transports.md#status
-mod web_api_plane;
+// mod web_api_plane; // source retained; private cross-org dependency is intentionally not part of the public build
 #[path = "routes/account.rs"]
 mod account;
 mod account_router;
