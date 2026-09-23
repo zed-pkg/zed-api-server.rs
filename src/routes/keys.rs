@@ -19,7 +19,7 @@ use sea_orm::{
 };
 use uuid::Uuid;
 use zed_interfaces::registry::{OrgKeysRequest, OrgKeysResponse};
-use zed_interfaces::signing::{MAX_KEYS_PER_ORG, PublisherKeyStateV1, PublisherKeyV1};
+use zed_interfaces::signing::{PublisherKeyStateV1, PublisherKeyV1};
 
 use crate::auth::require_token;
 use crate::entities::publisher_key;
@@ -28,13 +28,24 @@ use crate::state::AppState;
 
 use super::find_org;
 
+// Server admission policy. The merged shared contract validates key shape but
+// intentionally does not prescribe an org-level storage cardinality.
+const MAX_KEYS_PER_ORG: usize = 8;
+
+fn publisher_key_state_str(state: PublisherKeyStateV1) -> &'static str {
+    match state {
+        PublisherKeyStateV1::Active => "active",
+        PublisherKeyStateV1::Retired => "retired",
+        PublisherKeyStateV1::Revoked => "revoked",
+    }
+}
+
 pub async fn get_keys(
     State(state): State<Arc<AppState>>,
     Path(org_slug): Path<String>,
 ) -> ApiResult<Json<OrgKeysResponse>> {
     let org_row = find_org(&state, &org_slug).await?;
     Ok(Json(OrgKeysResponse {
-        org: org_slug,
         keys: load_keys(&state, org_row.id).await?,
     }))
 }
@@ -127,7 +138,7 @@ pub async fn put_keys(
         match current {
             Some(row) => {
                 let mut active: publisher_key::ActiveModel = row.into();
-                active.state = ActiveValue::Set(key.state.as_str().to_owned());
+                active.state = ActiveValue::Set(publisher_key_state_str(key.state).to_owned());
                 active.revoked_reason = ActiveValue::Set(key.revoked_reason.clone());
                 active.update(&txn).await?;
             }
@@ -138,7 +149,7 @@ pub async fn put_keys(
                     key_id: ActiveValue::Set(key.key_id.clone()),
                     algorithm: ActiveValue::Set(key.algorithm.clone()),
                     public_key_multibase: ActiveValue::Set(key.public_key_multibase.clone()),
-                    state: ActiveValue::Set(key.state.as_str().to_owned()),
+                    state: ActiveValue::Set(publisher_key_state_str(key.state).to_owned()),
                     revoked_reason: ActiveValue::Set(key.revoked_reason.clone()),
                     enrolled_at: ActiveValue::Set(Utc::now()),
                 }
@@ -150,7 +161,6 @@ pub async fn put_keys(
     txn.commit().await?;
 
     Ok(Json(OrgKeysResponse {
-        org: org_slug,
         keys: load_keys(&state, org_row.id).await?,
     }))
 }

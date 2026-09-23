@@ -1,3 +1,11 @@
+#![allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::wildcard_enum_match_arm,
+    unsafe_code
+)]
 //! Static regression checks for the API-write / web-read-only database policy.
 
 use std::{fs, path::PathBuf};

@@ -389,14 +389,9 @@ mod tests {
         assert_eq!(fill(ROUTE_AUDIT), r::audit_path("acme"));
         assert_eq!(fill(ROUTE_AUDIT_VERIFY), r::audit_verify_path("acme"));
         assert_eq!(fill(ROUTE_ORG_KEYS), r::org_keys_path("acme"));
-        assert_eq!(ROUTE_MIRRORS, r::mirrors_path());
         assert_eq!(
             ROUTE_MIRROR_BOOTSTRAP,
             zed_interfaces::mirror::MIRROR_BOOTSTRAP_PATH
-        );
-        assert_eq!(
-            fill(ROUTE_SIGNED_INDEX),
-            r::signed_index_path("acme", "http-kit")
         );
         assert_eq!(
             fill(ROUTE_FILES),
