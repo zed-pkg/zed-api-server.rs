@@ -110,8 +110,26 @@ fn parse_mirrors(raw: &str) -> Result<Vec<zed_interfaces::mirror::MirrorDescript
     }
     let mirrors: Vec<zed_interfaces::mirror::MirrorDescriptorV1> =
         serde_json::from_str(trimmed).context("ZED_MIRRORS must be a JSON array of mirrors")?;
-    zed_interfaces::mirror::normalize_mirrors(&mirrors)
-        .map_err(|error| anyhow::anyhow!("ZED_MIRRORS is invalid: {error}"))
+    if mirrors.len() > zed_interfaces::mirror::MAX_MIRRORS {
+        bail!(
+            "ZED_MIRRORS lists {} mirrors; max is {}",
+            mirrors.len(),
+            zed_interfaces::mirror::MAX_MIRRORS
+        );
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for mirror in &mirrors {
+        mirror
+            .validate()
+            .map_err(|error| anyhow::anyhow!("ZED_MIRRORS is invalid: {error}"))?;
+        let id = mirror.identifier();
+        if !seen.insert(id.clone()) {
+            bail!("ZED_MIRRORS contains duplicate mirror `{id}`");
+        }
+    }
+    let mut mirrors = mirrors;
+    mirrors.sort_by_key(zed_interfaces::mirror::MirrorDescriptorV1::order_key);
+    Ok(mirrors)
 }
 
 impl Config {
