@@ -5,6 +5,7 @@
 #   docker build -f zed-api-server.rs/Dockerfile \
 #     --build-arg ZED_INTERFACES_REVISION=4b87e425b04777b0ee413971dc1df805d24f295f \
 #     --build-arg ZED_LIB_CORE_REVISION=c3d486a1519381276fbec02aa25247f542924443 \
+#     --secret id=github_token,env=FLEET_GITHUB_TOKEN \
 #     -t ghcr.io/zed-pkg/zed-api-server:dev .
 #
 # The toolchain must satisfy the crate's `edition = "2024"` (>= 1.85) and the
@@ -16,17 +17,25 @@ ARG ZED_INTERFACES_REVISION
 ARG ZED_LIB_CORE_REVISION
 ENV RUSTUP_TOOLCHAIN=1.97.1
 WORKDIR /work
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
 COPY zed-interfaces ./zed-interfaces
 COPY zed-lib-core ./zed-lib-core
 COPY zed-api-server.rs ./zed-api-server.rs
 WORKDIR /work/zed-api-server.rs
-RUN test -n "$ZED_INTERFACES_REVISION" \
+RUN --mount=type=secret,id=github_token,required=true \
+    test -s /run/secrets/github_token \
+    && test -n "$ZED_INTERFACES_REVISION" \
     && test -n "$ZED_LIB_CORE_REVISION" \
     && grep -F "rev = \"$ZED_INTERFACES_REVISION\"" Cargo.toml \
     && grep -F "?rev=$ZED_INTERFACES_REVISION#$ZED_INTERFACES_REVISION" Cargo.lock \
     && grep -F "rev = \"$ZED_LIB_CORE_REVISION\"" Cargo.toml \
     && grep -F "?rev=$ZED_LIB_CORE_REVISION#$ZED_LIB_CORE_REVISION" Cargo.lock \
-    && cargo build --release --locked
+    && git config --global credential.https://github.com.helper \
+       '!f() { test "$1" = get && echo username=x-access-token && echo "password=$(cat /run/secrets/github_token)"; }; f' \
+    && CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build --release --locked \
+    && git config --global --unset-all credential.https://github.com.helper
 
 FROM debian:12-slim
 ARG ZED_API_REVISION=unknown
