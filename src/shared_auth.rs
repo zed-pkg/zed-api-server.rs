@@ -335,7 +335,10 @@ mod tests {
         assert_eq!(value["contract"], "IntrospectionRequest");
         assert_eq!(value["payload"]["token"], "user-token");
         assert_eq!(value["payload"]["audience"], "zed-pkg");
-        assert_eq!(value["payload"]["requiredScopes"], serde_json::json!(["zpkg:account"]));
+        assert_eq!(
+            value["payload"]["requiredScopes"],
+            serde_json::json!(["zpkg:account"])
+        );
     }
 
     #[test]
