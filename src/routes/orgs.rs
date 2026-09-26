@@ -16,7 +16,7 @@ use uuid::Uuid;
 use zed_interfaces::manifest::is_slug;
 use zed_interfaces::registry::{ClaimOrgRequest, ClaimOrgResponse};
 
-use crate::auth::require_token;
+use crate::registry_actor::require_registry_actor;
 use crate::entities::org;
 use crate::error::{ApiErr, ApiResult};
 use crate::state::AppState;
@@ -75,7 +75,7 @@ pub async fn claim_org(
     headers: HeaderMap,
     Json(request): Json<ClaimOrgRequest>,
 ) -> ApiResult<Json<ClaimOrgResponse>> {
-    let token = require_token(&state.db, &headers).await?;
+    let actor = require_registry_actor(&state.db, &headers).await?;
     if !is_slug(&request.slug) {
         return Err(ApiErr::bad_request(
             "invalid_slug",
@@ -87,7 +87,7 @@ pub async fn claim_org(
         .one(&state.db)
         .await?
     {
-        if token.org_id == Some(existing.id) {
+        if actor.org_scope() == Some(existing.id) {
             return Ok(Json(ClaimOrgResponse {
                 slug: request.slug,
                 created: false,
@@ -103,8 +103,8 @@ pub async fn claim_org(
     // critical section. Two layers, per docs: an OUTER fiducia lock queueing
     // claims for this token across replicas, and INSIDE it a Postgres
     // advisory xact lock owning correctness even if fiducia is down.
-    let fiducia_guard = fiducia_org_claim_guard(&state, token.id).await;
-    let outcome = claim_org_serialized(&state, &token, &request).await;
+    let fiducia_guard = fiducia_org_claim_guard(&state, actor.token_id()).await;
+    let outcome = claim_org_serialized(&state, actor.legacy_token(), &request).await;
     release_fiducia_guard(fiducia_guard);
     outcome
 }
