@@ -51,7 +51,11 @@ pub async fn require_account(state: &AppState, headers: &HeaderMap) -> ApiResult
         )
     })?;
     let introspection = client
-        .introspect_for_audience(&token, &state.shared_auth_audience)
+        .introspect_for_audience(
+            &token,
+            &state.shared_auth_audience,
+            &[REQUIRED_ACCOUNT_SCOPE],
+        )
         .await
         .map_err(map_shared_auth_error)?;
     account_from_introspection(&introspection, &state.shared_auth_application_id)
