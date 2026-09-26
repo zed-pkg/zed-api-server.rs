@@ -108,13 +108,9 @@ pub async fn verify_audit_log(
     Path(org_slug): Path<String>,
     headers: HeaderMap,
 ) -> ApiResult<Json<AuditIntegrityResponse>> {
-    let token = require_token(&state.db, &headers).await?;
+    let actor = require_registry_actor(&state.db, &headers).await?;
     let org_row = find_org(&state, &org_slug).await?;
-    crate::rbac::authorize_manage(
-        token.org_id,
-        crate::rbac::Role::parse(&token.role),
-        org_row.id,
-    )?;
+    crate::rbac::authorize_manage(actor.org_scope(), actor.role(), org_row.id)?;
 
     let rows = audit_log::Entity::find()
         .filter(audit_log::Column::OrgId.eq(org_row.id))
