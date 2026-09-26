@@ -11,6 +11,8 @@ use crate::shared_auth::{ClientError, Introspection};
 use crate::state::AppState;
 
 const REQUIRED_ACCOUNT_SCOPE: &str = "zpkg:account";
+const REQUIRED_PACKAGE_READ_SCOPE: &str = "zpkg:packages:read";
+const ZPKG_CLI_AUTHORIZED_PARTY: &str = "zpkg-cli";
 const CUSTOMER_AUTH_REALM: &str = "customer";
 
 /// Verified browser/account identity. The Shared Auth token is intentionally
@@ -18,6 +20,14 @@ const CUSTOMER_AUTH_REALM: &str = "customer";
 /// project a registry user and evaluate product memberships.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountIdentity {
+    pub session: SessionIdentity,
+}
+
+/// Verified CLI identity for package-resource authorization. Authentication
+/// alone does not grant access to any package: handlers must still authorize
+/// this canonical principal against the target org/package.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackageReaderIdentity {
     pub session: SessionIdentity,
 }
 
@@ -55,6 +65,24 @@ pub async fn require_account(state: &AppState, headers: &HeaderMap) -> ApiResult
         .await
         .map_err(map_shared_auth_error)?;
     account_from_introspection(&introspection, &state.shared_auth_application_id)
+}
+
+pub async fn require_package_reader(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> ApiResult<PackageReaderIdentity> {
+    let token = bearer_token(headers).ok_or_else(ApiErr::unauthorized)?;
+    let client = state.shared_auth.as_ref().ok_or_else(|| {
+        ApiErr::service_unavailable(
+            "auth_unavailable",
+            "shared authentication is not configured",
+        )
+    })?;
+    let introspection = client
+        .introspect_for_audience(&token, &state.shared_auth_audience)
+        .await
+        .map_err(map_shared_auth_error)?;
+    package_reader_from_introspection(&introspection)
 }
 
 fn account_from_introspection(
@@ -119,6 +147,70 @@ fn account_from_introspection(
     }
 
     Ok(AccountIdentity {
+        session: SessionIdentity {
+            subject,
+            realm,
+            email: introspection.email.clone(),
+            display_name: optional_rest_string(introspection, "display_name")?,
+            avatar_url: optional_rest_string(introspection, "avatar_url")?,
+        },
+    })
+}
+
+fn package_reader_from_introspection(
+    introspection: &Introspection,
+) -> ApiResult<PackageReaderIdentity> {
+    if !introspection.active {
+        return Err(ApiErr::unauthorized());
+    }
+    let subject = required_claim(introspection.sub.as_deref())?
+        .parse::<Uuid>()
+        .map_err(|_| ApiErr::unauthorized())?;
+    required_claim(introspection.iss.as_deref())?;
+
+    let session_id = optional_rest_string(introspection, "sid")?;
+    let authorized_party = optional_rest_string(introspection, "azp")?;
+    let parent_jti = optional_rest_string(introspection, "parent_jti")?;
+    if session_id.is_none() || authorized_party.is_none() || parent_jti.is_none() {
+        return Err(ApiErr::forbidden(
+            "delegated_user_token_required",
+            "private package reads require a session-backed delegated user token",
+        ));
+    }
+    if authorized_party.as_deref() != Some(ZPKG_CLI_AUTHORIZED_PARTY) {
+        return Err(ApiErr::forbidden(
+            "wrong_authorized_party",
+            "the delegated token was not issued to the zed-pkg CLI",
+        ));
+    }
+
+    let scope = optional_rest_string(introspection, "scope")?.ok_or_else(|| {
+        ApiErr::forbidden(
+            "insufficient_scope",
+            "the delegated token is missing the private-package read scope",
+        )
+    })?;
+    if !scope
+        .split_ascii_whitespace()
+        .any(|candidate| candidate == REQUIRED_PACKAGE_READ_SCOPE)
+    {
+        return Err(ApiErr::forbidden(
+            "insufficient_scope",
+            "the delegated token is missing the private-package read scope",
+        ));
+    }
+
+    let realm = optional_rest_string(introspection, "auth_realm")?
+        .or(optional_rest_string(introspection, "realm")?)
+        .unwrap_or_else(|| CUSTOMER_AUTH_REALM.to_owned());
+    if realm != CUSTOMER_AUTH_REALM {
+        return Err(ApiErr::forbidden(
+            "wrong_auth_realm",
+            "the zed-pkg CLI accepts customer identities only",
+        ));
+    }
+
+    Ok(PackageReaderIdentity {
         session: SessionIdentity {
             subject,
             realm,
@@ -306,6 +398,63 @@ mod tests {
                 .unwrap_err()
                 .code,
             "wrong_authorized_party"
+        );
+    }
+
+    #[test]
+    fn cli_package_reader_requires_exact_authorized_party_scope_and_customer_realm() {
+        let mut rest = delegated_rest("zpkg-cli", "zpkg:packages:read");
+        rest.insert("auth_realm".into(), Value::String("customer".into()));
+        let introspection = Introspection {
+            active: true,
+            sub: Some(SUBJECT.into()),
+            iss: Some("https://auth.example.test".into()),
+            email: None,
+            rest,
+        };
+        let identity = package_reader_from_introspection(&introspection).unwrap();
+        assert_eq!(identity.session.subject, SUBJECT.parse::<Uuid>().unwrap());
+
+        let wrong_party = Introspection {
+            active: true,
+            sub: Some(SUBJECT.into()),
+            iss: Some("https://auth.example.test".into()),
+            email: None,
+            rest: delegated_rest("zpkg-web", "zpkg:packages:read"),
+        };
+        assert_eq!(
+            package_reader_from_introspection(&wrong_party)
+                .unwrap_err()
+                .code,
+            "wrong_authorized_party"
+        );
+
+        let wrong_scope = Introspection {
+            active: true,
+            sub: Some(SUBJECT.into()),
+            iss: Some("https://auth.example.test".into()),
+            email: None,
+            rest: delegated_rest("zpkg-cli", "zpkg:account"),
+        };
+        assert_eq!(
+            package_reader_from_introspection(&wrong_scope)
+                .unwrap_err()
+                .code,
+            "insufficient_scope"
+        );
+
+        let base = Introspection {
+            active: true,
+            sub: Some(SUBJECT.into()),
+            iss: Some("https://auth.example.test".into()),
+            email: None,
+            rest: serde_json::Map::new(),
+        };
+        assert_eq!(
+            package_reader_from_introspection(&base)
+                .unwrap_err()
+                .code,
+            "delegated_user_token_required"
         );
     }
 
