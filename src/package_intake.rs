@@ -253,26 +253,35 @@ mod tests {
 
     #[test]
     fn missing_security_evidence_fails_closed_to_quarantine() {
-        let mut value = request(RiskDecision::Clear);
-        value.rebuild = None;
-        let outcome = evaluate(&value);
-        assert_eq!(outcome.decision, AdmissionDecision::Quarantine);
-        assert_eq!(outcome.reason, AdmissionReason::MissingRebuildEvidence);
+        let missing_rebuild = AdmissionRequest {
+            rebuild: None,
+            ..request(RiskDecision::Clear)
+        };
+        let rebuild_outcome = evaluate(&missing_rebuild);
+        assert_eq!(rebuild_outcome.decision, AdmissionDecision::Quarantine);
+        assert_eq!(
+            rebuild_outcome.reason,
+            AdmissionReason::MissingRebuildEvidence
+        );
 
-        value.rebuild = Some(rebuild("artifact", "source"));
-        value.risk = None;
-        let outcome = evaluate(&value);
-        assert_eq!(outcome.decision, AdmissionDecision::Quarantine);
-        assert_eq!(outcome.reason, AdmissionReason::MissingRiskEvidence);
+        let missing_risk = AdmissionRequest {
+            risk: None,
+            ..request(RiskDecision::Clear)
+        };
+        let risk_outcome = evaluate(&missing_risk);
+        assert_eq!(risk_outcome.decision, AdmissionDecision::Quarantine);
+        assert_eq!(risk_outcome.reason, AdmissionReason::MissingRiskEvidence);
     }
 
     #[test]
     fn rebuild_mismatch_rejects_publication() {
-        let mut value = request(RiskDecision::Clear);
-        let Some(rebuild) = value.rebuild.as_mut() else {
-            panic!("fixture must include rebuild evidence");
+        let value = AdmissionRequest {
+            rebuild: Some(RebuildEvidence {
+                rebuilt_artifact_digest: "different".to_owned(),
+                ..rebuild("artifact", "source")
+            }),
+            ..request(RiskDecision::Clear)
         };
-        rebuild.rebuilt_artifact_digest = "different".to_owned();
         let outcome = evaluate(&value);
         assert_eq!(outcome.decision, AdmissionDecision::Reject);
         assert_eq!(outcome.reason, AdmissionReason::RebuildArtifactMismatch);
@@ -288,21 +297,29 @@ mod tests {
 
     #[test]
     fn approval_required_cannot_publish_without_digest_bound_receipt() {
-        let mut value = request(RiskDecision::RequireApproval);
+        let value = request(RiskDecision::RequireApproval);
         let outcome = evaluate(&value);
         assert_eq!(outcome.decision, AdmissionDecision::PendingApproval);
         assert_eq!(outcome.reason, AdmissionReason::MissingApproval);
 
-        value.approval = Some(approval("different", "rebuild-receipt"));
-        let outcome = evaluate(&value);
-        assert_eq!(outcome.decision, AdmissionDecision::Reject);
-        assert_eq!(outcome.reason, AdmissionReason::ApprovalIdentityMismatch);
+        let mismatched_approval = AdmissionRequest {
+            approval: Some(approval("different", "rebuild-receipt")),
+            ..request(RiskDecision::RequireApproval)
+        };
+        let mismatch_outcome = evaluate(&mismatched_approval);
+        assert_eq!(mismatch_outcome.decision, AdmissionDecision::Reject);
+        assert_eq!(
+            mismatch_outcome.reason,
+            AdmissionReason::ApprovalIdentityMismatch
+        );
     }
 
     #[test]
     fn stale_approval_for_prior_rebuild_receipt_rejects() {
-        let mut value = request(RiskDecision::RequireApproval);
-        value.approval = Some(approval("artifact", "old-rebuild-receipt"));
+        let value = AdmissionRequest {
+            approval: Some(approval("artifact", "old-rebuild-receipt")),
+            ..request(RiskDecision::RequireApproval)
+        };
         let outcome = evaluate(&value);
         assert_eq!(outcome.decision, AdmissionDecision::Reject);
         assert_eq!(outcome.reason, AdmissionReason::ApprovalIdentityMismatch);
@@ -310,8 +327,10 @@ mod tests {
 
     #[test]
     fn matching_approval_promotes_to_publishable() {
-        let mut value = request(RiskDecision::RequireApproval);
-        value.approval = Some(approval("artifact", "rebuild-receipt"));
+        let value = AdmissionRequest {
+            approval: Some(approval("artifact", "rebuild-receipt")),
+            ..request(RiskDecision::RequireApproval)
+        };
         let outcome = evaluate(&value);
         assert_eq!(outcome.decision, AdmissionDecision::Publishable);
         assert_eq!(outcome.reason, AdmissionReason::AllRequiredEvidenceBound);
@@ -324,8 +343,10 @@ mod tests {
             IntakeState::Published,
             IntakeState::Rejected,
         ] {
-            let mut value = request(RiskDecision::Clear);
-            value.current_state = state;
+            let value = AdmissionRequest {
+                current_state: state,
+                ..request(RiskDecision::Clear)
+            };
             let outcome = evaluate(&value);
             assert_eq!(outcome.decision, AdmissionDecision::Reject);
             assert_eq!(outcome.reason, AdmissionReason::InvalidState);
