@@ -243,7 +243,10 @@ mod tests {
         assert_eq!(bearer_token(&headers).as_deref(), Some("zpkg_abc"));
     }
 
-    fn policy<'a>(authorized_party: &'a str, required_scope: &'a str) -> DelegatedIdentityPolicy<'a> {
+    fn policy<'a>(
+        authorized_party: &'a str,
+        required_scope: &'a str,
+    ) -> DelegatedIdentityPolicy<'a> {
         DelegatedIdentityPolicy {
             authorized_party,
             required_scope,
@@ -272,7 +275,8 @@ mod tests {
             email: Some("user@example.test".into()),
             rest,
         };
-        let identity = account_from_introspection(&introspection, policy("zpkg-web", "zpkg:account")).unwrap();
+        let identity =
+            account_from_introspection(&introspection, policy("zpkg-web", "zpkg:account")).unwrap();
         assert_eq!(identity.session.subject, SUBJECT.parse::<Uuid>().unwrap());
         assert_eq!(identity.session.realm, "customer");
         assert_eq!(
@@ -373,7 +377,10 @@ mod tests {
         };
         let cli_identity =
             account_from_introspection(&cli, policy("zpkg-cli", "zpkg:registry")).unwrap();
-        assert_eq!(cli_identity.session.subject, SUBJECT.parse::<Uuid>().unwrap());
+        assert_eq!(
+            cli_identity.session.subject,
+            SUBJECT.parse::<Uuid>().unwrap()
+        );
 
         assert_eq!(
             account_from_introspection(&cli, policy("zpkg-web", "zpkg:account"))
