@@ -11,6 +11,8 @@ use crate::shared_auth::{ClientError, Introspection};
 use crate::state::AppState;
 
 const REQUIRED_ACCOUNT_SCOPE: &str = "zpkg:account";
+const REQUIRED_REGISTRY_SCOPE: &str = "zpkg:registry";
+const ZED_CLI_AUTHORIZED_PARTY: &str = "zpkg-cli";
 const CUSTOMER_AUTH_REALM: &str = "customer";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +58,27 @@ pub async fn require_account(state: &AppState, headers: &HeaderMap) -> ApiResult
         DelegatedIdentityPolicy {
             authorized_party: &state.shared_auth_application_id,
             required_scope: REQUIRED_ACCOUNT_SCOPE,
+            realm: CUSTOMER_AUTH_REALM,
+        },
+    )
+    .await
+}
+
+/// Authenticate a CLI/package-registry user through the dedicated Shared Auth
+/// product-delegation profile. This is intentionally distinct from the browser
+/// account profile and from legacy opaque registry tokens: callers receive a
+/// canonical user/session identity and must still perform Zed package/org ACL
+/// checks for the concrete resource and operation.
+pub(crate) async fn require_registry_identity(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> ApiResult<AccountIdentity> {
+    require_delegated_identity(
+        state,
+        headers,
+        DelegatedIdentityPolicy {
+            authorized_party: ZED_CLI_AUTHORIZED_PARTY,
+            required_scope: REQUIRED_REGISTRY_SCOPE,
             realm: CUSTOMER_AUTH_REALM,
         },
     )
