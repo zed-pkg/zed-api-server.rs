@@ -9,7 +9,7 @@ use axum::http::HeaderMap;
 use sea_orm::{ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
 use zed_interfaces::registry::{YankRequest, YankResponse};
 
-use crate::auth::require_token;
+use crate::registry_actor::require_registry_actor;
 use crate::entities::version;
 use crate::error::{ApiErr, ApiResult};
 use crate::state::AppState;
@@ -22,17 +22,13 @@ pub async fn yank(
     headers: HeaderMap,
     Json(request): Json<YankRequest>,
 ) -> ApiResult<Json<YankResponse>> {
-    let token = require_token(&state.db, &headers).await?;
+    let actor = require_registry_actor(&state.db, &headers).await?;
     let org_row = find_org(&state, &org_slug).await?;
     // Yank/un-yank is a mutation of published state: same authority as publish.
     // Route through the shared authorizer so scope AND role stay enforced here
     // (a reader token must not be able to yank or restore versions) and cannot
     // drift apart from the publish path.
-    crate::rbac::authorize_publish(
-        token.org_id,
-        crate::rbac::Role::parse(&token.role),
-        org_row.id,
-    )?;
+    crate::rbac::authorize_publish(actor.org_scope(), actor.role(), org_row.id)?;
     let pkg = find_package(&state, &org_row, &name).await?;
     let row = version::Entity::find()
         .filter(version::Column::PackageId.eq(pkg.id))
@@ -49,7 +45,7 @@ pub async fn yank(
     crate::audit::record(
         &state.db,
         org_row.id,
-        &token,
+        actor.legacy_token(),
         if updated.yanked {
             zed_interfaces::registry::AuditAction::Yank
         } else {
