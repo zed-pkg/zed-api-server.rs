@@ -4,6 +4,8 @@
 //! immutable security evidence into a publication admission decision so route
 //! handlers do not scatter policy checks across effectful code paths.
 
+#![allow(clippy::needless_return)]
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IntakeState {
     Received,
@@ -317,7 +319,11 @@ mod tests {
 
     #[test]
     fn received_and_terminal_states_cannot_reenter_admission() {
-        for state in [IntakeState::Received, IntakeState::Published, IntakeState::Rejected] {
+        for state in [
+            IntakeState::Received,
+            IntakeState::Published,
+            IntakeState::Rejected,
+        ] {
             let mut value = request(RiskDecision::Clear);
             value.current_state = state;
             let outcome = evaluate(&value);
