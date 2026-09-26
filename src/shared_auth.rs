@@ -22,6 +22,7 @@ const MAX_REQUEST_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_CREDENTIAL_BYTES: usize = 16 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 128;
+const MAX_REQUIRED_SCOPES: usize = 64;
 
 #[derive(Debug)]
 pub enum ClientError {
@@ -106,8 +107,16 @@ pub struct Introspection {
 
 #[derive(Debug, Serialize)]
 struct IntrospectRequest<'a> {
+    contract: &'static str,
+    payload: IntrospectPayload<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct IntrospectPayload<'a> {
     token: &'a str,
     audience: &'a str,
+    #[serde(rename = "requiredScopes")]
+    required_scopes: &'a [&'a str],
 }
 
 #[derive(Clone)]
@@ -152,16 +161,25 @@ impl SharedAuthClient {
         &self,
         token: &str,
         audience: &str,
+        required_scopes: &[&str],
     ) -> Result<Introspection, ClientError> {
         let token = required_credential(token, "token")?;
         let audience = required_identifier(audience, "audience")?;
+        validate_required_scopes(required_scopes)?;
         let service_credential = self
             .service_credential
             .as_deref()
             .ok_or(ClientError::MissingServiceCredential)?;
         let service_credential = required_credential(service_credential, "service credential")?;
-        let body = serde_json::to_vec(&IntrospectRequest { token, audience })
-            .map_err(ClientError::Decode)?;
+        let body = serde_json::to_vec(&IntrospectRequest {
+            contract: "IntrospectionRequest",
+            payload: IntrospectPayload {
+                token,
+                audience,
+                required_scopes,
+            },
+        })
+        .map_err(ClientError::Decode)?;
         if body.len() > MAX_REQUEST_BYTES {
             return Err(ClientError::RequestTooLarge {
                 limit: MAX_REQUEST_BYTES,
@@ -255,6 +273,20 @@ fn required_identifier<'a>(value: &'a str, field: &'static str) -> Result<&'a st
     }
 }
 
+fn validate_required_scopes(scopes: &[&str]) -> Result<(), ClientError> {
+    if scopes.len() > MAX_REQUIRED_SCOPES {
+        return Err(ClientError::InvalidInput("required scopes"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for scope in scopes {
+        let scope = required_identifier(scope, "required scope")?;
+        if !seen.insert(scope) {
+            return Err(ClientError::InvalidInput("required scopes"));
+        }
+    }
+    Ok(())
+}
+
 fn bearer_value(token: &str) -> Result<reqwest::header::HeaderValue, ClientError> {
     let value = format!("Bearer {token}");
     reqwest::header::HeaderValue::from_str(&value)
@@ -287,5 +319,35 @@ mod tests {
         assert!(required_credential("token\nvalue", "token").is_err());
         assert!(required_identifier("zed-pkg", "audience").is_ok());
         assert!(required_identifier("zed pkg", "audience").is_err());
+    }
+
+    #[test]
+    fn canonical_introspection_envelope_keeps_required_scopes_explicit() {
+        let request = IntrospectRequest {
+            contract: "IntrospectionRequest",
+            payload: IntrospectPayload {
+                token: "user-token",
+                audience: "zed-pkg",
+                required_scopes: &["zpkg:account"],
+            },
+        };
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["contract"], "IntrospectionRequest");
+        assert_eq!(value["payload"]["token"], "user-token");
+        assert_eq!(value["payload"]["audience"], "zed-pkg");
+        assert_eq!(
+            value["payload"]["requiredScopes"],
+            serde_json::json!(["zpkg:account"])
+        );
+    }
+
+    #[test]
+    fn required_scopes_are_bounded_unique_and_identifier_safe() {
+        assert!(validate_required_scopes(&[]).is_ok());
+        assert!(validate_required_scopes(&["zpkg:account", "zpkg:registry:read"]).is_ok());
+        assert!(validate_required_scopes(&["zpkg:account", "zpkg:account"]).is_err());
+        assert!(validate_required_scopes(&["zed pkg"]).is_err());
+        let too_many = vec!["scope"; MAX_REQUIRED_SCOPES + 1];
+        assert!(validate_required_scopes(&too_many).is_err());
     }
 }
