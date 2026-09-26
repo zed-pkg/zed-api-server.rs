@@ -129,6 +129,61 @@ fn risk_matches_request(risk: &RiskEvidence, request: &AdmissionRequest) -> bool
         && risk.policy_digest == request.policy_digest;
 }
 
+fn validate_rebuild(request: &AdmissionRequest) -> Result<&RebuildEvidence, AdmissionOutcome> {
+    let Some(rebuild) = request.rebuild.as_ref() else {
+        return Err(AdmissionOutcome {
+            decision: AdmissionDecision::Quarantine,
+            reason: AdmissionReason::MissingRebuildEvidence,
+        });
+    };
+    if !rebuild_matches_request(rebuild, request) {
+        return Err(reject(AdmissionReason::RebuildIdentityMismatch));
+    }
+    if !rebuild.matched || rebuild.rebuilt_artifact_digest != request.artifact_digest {
+        return Err(reject(AdmissionReason::RebuildArtifactMismatch));
+    }
+    return Ok(rebuild);
+}
+
+fn validate_risk(request: &AdmissionRequest) -> Result<&RiskEvidence, AdmissionOutcome> {
+    let Some(risk) = request.risk.as_ref() else {
+        return Err(AdmissionOutcome {
+            decision: AdmissionDecision::Quarantine,
+            reason: AdmissionReason::MissingRiskEvidence,
+        });
+    };
+    if !risk_matches_request(risk, request) {
+        return Err(reject(AdmissionReason::RiskIdentityMismatch));
+    }
+    return Ok(risk);
+}
+
+fn evaluate_approval(
+    request: &AdmissionRequest,
+    rebuild: &RebuildEvidence,
+    risk: &RiskEvidence,
+) -> AdmissionOutcome {
+    let Some(approval) = request.approval.as_ref() else {
+        return AdmissionOutcome {
+            decision: AdmissionDecision::PendingApproval,
+            reason: AdmissionReason::MissingApproval,
+        };
+    };
+    if !bindings_match_request(&approval.bindings, request)
+        || approval.bindings.risk_receipt_digest != risk.risk_receipt_digest
+        || approval.bindings.rebuild_receipt_digest != rebuild.receipt_digest
+    {
+        return reject(AdmissionReason::ApprovalIdentityMismatch);
+    }
+    if approval.decision != ApprovalDecision::Approved {
+        return reject(AdmissionReason::ApprovalRejected);
+    }
+    return AdmissionOutcome {
+        decision: AdmissionDecision::Publishable,
+        reason: AdmissionReason::AllRequiredEvidenceBound,
+    };
+}
+
 pub fn evaluate(request: &AdmissionRequest) -> AdmissionOutcome {
     if !matches!(
         request.current_state,
@@ -137,53 +192,25 @@ pub fn evaluate(request: &AdmissionRequest) -> AdmissionOutcome {
         return reject(AdmissionReason::InvalidState);
     }
 
-    let Some(rebuild) = request.rebuild.as_ref() else {
-        return AdmissionOutcome {
-            decision: AdmissionDecision::Quarantine,
-            reason: AdmissionReason::MissingRebuildEvidence,
-        };
+    let rebuild = match validate_rebuild(request) {
+        Ok(rebuild) => rebuild,
+        Err(outcome) => {
+            return outcome;
+        }
     };
-    if !rebuild_matches_request(rebuild, request) {
-        return reject(AdmissionReason::RebuildIdentityMismatch);
-    }
-    if !rebuild.matched || rebuild.rebuilt_artifact_digest != request.artifact_digest {
-        return reject(AdmissionReason::RebuildArtifactMismatch);
-    }
-
-    let Some(risk) = request.risk.as_ref() else {
-        return AdmissionOutcome {
-            decision: AdmissionDecision::Quarantine,
-            reason: AdmissionReason::MissingRiskEvidence,
-        };
+    let risk = match validate_risk(request) {
+        Ok(risk) => risk,
+        Err(outcome) => {
+            return outcome;
+        }
     };
-    if !risk_matches_request(risk, request) {
-        return reject(AdmissionReason::RiskIdentityMismatch);
-    }
 
     match risk.decision {
         RiskDecision::Reject => {
             return reject(AdmissionReason::RiskRejected);
         }
         RiskDecision::RequireApproval => {
-            let Some(approval) = request.approval.as_ref() else {
-                return AdmissionOutcome {
-                    decision: AdmissionDecision::PendingApproval,
-                    reason: AdmissionReason::MissingApproval,
-                };
-            };
-            if !bindings_match_request(&approval.bindings, request)
-                || approval.bindings.risk_receipt_digest != risk.risk_receipt_digest
-                || approval.bindings.rebuild_receipt_digest != rebuild.receipt_digest
-            {
-                return reject(AdmissionReason::ApprovalIdentityMismatch);
-            }
-            if approval.decision != ApprovalDecision::Approved {
-                return reject(AdmissionReason::ApprovalRejected);
-            }
-            return AdmissionOutcome {
-                decision: AdmissionDecision::Publishable,
-                reason: AdmissionReason::AllRequiredEvidenceBound,
-            };
+            return evaluate_approval(request, rebuild, risk);
         }
         RiskDecision::Clear => {
             return AdmissionOutcome {
