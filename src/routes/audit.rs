@@ -12,7 +12,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::Deserialize;
 use zed_interfaces::registry::{AuditAction, AuditEntry, AuditIntegrityResponse, AuditLogResponse};
 
-use crate::auth::require_token;
+use crate::registry_actor::require_registry_actor;
 use crate::entities::audit_log;
 use crate::error::{ApiErr, ApiResult};
 use crate::state::AppState;
@@ -43,13 +43,9 @@ pub async fn get_audit_log(
     Query(query): Query<AuditQuery>,
     headers: HeaderMap,
 ) -> ApiResult<Json<AuditLogResponse>> {
-    let token = require_token(&state.db, &headers).await?;
+    let actor = require_registry_actor(&state.db, &headers).await?;
     let org_row = find_org(&state, &org_slug).await?;
-    crate::rbac::authorize_manage(
-        token.org_id,
-        crate::rbac::Role::parse(&token.role),
-        org_row.id,
-    )?;
+    crate::rbac::authorize_manage(actor.org_scope(), actor.role(), org_row.id)?;
 
     // Reject an unknown action rather than silently returning everything: a
     // typo'd filter that looks like it worked is how an operator concludes
