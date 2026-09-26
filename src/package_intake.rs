@@ -39,6 +39,7 @@ pub struct DigestBindings {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RebuildEvidence {
+    pub receipt_digest: String,
     pub artifact_digest: String,
     pub source_digest: String,
     pub rebuilt_artifact_digest: String,
@@ -90,7 +91,6 @@ pub enum AdmissionReason {
     MissingRiskEvidence,
     RiskIdentityMismatch,
     RiskRejected,
-    ApprovalRequired,
     MissingApproval,
     ApprovalIdentityMismatch,
     ApprovalRejected,
@@ -171,7 +171,7 @@ pub fn evaluate(request: &AdmissionRequest) -> AdmissionOutcome {
             };
             if !bindings_match_request(&approval.bindings, request)
                 || approval.bindings.risk_receipt_digest != risk.risk_receipt_digest
-                || approval.bindings.rebuild_receipt_digest.is_empty()
+                || approval.bindings.rebuild_receipt_digest != rebuild.receipt_digest
             {
                 return reject(AdmissionReason::ApprovalIdentityMismatch);
             }
@@ -201,6 +201,7 @@ mod tests {
 
     fn rebuild(artifact: &str, source: &str) -> RebuildEvidence {
         return RebuildEvidence {
+            receipt_digest: "rebuild-receipt".to_owned(),
             artifact_digest: artifact.to_owned(),
             source_digest: source.to_owned(),
             rebuilt_artifact_digest: artifact.to_owned(),
@@ -235,6 +236,19 @@ mod tests {
         };
     }
 
+    fn approval(artifact: &str, rebuild_receipt: &str) -> ApprovalEvidence {
+        return ApprovalEvidence {
+            bindings: DigestBindings {
+                artifact_digest: artifact.to_owned(),
+                source_digest: "source".to_owned(),
+                policy_digest: "policy".to_owned(),
+                risk_receipt_digest: "risk-receipt".to_owned(),
+                rebuild_receipt_digest: rebuild_receipt.to_owned(),
+            },
+            decision: ApprovalDecision::Approved,
+        };
+    }
+
     #[test]
     fn missing_security_evidence_fails_closed_to_quarantine() {
         let mut value = request(RiskDecision::Clear);
@@ -253,7 +267,10 @@ mod tests {
     #[test]
     fn rebuild_mismatch_rejects_publication() {
         let mut value = request(RiskDecision::Clear);
-        value.rebuild.as_mut().unwrap().rebuilt_artifact_digest = "different".to_owned();
+        let Some(rebuild) = value.rebuild.as_mut() else {
+            panic!("fixture must include rebuild evidence");
+        };
+        rebuild.rebuilt_artifact_digest = "different".to_owned();
         let outcome = evaluate(&value);
         assert_eq!(outcome.decision, AdmissionDecision::Reject);
         assert_eq!(outcome.reason, AdmissionReason::RebuildArtifactMismatch);
@@ -274,16 +291,16 @@ mod tests {
         assert_eq!(outcome.decision, AdmissionDecision::PendingApproval);
         assert_eq!(outcome.reason, AdmissionReason::MissingApproval);
 
-        value.approval = Some(ApprovalEvidence {
-            bindings: DigestBindings {
-                artifact_digest: "different".to_owned(),
-                source_digest: "source".to_owned(),
-                policy_digest: "policy".to_owned(),
-                risk_receipt_digest: "risk-receipt".to_owned(),
-                rebuild_receipt_digest: "rebuild-receipt".to_owned(),
-            },
-            decision: ApprovalDecision::Approved,
-        });
+        value.approval = Some(approval("different", "rebuild-receipt"));
+        let outcome = evaluate(&value);
+        assert_eq!(outcome.decision, AdmissionDecision::Reject);
+        assert_eq!(outcome.reason, AdmissionReason::ApprovalIdentityMismatch);
+    }
+
+    #[test]
+    fn stale_approval_for_prior_rebuild_receipt_rejects() {
+        let mut value = request(RiskDecision::RequireApproval);
+        value.approval = Some(approval("artifact", "old-rebuild-receipt"));
         let outcome = evaluate(&value);
         assert_eq!(outcome.decision, AdmissionDecision::Reject);
         assert_eq!(outcome.reason, AdmissionReason::ApprovalIdentityMismatch);
@@ -292,23 +309,14 @@ mod tests {
     #[test]
     fn matching_approval_promotes_to_publishable() {
         let mut value = request(RiskDecision::RequireApproval);
-        value.approval = Some(ApprovalEvidence {
-            bindings: DigestBindings {
-                artifact_digest: "artifact".to_owned(),
-                source_digest: "source".to_owned(),
-                policy_digest: "policy".to_owned(),
-                risk_receipt_digest: "risk-receipt".to_owned(),
-                rebuild_receipt_digest: "rebuild-receipt".to_owned(),
-            },
-            decision: ApprovalDecision::Approved,
-        });
+        value.approval = Some(approval("artifact", "rebuild-receipt"));
         let outcome = evaluate(&value);
         assert_eq!(outcome.decision, AdmissionDecision::Publishable);
         assert_eq!(outcome.reason, AdmissionReason::AllRequiredEvidenceBound);
     }
 
     #[test]
-    fn received_and_published_states_cannot_reenter_admission() {
+    fn received_and_terminal_states_cannot_reenter_admission() {
         for state in [IntakeState::Received, IntakeState::Published, IntakeState::Rejected] {
             let mut value = request(RiskDecision::Clear);
             value.current_state = state;
