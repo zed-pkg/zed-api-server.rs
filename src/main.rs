@@ -30,6 +30,7 @@ mod files;
 mod flags;
 mod ratelimit;
 mod rbac;
+mod registry_actor;
 mod registry_host;
 mod routes;
 mod server;
