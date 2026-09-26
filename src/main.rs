@@ -28,6 +28,7 @@ mod entities;
 mod error;
 mod files;
 mod flags;
+mod package_intake;
 mod ratelimit;
 mod rbac;
 mod registry_host;
