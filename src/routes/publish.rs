@@ -18,7 +18,7 @@ use zed_interfaces::registry::{
     PUBLISH_ARTIFACT_FIELD, PUBLISH_META_FIELD, PublishMeta, PublishResponse,
 };
 
-use crate::auth::require_token;
+use crate::registry_actor::require_registry_actor;
 use crate::entities::{org, package, version};
 use crate::error::{ApiErr, ApiResult};
 use crate::state::AppState;
@@ -31,7 +31,7 @@ pub async fn publish(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> ApiResult<Json<PublishResponse>> {
-    let token = require_token(&state.db, &headers).await?;
+    let actor = require_registry_actor(&state.db, &headers).await?;
     let user_agent = headers
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
@@ -54,11 +54,7 @@ pub async fn publish(
                 "org `{org_slug}` does not exist; claim it first with `zed org claim {org_slug}`"
             ),
         })?;
-    crate::rbac::authorize_publish(
-        token.org_id,
-        crate::rbac::Role::parse(&token.role),
-        org_row.id,
-    )?;
+    crate::rbac::authorize_publish(actor.org_scope(), actor.role(), org_row.id)?;
 
     let (meta, artifact) = read_multipart(&mut multipart).await?;
 
@@ -365,7 +361,7 @@ pub async fn publish(
     crate::audit::record(
         &state.db,
         org_row.id,
-        &token,
+        actor.legacy_token(),
         zed_interfaces::registry::AuditAction::Publish,
         format!("{org_slug}/{name}@{ver}"),
         Some(format!("sha256={actual_sha}")),
