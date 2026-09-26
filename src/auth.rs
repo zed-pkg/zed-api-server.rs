@@ -13,6 +13,13 @@ use crate::state::AppState;
 const REQUIRED_ACCOUNT_SCOPE: &str = "zpkg:account";
 const CUSTOMER_AUTH_REALM: &str = "customer";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DelegatedIdentityPolicy<'a> {
+    pub authorized_party: &'a str,
+    pub required_scope: &'a str,
+    pub realm: &'a str,
+}
+
 /// Verified browser/account identity. The Shared Auth token is intentionally
 /// not retained: handlers receive only the canonical identity facts needed to
 /// project a registry user and evaluate product memberships.
@@ -43,6 +50,23 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<String> {
 /// outage or server misconfiguration is 503; a base/service/wrong-client token
 /// is 403. No branch synthesizes authority.
 pub async fn require_account(state: &AppState, headers: &HeaderMap) -> ApiResult<AccountIdentity> {
+    require_delegated_identity(
+        state,
+        headers,
+        DelegatedIdentityPolicy {
+            authorized_party: &state.shared_auth_application_id,
+            required_scope: REQUIRED_ACCOUNT_SCOPE,
+            realm: CUSTOMER_AUTH_REALM,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn require_delegated_identity(
+    state: &AppState,
+    headers: &HeaderMap,
+    policy: DelegatedIdentityPolicy<'_>,
+) -> ApiResult<AccountIdentity> {
     let token = bearer_token(headers).ok_or_else(ApiErr::unauthorized)?;
     let client = state.shared_auth.as_ref().ok_or_else(|| {
         ApiErr::service_unavailable(
@@ -54,16 +78,16 @@ pub async fn require_account(state: &AppState, headers: &HeaderMap) -> ApiResult
         .introspect_for_audience(
             &token,
             &state.shared_auth_audience,
-            &[REQUIRED_ACCOUNT_SCOPE],
+            &[policy.required_scope],
         )
         .await
         .map_err(map_shared_auth_error)?;
-    account_from_introspection(&introspection, &state.shared_auth_application_id)
+    account_from_introspection(&introspection, policy)
 }
 
 fn account_from_introspection(
     introspection: &Introspection,
-    expected_authorized_party: &str,
+    policy: DelegatedIdentityPolicy<'_>,
 ) -> ApiResult<AccountIdentity> {
     if !introspection.active {
         return Err(ApiErr::unauthorized());
@@ -89,36 +113,36 @@ fn account_from_introspection(
             "this endpoint requires a session-backed delegated user token",
         ));
     }
-    if authorized_party.as_deref() != Some(expected_authorized_party) {
+    if authorized_party.as_deref() != Some(policy.authorized_party) {
         return Err(ApiErr::forbidden(
             "wrong_authorized_party",
-            "the delegated token was not issued to the zed-pkg web client",
+            "the delegated token was not issued to the expected zed-pkg client",
         ));
     }
 
     let scope = optional_rest_string(introspection, "scope")?.ok_or_else(|| {
         ApiErr::forbidden(
             "insufficient_scope",
-            "the delegated token is missing the zed-pkg account scope",
+            "the delegated token is missing the required zed-pkg scope",
         )
     })?;
     if !scope
         .split_ascii_whitespace()
-        .any(|candidate| candidate == REQUIRED_ACCOUNT_SCOPE)
+        .any(|candidate| candidate == policy.required_scope)
     {
         return Err(ApiErr::forbidden(
             "insufficient_scope",
-            "the delegated token is missing the zed-pkg account scope",
+            "the delegated token is missing the required zed-pkg scope",
         ));
     }
 
     let realm = optional_rest_string(introspection, "auth_realm")?
         .or(optional_rest_string(introspection, "realm")?)
         .unwrap_or_else(|| CUSTOMER_AUTH_REALM.to_owned());
-    if realm != CUSTOMER_AUTH_REALM {
+    if realm != policy.realm {
         return Err(ApiErr::forbidden(
             "wrong_auth_realm",
-            "the zed-pkg browser client accepts customer identities only",
+            "the delegated token was issued from the wrong authentication realm",
         ));
     }
 
@@ -219,6 +243,14 @@ mod tests {
         assert_eq!(bearer_token(&headers).as_deref(), Some("zpkg_abc"));
     }
 
+    fn policy<'a>(authorized_party: &'a str, required_scope: &'a str) -> DelegatedIdentityPolicy<'a> {
+        DelegatedIdentityPolicy {
+            authorized_party,
+            required_scope,
+            realm: CUSTOMER_AUTH_REALM,
+        }
+    }
+
     fn delegated_rest(authorized_party: &str, scope: &str) -> serde_json::Map<String, Value> {
         let mut rest = serde_json::Map::new();
         rest.insert("sid".into(), Value::String("session-1".into()));
@@ -240,7 +272,7 @@ mod tests {
             email: Some("user@example.test".into()),
             rest,
         };
-        let identity = account_from_introspection(&introspection, "zpkg-web").unwrap();
+        let identity = account_from_introspection(&introspection, policy("zpkg-web", "zpkg:account")).unwrap();
         assert_eq!(identity.session.subject, SUBJECT.parse::<Uuid>().unwrap());
         assert_eq!(identity.session.realm, "customer");
         assert_eq!(
@@ -259,7 +291,7 @@ mod tests {
             rest: delegated_rest("zpkg-web", "zpkg:account"),
         };
         assert_eq!(
-            account_from_introspection(&malformed, "zpkg-web")
+            account_from_introspection(&malformed, policy("zpkg-web", "zpkg:account"))
                 .unwrap_err()
                 .status,
             axum::http::StatusCode::UNAUTHORIZED
@@ -275,7 +307,7 @@ mod tests {
             rest,
         };
         assert_eq!(
-            account_from_introspection(&admin, "zpkg-web")
+            account_from_introspection(&admin, policy("zpkg-web", "zpkg:account"))
                 .unwrap_err()
                 .code,
             "wrong_auth_realm"
@@ -292,7 +324,7 @@ mod tests {
             rest: serde_json::Map::new(),
         };
         assert_eq!(
-            account_from_introspection(&base, "zpkg-web")
+            account_from_introspection(&base, policy("zpkg-web", "zpkg:account"))
                 .unwrap_err()
                 .code,
             "delegated_user_token_required"
@@ -306,7 +338,7 @@ mod tests {
             rest: delegated_rest("other-web", "zpkg:account"),
         };
         assert_eq!(
-            account_from_introspection(&wrong_party, "zpkg-web")
+            account_from_introspection(&wrong_party, policy("zpkg-web", "zpkg:account"))
                 .unwrap_err()
                 .code,
             "wrong_authorized_party"
@@ -323,10 +355,45 @@ mod tests {
             rest: delegated_rest("zpkg-web", "zpkg:packages:read"),
         };
         assert_eq!(
-            account_from_introspection(&introspection, "zpkg-web")
+            account_from_introspection(&introspection, policy("zpkg-web", "zpkg:account"))
                 .unwrap_err()
                 .code,
             "insufficient_scope"
+        );
+    }
+
+    #[test]
+    fn cli_and_web_delegation_policies_are_not_interchangeable() {
+        let cli = Introspection {
+            active: true,
+            sub: Some(SUBJECT.into()),
+            iss: Some("https://auth.example.test".into()),
+            email: None,
+            rest: delegated_rest("zpkg-cli", "zpkg:registry"),
+        };
+        let cli_identity =
+            account_from_introspection(&cli, policy("zpkg-cli", "zpkg:registry")).unwrap();
+        assert_eq!(cli_identity.session.subject, SUBJECT.parse::<Uuid>().unwrap());
+
+        assert_eq!(
+            account_from_introspection(&cli, policy("zpkg-web", "zpkg:account"))
+                .unwrap_err()
+                .code,
+            "wrong_authorized_party"
+        );
+
+        let web = Introspection {
+            active: true,
+            sub: Some(SUBJECT.into()),
+            iss: Some("https://auth.example.test".into()),
+            email: None,
+            rest: delegated_rest("zpkg-web", "zpkg:account"),
+        };
+        assert_eq!(
+            account_from_introspection(&web, policy("zpkg-cli", "zpkg:registry"))
+                .unwrap_err()
+                .code,
+            "wrong_authorized_party"
         );
     }
 
