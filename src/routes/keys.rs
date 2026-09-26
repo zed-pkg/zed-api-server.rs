@@ -21,7 +21,7 @@ use uuid::Uuid;
 use zed_interfaces::registry::{OrgKeysRequest, OrgKeysResponse};
 use zed_interfaces::signing::{PublisherKeyStateV1, PublisherKeyV1};
 
-use crate::auth::require_token;
+use crate::registry_actor::require_registry_actor;
 use crate::entities::publisher_key;
 use crate::error::{ApiErr, ApiResult};
 use crate::state::AppState;
@@ -56,16 +56,12 @@ pub async fn put_keys(
     headers: HeaderMap,
     Json(request): Json<OrgKeysRequest>,
 ) -> ApiResult<Json<OrgKeysResponse>> {
-    let token = require_token(&state.db, &headers).await?;
+    let actor = require_registry_actor(&state.db, &headers).await?;
     let org_row = find_org(&state, &org_slug).await?;
     // Enrolling a key changes what consumers will trust for every future
     // publish, which is org management, not publishing. Same authority as
     // claiming the namespace.
-    crate::rbac::authorize_manage(
-        token.org_id,
-        crate::rbac::Role::parse(&token.role),
-        org_row.id,
-    )?;
+    crate::rbac::authorize_manage(actor.org_scope(), actor.role(), org_row.id)?;
 
     if request.keys.len() > MAX_KEYS_PER_ORG {
         return Err(ApiErr::bad_request(
