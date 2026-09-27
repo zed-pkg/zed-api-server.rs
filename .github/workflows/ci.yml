@@ -18,7 +18,7 @@ env:
   CARGO_TERM_COLOR: always
   EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
   BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-  ZED_INTERFACES_SHA: 996fc56e20c4bb41366377be14edfae886b84e82
+  ZED_INTERFACES_SHA: b6ec4ad9926b9c8b36ce9a5eb9814f5ea56e8126
   ZED_LIB_CORE_SHA: c3d486a1519381276fbec02aa25247f542924443
 
 jobs:
