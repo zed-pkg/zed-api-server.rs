@@ -105,6 +105,17 @@ impl From<anyhow::Error> for ApiErr {
     }
 }
 
+impl From<crate::verify::TagVerifyError> for ApiErr {
+    fn from(err: crate::verify::TagVerifyError) -> Self {
+        tracing::error!(error = %err, "tag verification failed");
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "tag_verification_failed",
+            message: "upstream tag verification failed".to_string(),
+        }
+    }
+}
+
 impl From<crate::files::ExtractError> for ApiErr {
     fn from(err: crate::files::ExtractError) -> Self {
         match err {
