@@ -23,6 +23,7 @@ mod binary_artifact;
 #[cfg(test)]
 mod binary_artifact_adversarial_tests;
 mod config;
+mod edge_fallback;
 mod embeddings;
 mod entities;
 mod error;
