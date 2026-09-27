@@ -162,9 +162,7 @@ fn warning_fingerprint(event: &Value) -> Result<Option<(Fingerprint, String)>, C
 type WarningCounts = BTreeMap<Fingerprint, u64>;
 type WarningExamples = BTreeMap<Fingerprint, String>;
 
-fn read_warnings(
-    path: &Path,
-) -> Result<(WarningCounts, WarningExamples), ComparatorError> {
+fn read_warnings(path: &Path) -> Result<(WarningCounts, WarningExamples), ComparatorError> {
     let reader = BufReader::new(File::open(path)?);
     let result = reader.lines().enumerate().try_fold(
         (
