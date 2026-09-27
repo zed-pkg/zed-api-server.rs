@@ -162,10 +162,7 @@ mod tests {
         };
 
         let principal = EdgeCapabilityPrincipal::from(&reader);
-        assert_eq!(
-            principal.subject,
-            "ad7c2010-c28a-4cad-a510-4c4020f93535"
-        );
+        assert_eq!(principal.subject, "ad7c2010-c28a-4cad-a510-4c4020f93535");
         assert_eq!(principal.session_id, "session:abc-123");
         assert_eq!(principal.parent_jti, "parent-token-0001");
     }
@@ -189,8 +186,8 @@ mod tests {
     }
 
     #[test]
-    fn github_resource_is_derived_from_registry_owned_repo_url(
-    ) -> Result<(), EdgeCapabilityIssueError> {
+    fn github_resource_is_derived_from_registry_owned_repo_url()
+    -> Result<(), EdgeCapabilityIssueError> {
         let grant = github_grant_for_package(
             "acme/private-lib",
             "https://github.com/acme/private-lib.git",
@@ -212,8 +209,8 @@ mod tests {
     }
 
     #[test]
-    fn v2_capability_binds_lineage_resource_and_short_lifetime(
-    ) -> Result<(), EdgeCapabilityIssueError> {
+    fn v2_capability_binds_lineage_resource_and_short_lifetime()
+    -> Result<(), EdgeCapabilityIssueError> {
         let capability = build_github_capability_v2(
             "https://api.zpkg.net",
             &principal(),
