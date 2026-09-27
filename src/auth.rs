@@ -449,15 +449,21 @@ mod tests {
             package_reader_introspection("zpkg-cli", "zpkg:packages:read", Some("customer"));
         let identity = package_reader_from_introspection(&introspection).ok();
         assert_eq!(
-            identity.as_ref().map(|identity| identity.session.subject.to_string()),
+            identity
+                .as_ref()
+                .map(|identity| identity.session.subject.to_string()),
             Some(SUBJECT.to_owned())
         );
         assert_eq!(
-            identity.as_ref().map(|identity| identity.session_id.as_str()),
+            identity
+                .as_ref()
+                .map(|identity| identity.session_id.as_str()),
             Some("session-1")
         );
         assert_eq!(
-            identity.as_ref().map(|identity| identity.parent_jti.as_str()),
+            identity
+                .as_ref()
+                .map(|identity| identity.parent_jti.as_str()),
             Some("parent-token-1")
         );
     }
@@ -499,8 +505,7 @@ mod tests {
             Some("delegated_user_token_required")
         );
 
-        let admin =
-            package_reader_introspection("zpkg-cli", "zpkg:packages:read", Some("admin"));
+        let admin = package_reader_introspection("zpkg-cli", "zpkg:packages:read", Some("admin"));
         assert_eq!(
             package_reader_from_introspection(&admin)
                 .err()
