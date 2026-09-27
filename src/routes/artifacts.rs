@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tokio_util::io::ReaderStream;
 
+use crate::auth::require_package_reader;
 use crate::entities::version;
 use crate::error::{ApiErr, ApiResult};
 use crate::files;
@@ -19,10 +20,76 @@ use super::{artifact_format, find_org, find_package};
 
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 
+fn artifact_requires_private_authorization(
+    packages: &[zed_orm_core::models::PackageSummary],
+) -> bool {
+    !packages.is_empty()
+        && packages
+            .iter()
+            .all(|package| package.visibility != "public")
+}
+
+async fn authorize_artifact_read(
+    state: &AppState,
+    headers: &HeaderMap,
+    sha256: &str,
+) -> ApiResult<()> {
+    let read = state.registry_read.as_ref().ok_or_else(|| {
+        ApiErr::service_unavailable(
+            "registry_data_plane_unavailable",
+            "canonical registry read context is not configured",
+        )
+    })?;
+    let packages = zed_orm_core::read::packages_for_artifact_sha256(read, sha256)
+        .await
+        .map_err(crate::account::map_orm_error)?;
+
+    // Legacy-only artifacts predate canonical visibility and remain in the
+    // existing anonymous compatibility plane. A shared digest with any public
+    // canonical reference is public bytes by definition; private references
+    // cannot make those same bytes secret again.
+    if !artifact_requires_private_authorization(&packages) {
+        return Ok(());
+    }
+
+    let reader = require_package_reader(state, headers).await?;
+    let Some(user) =
+        zed_orm_core::read::user_by_subject(read, &reader.session.realm, reader.session.subject)
+            .await
+            .map_err(crate::account::map_orm_error)?
+    else {
+        return Err(ApiErr::not_found("artifact"));
+    };
+
+    for package in &packages {
+        let org_role = zed_orm_core::read::org_role_for_user(read, package.org_id, user.id)
+            .await
+            .map_err(crate::account::map_orm_error)?;
+        if org_role.is_some() {
+            return Ok(());
+        }
+        if let Some(project_id) = package.project_id {
+            let project_role =
+                zed_orm_core::read::project_role_for_user(read, project_id, user.id)
+                    .await
+                    .map_err(crate::account::map_orm_error)?;
+            if project_role.is_some() {
+                return Ok(());
+            }
+        }
+    }
+
+    // Do not confirm a private artifact's existence to an authenticated user
+    // who lacks membership in every referencing package.
+    Err(ApiErr::not_found("artifact"))
+}
+
 pub async fn get_artifact(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(sha256): Path<String>,
 ) -> ApiResult<Response> {
+    authorize_artifact_read(&state, &headers, &sha256).await?;
     let row = version::Entity::find()
         .filter(version::Column::Sha256.eq(&sha256))
         .one(&state.db)
@@ -62,6 +129,50 @@ pub async fn get_artifact(
             Body::from_stream(ReaderStream::new(file)),
         )
             .into_response()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use uuid::Uuid;
+    use zed_orm_core::models::PackageSummary;
+
+    fn package(visibility: &str) -> PackageSummary {
+        PackageSummary {
+            id: Uuid::nil(),
+            org_id: Uuid::nil(),
+            org_slug: "example".into(),
+            project_id: None,
+            project_slug: None,
+            name: "pkg".into(),
+            description: None,
+            visibility: visibility.into(),
+            repo_url: "https://github.com/example/pkg".into(),
+            config: json!({}),
+            latest_version: None,
+            download_count: 0,
+            version_count: 1,
+        }
+    }
+
+    #[test]
+    fn shared_digest_is_anonymous_when_any_reference_is_public() {
+        assert!(!artifact_requires_private_authorization(&[]));
+        assert!(!artifact_requires_private_authorization(&[package("public")]));
+        assert!(!artifact_requires_private_authorization(&[
+            package("private"),
+            package("public"),
+        ]));
+    }
+
+    #[test]
+    fn all_private_digest_requires_resource_authorization() {
+        assert!(artifact_requires_private_authorization(&[
+            package("private"),
+            package("private"),
+        ]));
     }
 }
 
