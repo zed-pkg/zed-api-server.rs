@@ -7,7 +7,7 @@ use zed_interfaces::edge_fallback::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EdgeCapabilityIssueError {
+pub(crate) enum EdgeCapabilityIssueError {
     PublicPackage,
     UnsupportedVisibility,
     ReadDenied,
@@ -38,13 +38,13 @@ impl fmt::Display for EdgeCapabilityIssueError {
 impl std::error::Error for EdgeCapabilityIssueError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EdgeCapabilityPrincipal {
+pub(crate) struct EdgeCapabilityPrincipal {
     pub subject: String,
     pub session_id: String,
     pub parent_jti: String,
 }
 
-pub fn authorize_private_package_read(
+pub(crate) fn authorize_private_package_read(
     visibility: &str,
     org_role: Option<&str>,
     project_role: Option<&str>,
@@ -62,7 +62,7 @@ pub fn authorize_private_package_read(
     }
 }
 
-pub fn github_grant_for_package(
+pub(crate) fn github_grant_for_package(
     package: &str,
     repo_url: &str,
 ) -> Result<EdgeFallbackGrantV2, EdgeCapabilityIssueError> {
@@ -76,7 +76,7 @@ pub fn github_grant_for_package(
     })
 }
 
-pub fn build_github_capability_v2(
+pub(crate) fn build_github_capability_v2(
     issuer: &str,
     principal: &EdgeCapabilityPrincipal,
     package: &str,
