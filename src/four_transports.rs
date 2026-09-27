@@ -26,6 +26,17 @@ use ores_transport::{
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 
+#[derive(Debug)]
+pub struct TransportRuntimeError(String);
+
+impl std::fmt::Display for TransportRuntimeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TransportRuntimeError {}
+
 /// Service slug, which derives the NATS subjects and stream names.
 ///
 /// It must match the slug the web server uses, or the two will be publishing
@@ -93,25 +104,30 @@ pub async fn serve_stateful<O, T>(
 pub async fn serve_asynchronous<O, T>(
     context: ores_transport::async_nats::jetstream::Context,
     handler: Arc<dyn OperationHandler<O, T>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+) -> Result<(), TransportRuntimeError>
 where
     O: DeserializeOwned + Send + Sync,
     T: Serialize + Send,
 {
-    ores_transport::serve_jetstream(context, subjects(), handler).await
+    ores_transport::serve_jetstream(context, subjects(), handler)
+        .await
+        .map_err(|error| TransportRuntimeError(error.to_string()))
 }
 
 /// Open the JetStream context for avenue 4 from `ZED_NATS_URL`.
 ///
 /// # Errors
 /// [`ores_transport::TransportError::Upstream`] if NATS is unreachable.
-pub async fn jetstream_from_env()
--> Result<Option<ores_transport::async_nats::jetstream::Context>, Box<dyn std::error::Error + Send + Sync>>
-{
-    let config = ores_transport::TransportConfig::from_env(ENV_PREFIX)?;
+pub async fn jetstream_from_env(
+) -> Result<Option<ores_transport::async_nats::jetstream::Context>, TransportRuntimeError> {
+    let config = ores_transport::TransportConfig::from_env(ENV_PREFIX)
+        .map_err(|error| TransportRuntimeError(error.to_string()))?;
     match config.nats_url.as_deref() {
         None => Ok(None),
-        Some(url) => Ok(Some(ores_transport::connect_nats(url).await?)),
+        Some(url) => ores_transport::connect_nats(url)
+            .await
+            .map(Some)
+            .map_err(|error| TransportRuntimeError(error.to_string())),
     }
 }
 
