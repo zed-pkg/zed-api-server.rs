@@ -78,22 +78,19 @@ struct Cli {
 }
 
 fn parse_args(args: Vec<OsString>) -> Result<Cli, ComparatorError> {
-    match args.as_slice() {
-        [base_flag, base, head_flag, head]
-            if base_flag == "--base" && head_flag == "--head" =>
-        {
-            return Ok(Cli {
-                base: PathBuf::from(base),
-                head: PathBuf::from(head),
-            });
-        }
-        _ => {
-            return Err(ComparatorError::Usage(
-                "usage: ci-differential-clippy --base <cargo-json> --head <cargo-json>"
-                    .to_owned(),
-            ));
-        }
+    if let [base_flag, base, head_flag, head] = args.as_slice()
+        && base_flag == "--base"
+        && head_flag == "--head"
+    {
+        return Ok(Cli {
+            base: PathBuf::from(base),
+            head: PathBuf::from(head),
+        });
     }
+
+    return Err(ComparatorError::Usage(
+        "usage: ci-differential-clippy --base <cargo-json> --head <cargo-json>".to_owned(),
+    ));
 }
 
 fn primary_file(diagnostic: &Value) -> String {
@@ -165,8 +162,11 @@ fn read_warnings(
 ) -> Result<(BTreeMap<Fingerprint, u64>, BTreeMap<Fingerprint, String>), ComparatorError> {
     let reader = BufReader::new(File::open(path)?);
     let result = reader.lines().enumerate().try_fold(
-        (BTreeMap::new(), BTreeMap::new()),
-        |(mut counts, mut examples), (offset, line)| {
+        (
+            BTreeMap::<Fingerprint, u64>::new(),
+            BTreeMap::<Fingerprint, String>::new(),
+        ),
+        |(mut counts, mut examples), (offset, line)| -> Result<_, ComparatorError> {
             let line = line?;
             if line.trim().is_empty() {
                 return Ok((counts, examples));
