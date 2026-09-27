@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import pathlib
+import sys
 import tempfile
 import unittest
 
@@ -11,6 +12,7 @@ MODULE_PATH = pathlib.Path(__file__).with_name("differential-clippy.py")
 SPEC = importlib.util.spec_from_file_location("differential_clippy", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
