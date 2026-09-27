@@ -1,8 +1,34 @@
-use anyhow::Result;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use zed_interfaces::vcs::Vcs;
 
 use crate::config::TagPolicy;
+
+#[derive(Debug)]
+pub enum TagVerifyError {
+    Transport(reqwest::Error),
+}
+
+impl std::fmt::Display for TagVerifyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(error) => write!(formatter, "tag verification request failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for TagVerifyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(error) => Some(error),
+        }
+    }
+}
+
+impl From<reqwest::Error> for TagVerifyError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Transport(error)
+    }
+}
 
 /// Tags go into a URL path segment: encode everything but RFC 3986
 /// unreserved characters so `/`, `?`, `#`, … cannot alter the request.
@@ -45,7 +71,12 @@ impl TagVerifier {
         }
     }
 
-    pub async fn verify(&self, vcs: Vcs, repo_url: &str, tag: &str) -> Result<TagCheck> {
+    pub async fn verify(
+        &self,
+        vcs: Vcs,
+        repo_url: &str,
+        tag: &str,
+    ) -> Result<TagCheck, TagVerifyError> {
         if self.policy == TagPolicy::Off {
             return Ok(TagCheck::Skipped);
         }
