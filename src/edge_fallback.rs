@@ -19,9 +19,8 @@ pub(crate) enum EdgeCapabilityIssueError {
 impl fmt::Display for EdgeCapabilityIssueError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PublicPackage => {
-                formatter.write_str("public packages use anonymous fallback and do not need a capability")
-            }
+            Self::PublicPackage => formatter
+                .write_str("public packages use anonymous fallback and do not need a capability"),
             Self::UnsupportedVisibility => formatter.write_str("unsupported package visibility"),
             Self::ReadDenied => formatter.write_str("caller is not authorized to read the package"),
             Self::UnsupportedRepository => {
@@ -166,13 +165,16 @@ mod tests {
         assert_eq!(grant.provider(), "github");
         assert_eq!(grant.package(), "acme/private-lib");
         assert_eq!(grant.resource(), "acme/private-lib");
-        assert_eq!(
-            grant.credential_ref(),
-            "github-app:repo:acme/private-lib"
-        );
+        assert_eq!(grant.credential_ref(), "github-app:repo:acme/private-lib");
 
-        assert!(github_grant_for_package("acme/private-lib", "http://github.com/acme/private-lib").is_err());
-        assert!(github_grant_for_package("acme/private-lib", "https://gitlab.com/acme/private-lib").is_err());
+        assert!(
+            github_grant_for_package("acme/private-lib", "http://github.com/acme/private-lib")
+                .is_err()
+        );
+        assert!(
+            github_grant_for_package("acme/private-lib", "https://gitlab.com/acme/private-lib")
+                .is_err()
+        );
     }
 
     #[test]
