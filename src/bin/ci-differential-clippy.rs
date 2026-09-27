@@ -1,4 +1,6 @@
-#![allow(clippy::needless_return)]\n\nuse std::collections::BTreeMap;
+#![allow(clippy::needless_return)]
+
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::fmt;
