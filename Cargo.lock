@@ -5388,7 +5388,7 @@ dependencies = [
 
 [[package]]
 name = "zed-api-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "aws-config",
@@ -5462,7 +5462,7 @@ dependencies = [
 [[package]]
 name = "zed-orm-core"
 version = "0.1.0"
-source = "git+https://github.com/zed-pkg/zed-lib-core.git?rev=c3d486a1519381276fbec02aa25247f542924443#c3d486a1519381276fbec02aa25247f542924443"
+source = "git+https://github.com/zed-pkg/zed-lib-core.git?rev=43b87769032c993f424e89825ad22abe980f4652#43b87769032c993f424e89825ad22abe980f4652"
 dependencies = [
  "chrono",
  "sea-orm",
