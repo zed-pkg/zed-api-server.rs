@@ -173,7 +173,7 @@ jobs:
           test -s "$instance_dir/current.json"
 
       - name: Admit independent TypeSpec and Draft 2020-12 authorities with TJSV
-        uses: ORESoftware/typespec-json-schema-validator@8bf7ebda4e35c0d11b5b5e5f865867bee4fc3085
+        uses: ORESoftware/typespec-json-schema-validator@bd503465dab8c5148fee722b443ed04ff126c9bf
         with:
           typespec: contracts/toolchain/main.tsp
           schema: contracts/toolchain/authored.schema.json
