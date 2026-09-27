@@ -69,10 +69,9 @@ async fn authorize_artifact_read(
             return Ok(());
         }
         if let Some(project_id) = package.project_id {
-            let project_role =
-                zed_orm_core::read::project_role_for_user(read, project_id, user.id)
-                    .await
-                    .map_err(crate::account::map_orm_error)?;
+            let project_role = zed_orm_core::read::project_role_for_user(read, project_id, user.id)
+                .await
+                .map_err(crate::account::map_orm_error)?;
             if project_role.is_some() {
                 return Ok(());
             }
@@ -160,7 +159,9 @@ mod tests {
     #[test]
     fn shared_digest_is_anonymous_when_any_reference_is_public() {
         assert!(!artifact_requires_private_authorization(&[]));
-        assert!(!artifact_requires_private_authorization(&[package("public")]));
+        assert!(!artifact_requires_private_authorization(&[package(
+            "public"
+        )]));
         assert!(!artifact_requires_private_authorization(&[
             package("private"),
             package("public"),
