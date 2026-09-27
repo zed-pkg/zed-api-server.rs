@@ -4,22 +4,55 @@ permissions: {contents: read}
 concurrency:
   group: zed-latest-deps-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+env:
+  ZED_PKG_INTERACTIVE: "false"
+  ZED_CLI_COMMIT: eb5656e974105677982f533c6ae24f2c99abdf2e
 jobs:
   zed-latest-deps:
     name: zed-latest-deps
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env: {ZED_PKG_INTERACTIVE: "false", GITHUB_TOKEN: "${{ github.token }}"}
+    timeout-minutes: 40
+    env:
+      GITHUB_TOKEN: "${{ github.token }}"
+      ZED_PKG_GITHUB_TOKEN: "${{ github.token }}"
+      ZED_PKG_SOURCE_FALLBACK: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with: {fetch-depth: 0, persist-credentials: false}
-      - name: Install pinned Zed CLI v0.3.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out fixed commit-pinned Zed CLI
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: zed-pkg/zed-cli
+          ref: ${{ env.ZED_CLI_COMMIT }}
+          path: reviewed-tools/zed-cli
+          persist-credentials: false
+      - name: Build fixed Zed CLI from exact source
+        working-directory: reviewed-tools/zed-cli
         shell: bash
         run: |
           set -euo pipefail
-          a="$RUNNER_TEMP/zed.tar.gz"; d="$RUNNER_TEMP/zed-release"
-          curl --fail --location --retry 3 --retry-all-errors -o "$a" https://github.com/zed-pkg/zed-cli/releases/download/v0.3.0/zed-x86_64-unknown-linux-gnu.tar.gz
-          printf '%s  %s\n' f87576bc289e43ed647902527e7be70566445d2f1fd11249f067ab35547d4b8a "$a" | sha256sum --check --strict
-          mkdir -p "$d" "$HOME/.local/bin"; tar -xzf "$a" -C "$d"; z="$(find "$d" -type f -name zed -perm -111 -print -quit)"; test -n "$z"; install -m 0755 "$z" "$HOME/.local/bin/zed"; echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          test "$(git rev-parse HEAD)" = "$ZED_CLI_COMMIT"
+          cargo build --locked --bin zed
+          mkdir -p "$RUNNER_TEMP/zed-bin"
+          install -m 0755 target/debug/zed "$RUNNER_TEMP/zed-bin/zed"
+          echo "$RUNNER_TEMP/zed-bin" >> "$GITHUB_PATH"
       - run: zed --version
-      - run: bash .githooks/pre-push --ci
+      - name: Resolve newest allowed Zed dependency graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          zed install
+          zed validate --require-lock
+          git --no-pager diff -- .zpkg.lock || true
+      - name: Run repository dependency gate
+        run: bash .githooks/pre-push --ci
+      - name: Retain resolver-produced lock evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: zed-api-server-resolved-lock
+          path: .zpkg.lock
+          if-no-files-found: error
+          retention-days: 14
