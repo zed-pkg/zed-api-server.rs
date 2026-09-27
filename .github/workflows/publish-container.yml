@@ -57,7 +57,7 @@ env:
   # Keep these synchronized with the Rust CI pins; source-graph drift previously
   # made the debug test build pass while the release container could not compile.
   ZED_INTERFACES_SHA: 996fc56e20c4bb41366377be14edfae886b84e82
-  ZED_LIB_CORE_SHA: c3d486a1519381276fbec02aa25247f542924443
+  ZED_LIB_CORE_SHA: 43b87769032c993f424e89825ad22abe980f4652
 
 jobs:
   image:
