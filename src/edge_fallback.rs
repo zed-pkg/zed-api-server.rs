@@ -48,16 +48,16 @@ pub(crate) fn authorize_private_package_read(
     org_role: Option<&str>,
     project_role: Option<&str>,
 ) -> Result<(), EdgeCapabilityIssueError> {
-    match visibility {
-        "public" => Err(EdgeCapabilityIssueError::PublicPackage),
-        "private" => {
-            if has_membership(org_role) || has_membership(project_role) {
-                Ok(())
-            } else {
-                Err(EdgeCapabilityIssueError::ReadDenied)
-            }
-        }
-        _ => Err(EdgeCapabilityIssueError::UnsupportedVisibility),
+    if visibility == "public" {
+        return Err(EdgeCapabilityIssueError::PublicPackage);
+    }
+    if visibility != "private" {
+        return Err(EdgeCapabilityIssueError::UnsupportedVisibility);
+    }
+    if has_membership(org_role) || has_membership(project_role) {
+        Ok(())
+    } else {
+        Err(EdgeCapabilityIssueError::ReadDenied)
     }
 }
 
@@ -156,12 +156,12 @@ mod tests {
     }
 
     #[test]
-    fn github_resource_is_derived_from_registry_owned_repo_url() {
+    fn github_resource_is_derived_from_registry_owned_repo_url(
+    ) -> Result<(), EdgeCapabilityIssueError> {
         let grant = github_grant_for_package(
             "acme/private-lib",
             "https://github.com/acme/private-lib.git",
-        )
-        .unwrap();
+        )?;
         assert_eq!(grant.provider(), "github");
         assert_eq!(grant.package(), "acme/private-lib");
         assert_eq!(grant.resource(), "acme/private-lib");
@@ -175,10 +175,12 @@ mod tests {
             github_grant_for_package("acme/private-lib", "https://gitlab.com/acme/private-lib")
                 .is_err()
         );
+        Ok(())
     }
 
     #[test]
-    fn v2_capability_binds_lineage_resource_and_short_lifetime() {
+    fn v2_capability_binds_lineage_resource_and_short_lifetime(
+    ) -> Result<(), EdgeCapabilityIssueError> {
         let capability = build_github_capability_v2(
             "https://api.zpkg.net",
             &principal(),
@@ -187,8 +189,7 @@ mod tests {
             1_000,
             120,
             "capability-0001",
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(capability.zed_edge_capability, 2);
         assert_eq!(capability.aud, "zed-edge-fallback");
@@ -197,7 +198,11 @@ mod tests {
         assert_eq!(capability.iat, 1_000);
         assert_eq!(capability.nbf, 1_000);
         assert_eq!(capability.exp, 1_120);
-        assert_eq!(capability.grants[0].resource(), "acme/private-lib");
+        assert_eq!(
+            capability.grants.first().map(EdgeFallbackGrantV2::resource),
+            Some("acme/private-lib")
+        );
+        Ok(())
     }
 
     #[test]
