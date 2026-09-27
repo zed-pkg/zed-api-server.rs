@@ -165,7 +165,7 @@ jobs:
         with:
           shared-key: clippy
       - name: Test differential Clippy comparator
-        run: python3 tools/test_differential_clippy.py
+        run: cargo test --locked --bin ci-differential-clippy
       - name: Reject net-new Rust warnings from the committed lockfile
         shell: bash
         run: |
@@ -189,6 +189,6 @@ jobs:
             cargo clippy --workspace --all-targets --locked --message-format=json \
             > "$RUNNER_TEMP/clippy-head.json"
 
-          python3 tools/differential-clippy.py \
+          cargo run --quiet --locked --bin ci-differential-clippy -- \
             --base "$RUNNER_TEMP/clippy-base.json" \
             --head "$RUNNER_TEMP/clippy-head.json"
