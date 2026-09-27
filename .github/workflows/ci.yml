@@ -17,6 +17,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+  BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
   ZED_INTERFACES_SHA: 996fc56e20c4bb41366377be14edfae886b84e82
   ZED_LIB_CORE_SHA: c3d486a1519381276fbec02aa25247f542924443
 
@@ -133,6 +134,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.EXPECTED_HEAD }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Verify exact contributor head
         shell: bash
@@ -162,9 +164,31 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: clippy
-      - name: Deny every Rust warning from the committed lockfile
+      - name: Test differential Clippy comparator
+        run: cargo test --locked --bin ci-differential-clippy
+      - name: Reject net-new Rust warnings from the committed lockfile
         shell: bash
         run: |
-          set -o pipefail
-          cargo clippy --quiet --workspace --all-targets --locked -- -D warnings 2>&1 \
-            | tee "$RUNNER_TEMP/clippy.log"
+          set -euo pipefail
+          base_sha="$BASE_SHA"
+          if [[ ! "$base_sha" =~ ^[0-9a-f]{40}$ || "$base_sha" =~ ^0+$ ]]; then
+            base_sha="$(git rev-parse HEAD^)"
+          fi
+          git cat-file -e "${base_sha}^{commit}"
+          base_tree="$RUNNER_TEMP/clippy-base"
+          trap 'git worktree remove --force "$base_tree" >/dev/null 2>&1 || true' EXIT
+          git worktree add --detach "$base_tree" "$base_sha"
+
+          (
+            cd "$base_tree"
+            CARGO_TARGET_DIR="$RUNNER_TEMP/clippy-target-base" \
+              cargo clippy --workspace --all-targets --locked --message-format=json \
+              > "$RUNNER_TEMP/clippy-base.json"
+          )
+          CARGO_TARGET_DIR="$RUNNER_TEMP/clippy-target-head" \
+            cargo clippy --workspace --all-targets --locked --message-format=json \
+            > "$RUNNER_TEMP/clippy-head.json"
+
+          cargo run --quiet --locked --bin ci-differential-clippy -- \
+            --base "$RUNNER_TEMP/clippy-base.json" \
+            --head "$RUNNER_TEMP/clippy-head.json"
