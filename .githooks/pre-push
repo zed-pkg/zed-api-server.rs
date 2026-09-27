@@ -5,9 +5,12 @@ if [[ "${1:-}" == --install ]]; then chmod +x .githooks/pre-push; git config cor
 [[ -f .zpkg.toml ]] || exit 0
 command -v zed >/dev/null || { echo 'zed CLI is required' >&2; exit 1; }
 [[ -f .zpkg.lock ]] || { echo '.zpkg.lock is required; run zed install and commit it' >&2; exit 1; }
-zed validate --require-lock
+# Diagnostic ordering: resolve first so CI prints the exact lock repair rather
+# than failing before the resolver can materialize it. This temporary ordering
+# is reverted once the resolver-produced lock is committed.
 zed install
 if ! git diff --quiet -- .zpkg.lock; then echo 'Zed dependency lock is stale relative to newest versions allowed by .zpkg.toml.' >&2; git --no-pager diff -- .zpkg.lock >&2 || true; exit 1; fi
+zed validate --require-lock
 zed install --frozen
 zed build
 if [[ -f Cargo.toml ]]; then if [[ -f Cargo.lock ]]; then zed develop --no-install -c 'cargo check --locked --all-targets'; else zed develop --no-install -c 'cargo check --all-targets'; fi; fi
