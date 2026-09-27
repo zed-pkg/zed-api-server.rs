@@ -461,9 +461,7 @@ mod tests {
             rest: serde_json::Map::new(),
         };
         assert_eq!(
-            package_reader_from_introspection(&base)
-                .unwrap_err()
-                .code,
+            package_reader_from_introspection(&base).unwrap_err().code,
             "delegated_user_token_required"
         );
     }
