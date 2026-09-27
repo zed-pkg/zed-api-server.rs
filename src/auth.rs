@@ -19,6 +19,10 @@ const CUSTOMER_AUTH_REALM: &str = "customer";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountIdentity {
     pub session: SessionIdentity,
+    /// Shared Auth session id used only as signed/revocable lineage, never as a credential.
+    pub session_id: String,
+    /// Parent delegated-token id used to correlate revocation and downstream capabilities.
+    pub parent_jti: String,
 }
 
 /// Tokens are stored as sha256 hex; the plaintext is shown exactly once by
@@ -76,16 +80,18 @@ fn account_from_introspection(
     // base token and then mints a short-lived delegated product token. Its
     // protected introspection response exposes that provenance as `sid`, `azp`,
     // and `parent_jti`.
-    let session_id = optional_rest_string(introspection, "sid")?;
-    let authorized_party = optional_rest_string(introspection, "azp")?;
-    let parent_jti = optional_rest_string(introspection, "parent_jti")?;
-    if session_id.is_none() || authorized_party.is_none() || parent_jti.is_none() {
-        return Err(ApiErr::forbidden(
+    let delegated_required = || {
+        ApiErr::forbidden(
             "delegated_user_token_required",
             "this endpoint requires a session-backed delegated user token",
-        ));
-    }
-    if authorized_party.as_deref() != Some(expected_authorized_party) {
+        )
+    };
+    let session_id = optional_rest_string(introspection, "sid")?.ok_or_else(delegated_required)?;
+    let authorized_party =
+        optional_rest_string(introspection, "azp")?.ok_or_else(delegated_required)?;
+    let parent_jti =
+        optional_rest_string(introspection, "parent_jti")?.ok_or_else(delegated_required)?;
+    if authorized_party != expected_authorized_party {
         return Err(ApiErr::forbidden(
             "wrong_authorized_party",
             "the delegated token was not issued to the zed-pkg web client",
@@ -126,6 +132,8 @@ fn account_from_introspection(
             display_name: optional_rest_string(introspection, "display_name")?,
             avatar_url: optional_rest_string(introspection, "avatar_url")?,
         },
+        session_id,
+        parent_jti,
     })
 }
 
@@ -243,6 +251,8 @@ mod tests {
             identity.session.display_name.as_deref(),
             Some("Registry User")
         );
+        assert_eq!(identity.session_id, "session-1");
+        assert_eq!(identity.parent_jti, "parent-token-1");
     }
 
     #[test]
