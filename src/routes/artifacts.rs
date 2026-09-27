@@ -153,6 +153,7 @@ mod tests {
             latest_version: None,
             download_count: 0,
             version_count: 1,
+            updated_at: chrono::Utc::now().fixed_offset(),
         }
     }
 
