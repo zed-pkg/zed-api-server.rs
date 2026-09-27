@@ -18,7 +18,7 @@ ores-middleware = { git = "https://github.com/ORESoftware/ores-middleware", rev 
 # (zed-interfaces#64). The repository root remains a Cargo workspace, so git
 # consumers resolve its Rust package from the polyglot `src/rust` member without
 # a path override.
-zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "996fc56e20c4bb41366377be14edfae886b84e82" }
+zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "8a848740132ec6893079a3bc22efd786b6ae880e" }
 # Canonical account, registry projection, and migration data plane. The API is
 # the only long-running service that opts into write symbols; the discrete
 # `migrate` command is the only runtime path that invokes DDL.
