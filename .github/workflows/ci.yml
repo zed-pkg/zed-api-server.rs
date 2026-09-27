@@ -17,7 +17,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
-  ZED_INTERFACES_SHA: 996fc56e20c4bb41366377be14edfae886b84e82
+  ZED_INTERFACES_SHA: 8a848740132ec6893079a3bc22efd786b6ae880e
   ZED_LIB_CORE_SHA: c3d486a1519381276fbec02aa25247f542924443
 
 jobs:
