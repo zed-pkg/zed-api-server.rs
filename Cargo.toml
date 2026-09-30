@@ -1,6 +1,6 @@
 [package]
 name = "zed-api-server"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "zed-pkg registry REST API: Postgres metadata, S3/R2 artifacts"
 license = "MIT"
@@ -18,7 +18,7 @@ ores-middleware = { git = "https://github.com/ORESoftware/ores-middleware", rev 
 # (zed-interfaces#64). The repository root remains a Cargo workspace, so git
 # consumers resolve its Rust package from the polyglot `src/rust` member without
 # a path override.
-zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "996fc56e20c4bb41366377be14edfae886b84e82" }
+zed-interfaces = { git = "https://github.com/zed-pkg/zed-interfaces.git", rev = "b6ec4ad9926b9c8b36ce9a5eb9814f5ea56e8126" }
 # Canonical account, registry projection, and migration data plane. The API is
 # the only long-running service that opts into write symbols; the discrete
 # `migrate` command is the only runtime path that invokes DDL.
