@@ -57,18 +57,37 @@ fn delegates_argv(args: &[String]) -> bool {
     )
 }
 
+#[derive(Debug)]
+enum MainError {
+    Flags(String),
+    Server(String),
+}
+
+impl std::fmt::Display for MainError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Flags(message) => write!(formatter, "flag processing failed: {message}"),
+            Self::Server(message) => write!(formatter, "server failed: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for MainError {}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), MainError> {
     let args = std::env::args().collect::<Vec<_>>();
     if delegates_argv(&args) {
-        flags::process_environment_only().map_err(anyhow::Error::msg)?;
+        flags::process_environment_only().map_err(MainError::Flags)?;
     } else if let Some(output) =
-        flags::process_control(contract_command(&args)).map_err(anyhow::Error::msg)?
+        flags::process_control(contract_command(&args)).map_err(MainError::Flags)?
     {
         print!("{output}");
         return Ok(());
     }
-    server::run().await
+    server::run()
+        .await
+        .map_err(|error| MainError::Server(error.to_string()))
 }
 
 #[cfg(test)]
