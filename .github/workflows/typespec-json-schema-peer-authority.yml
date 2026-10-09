@@ -4,11 +4,23 @@ on:
   pull_request:
     paths:
       - "test/fixtures/schema-authority-canary/**"
+      - "contracts/toolchain/**"
+      - ".cli-flags.toml"
+      - ".zpkg.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/flags.rs"
       - ".github/workflows/typespec-json-schema-peer-authority.yml"
   push:
     branches: [main, dev]
     paths:
       - "test/fixtures/schema-authority-canary/**"
+      - "contracts/toolchain/**"
+      - ".cli-flags.toml"
+      - ".zpkg.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/flags.rs"
       - ".github/workflows/typespec-json-schema-peer-authority.yml"
   schedule:
     - cron: "37 5 * * 1"
@@ -41,7 +53,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
       - name: Generate Schema B and compare both peer authorities
-        uses: ORESoftware/typespec-json-schema-validator@5b04b08512f8a03a376dcb96818969e2d83c2d84
+        uses: ORESoftware/typespec-json-schema-validator@eb669d2c2c4f0800fac54f9b5a306b550121f1ac
         with:
           typespec: test/fixtures/schema-authority-canary/main.tsp
           schema: test/fixtures/schema-authority-canary/authored.schema.json
@@ -52,7 +64,7 @@ jobs:
 
       # This canary verifies gate admission, not unrelated product contracts.
       - name: Require current evidence and the canonical consumer-admission refusals
-        uses: ORESoftware/typespec-json-schema-validator/actions/test-consumer-admission@5b04b08512f8a03a376dcb96818969e2d83c2d84
+        uses: ORESoftware/typespec-json-schema-validator/actions/test-consumer-admission@eb669d2c2c4f0800fac54f9b5a306b550121f1ac
         with:
           contract_ir: .typespec-json-schema-validator/contract-ir.json
           report: .typespec-json-schema-validator/report.json
@@ -60,6 +72,30 @@ jobs:
           schema: test/fixtures/schema-authority-canary/authored.schema.json
           generated_schema: .typespec-json-schema-validator/generated/typespec.generated.schema.json
           expected_declarations: '["OreSchemaAuthority.AuthorityKind","OreSchemaAuthority.PeerAuthorityRegistration"]'
+
+      # Real registry API toolchain contract: this is not the two-type canary.
+      - name: Compare actual registry toolchain TypeSpec and Schema peers
+        uses: ORESoftware/typespec-json-schema-validator@eb669d2c2c4f0800fac54f9b5a306b550121f1ac
+        with:
+          typespec: contracts/toolchain/main.tsp
+          schema: contracts/toolchain/authored.schema.json
+          report: .typespec-json-schema-validator/toolchain/report.json
+          contract_ir: .typespec-json-schema-validator/toolchain/contract-ir.json
+          output_dir: .typespec-json-schema-validator/toolchain/generated
+          max_probes: "64"
+
+      - name: Require current toolchain Contract IR and refusal regressions
+        uses: ORESoftware/typespec-json-schema-validator/actions/test-consumer-admission@eb669d2c2c4f0800fac54f9b5a306b550121f1ac
+        with:
+          contract_ir: .typespec-json-schema-validator/toolchain/contract-ir.json
+          report: .typespec-json-schema-validator/toolchain/report.json
+          typespec: contracts/toolchain/main.tsp
+          schema: contracts/toolchain/authored.schema.json
+          generated_schema: .typespec-json-schema-validator/toolchain/generated/typespec.generated.schema.json
+          expected_declarations: '["Zed.Api.ZedApiToolchainContract"]'
+
+      - name: Preserve authored toolchain peers
+        run: git diff --exit-code -- contracts/toolchain/
 
       - name: Verify authored authorities were not modified
         shell: bash
