@@ -743,6 +743,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn guessable_aliases_reject_path_traversal_in_the_tag() {
+        let keys = guessable_alias_keys(
+            "acme",
+            "tool",
+            "1.0.0",
+            "../evil",
+            "tar.gz",
+            "https://github.com/acme/tool",
+        );
+        assert!(
+            !keys.iter().any(|key| key.contains("..") || key.contains("github/")),
+            "{keys:?}"
+        );
+        assert_eq!(
+            keys,
+            vec!["packages/acme/tool/1.0.0/tool-1.0.0.tar.gz".to_string()]
+        );
+    }
+
     #[tokio::test]
     async fn memory_store_roundtrips_without_disk() {
         let store = ArtifactStore::from_config(&StorageConfig::Memory { max_bytes: 64 })

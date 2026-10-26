@@ -17,14 +17,16 @@ env/dec/*
 !env/enc/*.env.enc
 !env/template.env.example
 
-# Nix devShell artifacts and local worktree scratch space.
+# Nix devShell artifacts.
 .direnv/
 result
 result-*
-tmp
-temp
-tmp/worktrees
-temp/worktrees
+
+# Sanctioned scratch locations - AGENTS.md requires both, trailing-slash form.
+# Directory-only rules also cover the authorized worktree roots
+# tmp/worktrees and temp/worktrees (legacy bare rules converted, DEN-3956).
+tmp/
+temp/
 
 /.zed/
 /.vendor/.zed/
