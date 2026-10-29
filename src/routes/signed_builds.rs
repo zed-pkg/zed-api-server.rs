@@ -9,15 +9,16 @@ use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use zed_interfaces::signed_build::SignedBuildV1;
 use zed_interfaces::signing::PublisherKeyStateV1;
 
 use crate::auth::require_token;
 use crate::error::{ApiErr, ApiResult};
 use crate::state::AppState;
-use crate::storage::artifact_key;
+use crate::entities::version;
 
-use super::{find_org, keys};
+use super::{find_org, find_package, keys};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,11 +71,23 @@ pub async fn verify_signed_build(
     let verified = crate::signing::verify_any(&preimage, &receipt.signatures, &eligible)
         .map_err(|_| ApiErr::bad_request("signed_build_signature_invalid", "no active enrolled key verifies build signature"))?;
 
+    // Bind package/version identity to a REGISTRY database row, not merely a
+    // matching content-addressed blob belonging to a different package.
+    let package = find_package(&state, &org_row, &claim.package).await?;
+    let row = version::Entity::find()
+        .filter(version::Column::PackageId.eq(package.id))
+        .filter(version::Column::Version.eq(&claim.version))
+        .one(&state.db).await?
+        .ok_or_else(|| ApiErr::bad_request("signed_build_version_missing", "signed build must refer to a published version"))?;
+    if row.sha256 != claim.artifact_sha256
+        || row.size != i64::try_from(claim.artifact_size).unwrap_or(-1)
+        || row.format != claim.artifact_format {
+        return Err(ApiErr::bad_request("signed_build_version_mismatch", "signed build does not match the published package version"));
+    }
+
     // Rehash the REAL stored bytes; never compare only client-provided hashes
-    // or blindly trust object-store metadata. The storage adapter enforces a
-    // hard 100MiB read cap and authenticated endpoint access.
-    let key = artifact_key(&claim.artifact_sha256, &claim.artifact_format);
-    let blob = state.store.get_bytes(&key).await
+    // or trust object-store metadata. The storage adapter limits the read.
+    let blob = state.store.get_bytes(&row.artifact_key).await
         .map_err(|_| ApiErr::bad_request("signed_build_artifact_missing", "artifact is not available in the registry store"))?;
     let actual_sha = hex::encode(Sha256::digest(&blob));
     if actual_sha != claim.artifact_sha256 || blob.len() as u64 != claim.artifact_size {
