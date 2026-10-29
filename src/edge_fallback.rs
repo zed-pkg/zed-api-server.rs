@@ -150,7 +150,7 @@ mod tests {
     #[test]
     fn package_reader_lineage_projects_into_edge_principal() {
         let reader = crate::auth::PackageReaderIdentity {
-            session: crate::auth::SessionIdentity {
+            session: zed_orm_core::models::SessionIdentity {
                 subject: "ad7c2010-c28a-4cad-a510-4c4020f93535".parse().unwrap(),
                 realm: "customer".to_owned(),
                 email: None,
