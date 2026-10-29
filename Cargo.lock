@@ -5446,7 +5446,7 @@ dependencies = [
 [[package]]
 name = "zed-interfaces"
 version = "0.1.1"
-source = "git+https://github.com/zed-pkg/zed-interfaces.git?rev=b6ec4ad9926b9c8b36ce9a5eb9814f5ea56e8126#b6ec4ad9926b9c8b36ce9a5eb9814f5ea56e8126"
+source = "git+https://github.com/zed-pkg/zed-interfaces.git?rev=9c255ad783df0eba9cf0caf22eada89493b767d3#9c255ad783df0eba9cf0caf22eada89493b767d3"
 dependencies = [
  "bs58",
  "hex",
