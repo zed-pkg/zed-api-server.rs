@@ -14,8 +14,8 @@ mod orgs;
 mod packages;
 mod publish;
 mod search;
-mod signed_builds;
 mod semantic;
+mod signed_builds;
 mod storage;
 mod yank;
 
@@ -154,7 +154,10 @@ pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
     // Real archive hashing is expensive. Bound this lane independently,
     // despite the small signed-receipt JSON request size.
     let signed_build_route = Router::new()
-        .route(ROUTE_SIGNED_BUILD_VERIFY, post(signed_builds::verify_signed_build))
+        .route(
+            ROUTE_SIGNED_BUILD_VERIFY,
+            post(signed_builds::verify_signed_build),
+        )
         .layer(tower::limit::ConcurrencyLimitLayer::new(2));
 
     let publish_route = Router::new()
