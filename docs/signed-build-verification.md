@@ -45,3 +45,18 @@ https://github.com/ores-truffle-oreslang/oreslang-api-server.ores/pull/1
 
 Zed contract:
 https://github.com/zed-pkg/zed-interfaces/pull/181
+
+
+## Optional fail-closed publication policy
+
+The service honors ZED_BUILD_PROVENANCE_POLICY:
+- unset or legacy: preserve existing publish behavior while signed-build
+  verifier is an optional audit endpoint;
+- required: reject every new publish with HTTP 503 until a trusted,
+  independently verified Oreslang API build receipt admission is integrated;
+- any other value: reject publish with HTTP 503, never silently downgrade.
+
+A valid signature from /signed-builds/verify is **not** sufficient to
+override required policy. The integration must also prove durable one-use
+challenge consumption, exact source/tree/toolchain identity, and actual
+compilation or independent verified rebuild, before enabling publish.
