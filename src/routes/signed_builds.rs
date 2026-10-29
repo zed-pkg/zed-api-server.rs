@@ -108,6 +108,48 @@ pub async fn verify_signed_build(
 mod tests {
     use super::*;
     #[test]
+    fn ed25519_signature_binds_artifact_digest_and_rejects_revoked_keys() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use zed_interfaces::signed_build::{BuildClaimsV1, SIGNED_BUILD_AUDIENCE_V1};
+        use zed_interfaces::signing::{
+            DetachedSignatureV1, PublisherKeyV1, PublisherKeyStateV1,
+            SIGNING_ALGORITHM, encode_multibase_base58btc,
+        };
+
+        let claims = BuildClaimsV1 {
+            audience: SIGNED_BUILD_AUDIENCE_V1.into(), org: "acme".into(),
+            package: "widget".into(), version: "1.2.3".into(),
+            challenge_id: "12345678-1234-1234-1234-123456789abc".into(),
+            nonce_sha256: "a".repeat(64), device_key_id: "device".into(),
+            source_commit: "b".repeat(40), source_sha256: "c".repeat(64),
+            toolchain_sha256: "d".repeat(64), target: "llvm".into(),
+            artifact_sha256: "e".repeat(64), artifact_size: 100,
+            artifact_format: "tar.gz".into(), issued_at_unix_ms: 1_799_999_880_000,
+            expires_at_unix_ms: 1_800_000_000_000,
+        };
+        let private = SigningKey::from_bytes(&[7_u8; 32]);
+        let key = PublisherKeyV1 {
+            key_id: "device".into(), algorithm: SIGNING_ALGORITHM.into(),
+            public_key_multibase: encode_multibase_base58btc(private.verifying_key().as_bytes()),
+            state: PublisherKeyStateV1::Active, enrolled_at: None, revoked_reason: None,
+        };
+        let preimage = claims.preimage().unwrap();
+        let signature = DetachedSignatureV1::new("device", &private.sign(&preimage).to_bytes());
+        assert!(crate::signing::verify_any(&preimage, &[signature.clone()], &[key.clone()]).is_ok());
+
+        let mut changed = claims.clone();
+        changed.artifact_sha256 = "f".repeat(64);
+        assert!(crate::signing::verify_any(
+            &changed.preimage().unwrap(), &[signature.clone()], &[key.clone()]
+        ).is_err());
+        let mut revoked = key;
+        revoked.state = PublisherKeyStateV1::Revoked;
+        let active: Vec<_> = [revoked].into_iter().filter(|candidate|
+            candidate.state == PublisherKeyStateV1::Active).collect();
+        assert!(crate::signing::verify_any(&preimage, &[signature], &active).is_err());
+    }
+
+    #[test]
     fn public_status_never_claims_compilation_or_release_approval() {
         let status = serde_json::to_value(VerifySignedBuildResponse {
             schema: "zpkg.signed-build-verification/1", signature_valid: true,
