@@ -5423,30 +5423,15 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "zed-interfaces 0.1.1",
+ "zed-interfaces",
  "zed-orm-core",
  "zip",
 ]
 
 [[package]]
 name = "zed-interfaces"
-version = "0.1.0"
-source = "git+https://github.com/zed-pkg/zed-interfaces.git?rev=7d31f80dd8a310f218931165a3ad636a2f32b932#7d31f80dd8a310f218931165a3ad636a2f32b932"
-dependencies = [
- "hex",
- "schemars",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror",
- "toml 1.1.4+spec-1.1.0",
-]
-
-[[package]]
-name = "zed-interfaces"
 version = "0.1.1"
-source = "git+https://github.com/zed-pkg/zed-interfaces.git?rev=b6ec4ad9926b9c8b36ce9a5eb9814f5ea56e8126#b6ec4ad9926b9c8b36ce9a5eb9814f5ea56e8126"
+source = "git+https://github.com/zed-pkg/zed-interfaces.git?rev=14bc5ce60324661cfe5ec5e6cdc6792c3108e55b#14bc5ce60324661cfe5ec5e6cdc6792c3108e55b"
 dependencies = [
  "bs58",
  "hex",
@@ -5462,13 +5447,13 @@ dependencies = [
 [[package]]
 name = "zed-orm-core"
 version = "0.1.0"
-source = "git+https://github.com/zed-pkg/zed-lib-core.git?rev=43b87769032c993f424e89825ad22abe980f4652#43b87769032c993f424e89825ad22abe980f4652"
+source = "git+https://github.com/zed-pkg/zed-lib-core.git?rev=32988107ffecb942e0d0ce39de23b4a560139206#32988107ffecb942e0d0ce39de23b4a560139206"
 dependencies = [
  "chrono",
  "sea-orm",
  "serde_json",
  "uuid",
- "zed-interfaces 0.1.0",
+ "zed-interfaces",
 ]
 
 [[package]]

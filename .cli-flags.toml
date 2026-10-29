@@ -7,6 +7,7 @@ allow_unknown = false
 
 [env]
 load = false
+dotenv = false
 files = []
 ignore = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "DATABASE_URL", "FIDUCIA_INTERNAL_SECRET", "GITHUB_TOKEN", "ORES_RL_HMAC_KEY", "REDIS_URL", "SHARED_AUTH_SERVICE_CREDENTIAL"]
 
@@ -257,3 +258,11 @@ aliases = ["graph-serve-memory-budget-bytes"]
 type = "integer"
 default = 268435456
 help = "Memory budget for concurrent dependency-graph encodes."
+
+
+[flags.build-provenance-policy]
+env = "ZED_BUILD_PROVENANCE_POLICY"
+aliases = ["build-provenance-policy"]
+type = "string"
+default = "legacy"
+help = "legacy preserves existing publishes; required denies until trusted build admission is available."

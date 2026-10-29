@@ -56,8 +56,8 @@ env:
   # that tag always identifies the complete source graph used by the build.
   # Keep these synchronized with the Rust CI pins; source-graph drift previously
   # made the debug test build pass while the release container could not compile.
-  ZED_INTERFACES_SHA: b6ec4ad9926b9c8b36ce9a5eb9814f5ea56e8126
-  ZED_LIB_CORE_SHA: 43b87769032c993f424e89825ad22abe980f4652
+  ZED_INTERFACES_SHA: 14bc5ce60324661cfe5ec5e6cdc6792c3108e55b
+  ZED_LIB_CORE_SHA: 32988107ffecb942e0d0ce39de23b4a560139206
 
 jobs:
   image:

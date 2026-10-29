@@ -60,6 +60,27 @@ pub async fn publish(
         org_row.id,
     )?;
 
+    // A deployment that requires independently verified compilation must
+    // refuse *all* new publication until Oreslang's authoritative durable
+    // one-use challenge and release receipt verification are integrated.
+    // A locally signed self-report is NOT sufficient to satisfy this gate.
+    // In legacy mode, preserve existing registry behavior for compatibility.
+    match crate::flags::var("ZED_BUILD_PROVENANCE_POLICY").as_deref() {
+        Err(_) | Ok("legacy") => {}
+        Ok("required") => {
+            return Err(ApiErr::service_unavailable(
+                "verified_build_admission_unavailable",
+                "verified-build policy enabled but trusted Oreslang challenge admission is not configured",
+            ));
+        }
+        _ => {
+            return Err(ApiErr::service_unavailable(
+                "invalid_build_provenance_policy",
+                "invalid build provenance policy; expected legacy or required",
+            ));
+        }
+    }
+
     let (meta, artifact) = read_multipart(&mut multipart).await?;
 
     meta.manifest

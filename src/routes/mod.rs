@@ -15,6 +15,7 @@ mod packages;
 mod publish;
 mod search;
 mod semantic;
+mod signed_builds;
 mod storage;
 mod yank;
 
@@ -50,6 +51,8 @@ pub const ROUTE_MIRRORS: &str = "/v1/mirrors";
 pub const ROUTE_MIRROR_BOOTSTRAP: &str = zed_interfaces::mirror::MIRROR_BOOTSTRAP_PATH;
 /// A package's version index in the shape a mirror serves it.
 pub const ROUTE_SIGNED_INDEX: &str = "/v1/packages/{org}/{name}/signed-index";
+/// Verify signature attribution and registry-stored bytes, NOT compilation.
+pub const ROUTE_SIGNED_BUILD_VERIFY: &str = "/v1/orgs/{org}/signed-builds/verify";
 pub const ROUTE_AUDIT: &str = "/v1/orgs/{org}/audit";
 pub const ROUTE_AUDIT_VERIFY: &str = "/v1/orgs/{org}/audit/verify";
 pub const ROUTE_FILES: &str = "/v1/files/{org}/{name}/{version}/{*path}";
@@ -148,6 +151,15 @@ pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
             max_buffered_artifact_bytes: crate::storage::MAX_BUFFERED_ARTIFACT_BYTES,
         }));
 
+    // Real archive hashing is expensive. Bound this lane independently,
+    // despite the small signed-receipt JSON request size.
+    let signed_build_route = Router::new()
+        .route(
+            ROUTE_SIGNED_BUILD_VERIFY,
+            post(signed_builds::verify_signed_build),
+        )
+        .layer(tower::limit::ConcurrencyLimitLayer::new(2));
+
     let publish_route = Router::new()
         .route(
             ROUTE_VERSION,
@@ -179,6 +191,7 @@ pub fn router(state: Arc<AppState>, max_artifact_bytes: usize) -> Router {
         .merge(artifact_routes)
         .merge(graph_routes)
         .merge(storage_routes)
+        .merge(signed_build_route)
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT))
         .merge(publish_route)
         // Charge authenticated requests against their token's bucket before
